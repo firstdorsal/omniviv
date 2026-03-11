@@ -184,6 +184,26 @@ jobs:
                   fi
                   echo "Version verified: $TAG_VERSION"
 
+    test-frontend-pr:
+        runs-on: ubuntu-latest
+        if: github.event_name == 'pull_request'
+        steps:
+            - uses: actions/checkout@v4
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 10
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: "23"
+                  cache: pnpm
+                  cache-dependency-path: web/pnpm-lock.yaml
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+              working-directory: web
+            - name: Run tests
+              run: pnpm test
+              working-directory: web
+
     build-api-pr:
         runs-on: ubuntu-latest
         if: github.event_name == 'pull_request'
