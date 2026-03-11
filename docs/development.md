@@ -17,7 +17,7 @@ omniviv/
 │   │   ├── sync/          # Background synchronization
 │   │   ├── config.rs      # Configuration
 │   │   └── main.rs        # Entry point
-│   ├── migrations/        # SQLite migrations
+│   ├── migrations/        # PostgreSQL migrations
 │   ├── config.yaml        # Default config
 │   ├── Cargo.toml
 │   └── Dockerfile
@@ -137,7 +137,12 @@ This updates the TypeScript client in the frontend based on the OpenAPI spec.
 
 ## Database
 
-SQLite database is created automatically at `api/database/data.db`.
+The API uses PostgreSQL as its database, managed via SQLx migrations. The database is provisioned automatically by the docker-compose setup.
+
+The `DATABASE_URL` environment variable must point to a running PostgreSQL instance:
+```
+DATABASE_URL=postgresql://user:password@localhost:5432/omniviv
+```
 
 ### Migrations
 
@@ -152,9 +157,15 @@ Edit the generated file in `api/migrations/`.
 
 ### Reset Database
 
-Delete the database file and restart the API:
+Drop and recreate the PostgreSQL database, then restart the API:
 ```bash
-rm api/database/data.db
+# Via docker-compose
+docker compose down -v  # removes the postgres volume
+docker compose up -d
+
+# Or manually
+psql -U postgres -c "DROP DATABASE omniviv;"
+psql -U postgres -c "CREATE DATABASE omniviv;"
 cargo run
 ```
 
@@ -241,8 +252,8 @@ RUST_LOG=omniviv_api::sync=debug cargo run
 ### API client out of sync
 Run `./generate-api.sh` in the api directory after changing endpoints.
 
-### Database locked
-Only one API instance can access the SQLite database. Stop other instances.
+### Database connection issues
+Ensure PostgreSQL is running and the `DATABASE_URL` environment variable is set correctly. Check that the PostgreSQL container is healthy with `docker compose ps`.
 
 ### CORS errors
 Ensure `cors_permissive: true` in `api/config.yaml` for development.

@@ -24,6 +24,7 @@ A real-time public transport visualization platform.
 
 -   **Collision avoidance**: Basic implementation exists but not fully reliable
 -   **Rendezvous blinking**: Flashes green when trams are about to depart (timing may need tuning)
+-   **Offline departure boards**: GTFS bundle download and client-side departure computation (API and IndexedDB storage implemented, UI integration pending)
 
 ### Planned / Not Yet Implemented
 
@@ -34,7 +35,7 @@ A real-time public transport visualization platform.
 -   3D terrain with underground tunnel visualization
 -   Day/night cycle and weather visualization
 -   Navigation routing between points
--   Offline map with cached planned timetables
+-   Offline map tiles
 -   Pin stations to sidebar for quick access
 -   "Leave now" traffic light indicator for optimal departure timing
 -   First-person driver's seat view for vehicles
