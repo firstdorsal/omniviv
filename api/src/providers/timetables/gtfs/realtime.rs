@@ -124,8 +124,15 @@ pub fn process_trip_updates(
             .and_then(|r| r.route_short_name.clone())
             .unwrap_or_default();
 
-        let headsign = trip.trip_headsign.clone().unwrap_or_default();
         let last_stop = schedule.last_stop_of_trip(trip_id);
+        // Use trip headsign, falling back to last stop name if headsign is empty
+        let headsign = trip
+            .trip_headsign
+            .as_ref()
+            .filter(|h| !h.is_empty())
+            .cloned()
+            .or_else(|| schedule.last_stop_name_of_trip(trip_id))
+            .unwrap_or_default();
 
         // Determine service date from trip descriptor or today
         let service_date = trip_update
@@ -381,8 +388,15 @@ fn add_scheduled_departures(
             .and_then(|r| r.route_short_name.clone())
             .unwrap_or_default();
 
-        let headsign = trip.trip_headsign.clone().unwrap_or_default();
         let last_stop = schedule.last_stop_of_trip(trip_id);
+        // Use trip headsign, falling back to last stop name if headsign is empty
+        let headsign = trip
+            .trip_headsign
+            .as_ref()
+            .filter(|h| !h.is_empty())
+            .cloned()
+            .or_else(|| schedule.last_stop_name_of_trip(trip_id))
+            .unwrap_or_default();
 
         for st in stop_times {
             // Check if this stop is relevant using the mapping
@@ -1182,5 +1196,251 @@ mod tests {
         // 08:00 Berlin is well outside 12:00-12:30 Berlin window
         let total: usize = result.values().map(|v| v.len()).sum();
         assert_eq!(total, 0);
+    }
+
+    /// Helper to build a schedule where the trip has no headsign (empty string or None)
+    fn make_test_schedule_no_headsign() -> super::super::static_data::GtfsSchedule {
+        use super::super::static_data::*;
+
+        let mut stops = HashMap::new();
+        stops.insert(
+            "stop_A".to_string(),
+            GtfsStop {
+                stop_id: "stop_A".to_string(),
+                stop_name: Some("First Station".to_string()),
+                parent_station: None,
+                lat: Some(48.37),
+                lon: Some(10.89),
+            },
+        );
+        stops.insert(
+            "stop_B".to_string(),
+            GtfsStop {
+                stop_id: "stop_B".to_string(),
+                stop_name: Some("Final Destination".to_string()),
+                parent_station: None,
+                lat: Some(48.38),
+                lon: Some(10.90),
+            },
+        );
+
+        let mut routes = HashMap::new();
+        routes.insert(
+            "route_1".to_string(),
+            GtfsRoute {
+                route_id: "route_1".to_string(),
+                route_short_name: Some("4".to_string()),
+                route_long_name: Some("Line 4".to_string()),
+                route_type: Some(0),
+            },
+        );
+
+        let mut trips = HashMap::new();
+        // Trip with NO headsign - should fall back to last stop name
+        trips.insert(
+            "trip_no_headsign".to_string(),
+            GtfsTrip {
+                trip_id: "trip_no_headsign".to_string(),
+                route_id: "route_1".to_string(),
+                service_id: "weekday".to_string(),
+                trip_headsign: None, // No headsign!
+                direction_id: Some(0),
+            },
+        );
+        // Trip with empty headsign - should also fall back
+        trips.insert(
+            "trip_empty_headsign".to_string(),
+            GtfsTrip {
+                trip_id: "trip_empty_headsign".to_string(),
+                route_id: "route_1".to_string(),
+                service_id: "weekday".to_string(),
+                trip_headsign: Some("".to_string()), // Empty headsign!
+                direction_id: Some(0),
+            },
+        );
+
+        let mut stop_times = HashMap::new();
+        // Trip departs stop_A at 08:00, arrives stop_B at 08:15
+        stop_times.insert(
+            "trip_no_headsign".to_string(),
+            vec![
+                GtfsStopTime {
+                    stop_sequence: 1,
+                    stop_id: "stop_A".to_string(),
+                    arrival_time: Some(28800),
+                    departure_time: Some(28800),
+                },
+                GtfsStopTime {
+                    stop_sequence: 2,
+                    stop_id: "stop_B".to_string(),
+                    arrival_time: Some(29700),
+                    departure_time: Some(29700),
+                },
+            ],
+        );
+        stop_times.insert(
+            "trip_empty_headsign".to_string(),
+            vec![
+                GtfsStopTime {
+                    stop_sequence: 1,
+                    stop_id: "stop_A".to_string(),
+                    arrival_time: Some(32400), // 09:00
+                    departure_time: Some(32400),
+                },
+                GtfsStopTime {
+                    stop_sequence: 2,
+                    stop_id: "stop_B".to_string(),
+                    arrival_time: Some(33300), // 09:15
+                    departure_time: Some(33300),
+                },
+            ],
+        );
+
+        let mut calendars = HashMap::new();
+        calendars.insert(
+            "weekday".to_string(),
+            GtfsCalendar {
+                service_id: "weekday".to_string(),
+                days: [true, true, true, true, true, false, false],
+                start_date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2026, 12, 31).unwrap(),
+            },
+        );
+
+        let mut trips_by_stop: HashMap<String, HashSet<String>> = HashMap::new();
+        trips_by_stop
+            .entry("stop_A".to_string())
+            .or_default()
+            .insert("trip_no_headsign".to_string());
+        trips_by_stop
+            .entry("stop_A".to_string())
+            .or_default()
+            .insert("trip_empty_headsign".to_string());
+        trips_by_stop
+            .entry("stop_B".to_string())
+            .or_default()
+            .insert("trip_no_headsign".to_string());
+        trips_by_stop
+            .entry("stop_B".to_string())
+            .or_default()
+            .insert("trip_empty_headsign".to_string());
+
+        GtfsSchedule {
+            stops,
+            routes,
+            trips,
+            stop_times,
+            calendars,
+            calendar_dates: HashMap::new(),
+            trips_by_stop,
+            ifopt_to_gtfs: HashMap::new(),
+            gtfs_to_ifopt: HashMap::new(),
+            loaded_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_destination_falls_back_to_last_stop_when_headsign_missing() {
+        let schedule = make_test_schedule_no_headsign();
+        let mut relevant = HashSet::new();
+        relevant.insert("stop_A".to_string());
+
+        // Monday 2026-02-02 at 07:00 UTC = 08:00 Berlin (CET)
+        let ref_time = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let result = compute_schedule_departures(
+            &schedule,
+            &relevant,
+            ref_time,
+            Duration::minutes(180), // 3 hour horizon to catch both trips
+            Berlin,
+        );
+
+        // Check departures at stop_A
+        let departures = result.get("stop_A").expect("Should have departures for stop_A");
+
+        // Find the departure for trip_no_headsign
+        let dep_no_headsign = departures
+            .iter()
+            .find(|d| d.trip_id.as_deref() == Some("trip_no_headsign"))
+            .expect("Should find departure for trip_no_headsign");
+
+        // Destination should be the last stop name "Final Destination"
+        assert_eq!(
+            dep_no_headsign.destination, "Final Destination",
+            "When headsign is None, destination should fall back to last stop name"
+        );
+
+        // Find the departure for trip_empty_headsign
+        let dep_empty_headsign = departures
+            .iter()
+            .find(|d| d.trip_id.as_deref() == Some("trip_empty_headsign"))
+            .expect("Should find departure for trip_empty_headsign");
+
+        // Destination should also be the last stop name "Final Destination"
+        assert_eq!(
+            dep_empty_headsign.destination, "Final Destination",
+            "When headsign is empty string, destination should fall back to last stop name"
+        );
+    }
+
+    #[test]
+    fn test_compute_schedule_departures_emits_arrival_and_departure_events() {
+        let schedule = make_test_schedule();
+        let mut relevant = HashSet::new();
+        relevant.insert("stop_A".to_string());
+        relevant.insert("stop_B".to_string());
+
+        // Monday 2026-02-02 08:00 Berlin (CET) = 07:00 UTC
+        let ref_time = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let result = compute_schedule_departures(
+            &schedule,
+            &relevant,
+            ref_time,
+            Duration::minutes(120),
+            Berlin,
+        );
+
+        // Collect all events across all stops
+        let all_events: Vec<&Departure> = result.values().flatten().collect();
+        assert!(!all_events.is_empty(), "Should have schedule departures");
+
+        let has_arrival = all_events.iter().any(|d| d.event_type == EventType::Arrival);
+        let has_departure = all_events.iter().any(|d| d.event_type == EventType::Departure);
+
+        assert!(
+            has_arrival,
+            "compute_schedule_departures should emit Arrival events"
+        );
+        assert!(
+            has_departure,
+            "compute_schedule_departures should emit Departure events"
+        );
+
+        // Verify that stop_A has both event types
+        // (stop_A has both arrival_time and departure_time in the test schedule)
+        let stop_a_events = result.get("stop_A").expect("stop_A should have events");
+        let stop_a_arrivals: Vec<_> = stop_a_events
+            .iter()
+            .filter(|d| d.event_type == EventType::Arrival)
+            .collect();
+        let stop_a_departures: Vec<_> = stop_a_events
+            .iter()
+            .filter(|d| d.event_type == EventType::Departure)
+            .collect();
+
+        assert!(
+            !stop_a_arrivals.is_empty(),
+            "stop_A should have at least one Arrival event"
+        );
+        assert!(
+            !stop_a_departures.is_empty(),
+            "stop_A should have at least one Departure event"
+        );
     }
 }

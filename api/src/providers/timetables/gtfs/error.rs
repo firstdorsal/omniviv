@@ -18,6 +18,8 @@ pub enum GtfsError {
     ProtobufError(#[from] prost::DecodeError),
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] sqlx::Error),
     #[error("Task join error: {0}")]
     JoinError(#[from] tokio::task::JoinError),
     #[error("Schedule not loaded")]

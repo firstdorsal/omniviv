@@ -7,8 +7,11 @@ use std::time::Duration;
 const OVERPASS_API_URL: &str = "https://overpass.kumi.systems/api/interpreter";
 
 // Retry configuration
-const MAX_RETRIES: u32 = 3;
-const INITIAL_RETRY_DELAY_SECS: u64 = 5;
+const MAX_RETRIES: u32 = 5;
+const INITIAL_RETRY_DELAY_SECS: u64 = 10;
+
+// Delay between sequential queries to avoid rate limiting
+const INTER_QUERY_DELAY_SECS: u64 = 5;
 
 #[derive(Debug, Clone)]
 pub struct OsmClient {
@@ -38,19 +41,19 @@ impl OsmClient {
         let stations = self.fetch_stations(bounding_box, &transport_types).await?;
         tracing::info!(count = stations.len(), "Fetched stations");
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(INTER_QUERY_DELAY_SECS)).await;
 
         tracing::info!("Fetching platforms...");
         let platforms = self.fetch_platforms(bounding_box, &transport_types).await?;
         tracing::info!(count = platforms.len(), "Fetched platforms");
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(INTER_QUERY_DELAY_SECS)).await;
 
         tracing::info!("Fetching stop positions...");
         let stop_positions = self.fetch_stop_positions(bounding_box, &transport_types).await?;
         tracing::info!(count = stop_positions.len(), "Fetched stop positions");
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(INTER_QUERY_DELAY_SECS)).await;
 
         tracing::info!("Fetching routes...");
         let routes = self.fetch_routes(bounding_box, &transport_types).await?;
@@ -284,8 +287,7 @@ out skel qt;"#,
         let response = self
             .client
             .post(OVERPASS_API_URL)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(query.to_string())
+            .form(&[("data", query)])
             .send()
             .await
             .map_err(|e| {
@@ -312,6 +314,18 @@ out skel qt;"#,
                 status,
                 text.chars().take(200).collect::<String>()
             )));
+        }
+
+        // Overpass API sometimes returns HTTP 200 with an XML/HTML error page
+        // (e.g. rate limiting, server overload, query timeout).
+        // Detect this by checking if the response starts with XML/HTML instead of JSON.
+        let trimmed = text.trim_start();
+        if trimmed.starts_with("<?xml") || trimmed.starts_with("<!DOCTYPE") || trimmed.starts_with("<html") {
+            let preview: String = text.chars().take(1500).collect();
+            tracing::warn!(body_preview = %preview, "Overpass API returned HTML/XML error page with HTTP 200");
+            return Err(OsmError::RetryableError(
+                "Overpass API returned HTML/XML error page (likely rate limited or overloaded)".to_string(),
+            ));
         }
 
         Ok(text)

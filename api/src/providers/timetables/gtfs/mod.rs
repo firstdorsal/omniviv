@@ -1,35 +1,33 @@
 //! GTFS-based timetable provider.
 //!
-//! Downloads and caches a static GTFS schedule (ZIP), polls a GTFS-RT protobuf
-//! feed for real-time trip updates, and produces `Departure` structs keyed by
-//! IFOPT stop identifiers.
+//! Downloads and caches a static GTFS schedule (ZIP), loads it into PostgreSQL,
+//! polls a GTFS-RT protobuf feed for real-time trip updates, and produces
+//! `Departure` structs keyed by IFOPT stop identifiers.
 
 pub mod error;
 pub mod realtime;
 pub mod static_data;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use chrono::{Duration, Utc};
-use tokio::sync::RwLock;
+use sqlx::PgPool;
 use tracing::info;
 
 use crate::config::GtfsSyncConfig;
 use crate::sync::Departure;
 
 use error::GtfsError;
-use static_data::GtfsSchedule;
 
 pub struct GtfsProvider {
     client: reqwest::Client,
     config: GtfsSyncConfig,
     timezone: chrono_tz::Tz,
-    schedule: Arc<RwLock<Option<GtfsSchedule>>>,
+    pool: PgPool,
 }
 
 impl GtfsProvider {
-    pub fn new(config: GtfsSyncConfig) -> Result<Self, GtfsError> {
+    pub fn new(config: GtfsSyncConfig, pool: PgPool) -> Result<Self, GtfsError> {
         let client = reqwest::Client::builder()
             .user_agent("omniviv/0.2 (https://github.com/firstdorsal/omniviv)")
             .build()?;
@@ -39,45 +37,48 @@ impl GtfsProvider {
             client,
             config,
             timezone,
-            schedule: Arc::new(RwLock::new(None)),
+            pool,
         })
     }
 
-    /// Download (if needed) and load the static GTFS schedule into memory.
+    /// Download (if needed) and load the static GTFS schedule into PostgreSQL.
+    ///
+    /// Skips database loading if the feed hasn't changed (HTTP 304) and data
+    /// is already present in the database. This avoids the ~12 minute reload
+    /// of 31.5M stop_times on every restart during development.
     pub async fn refresh_static_schedule(&self) -> Result<(), GtfsError> {
         info!("Refreshing static GTFS schedule...");
 
-        let zip_path = static_data::download_feed(
+        let result = static_data::download_feed(
             &self.client,
             &self.config.static_feed_url,
             &self.config.cache_dir,
         )
         .await?;
 
-        let path = zip_path.clone();
-        let schedule = tokio::task::spawn_blocking(move || static_data::load_schedule(&path))
-            .await??;
+        if !result.was_updated && self.is_schedule_loaded().await {
+            info!("GTFS feed unchanged and database already populated, skipping reload");
+            return Ok(());
+        }
 
-        info!(
-            stops = schedule.stops.len(),
-            routes = schedule.routes.len(),
-            trips = schedule.trips.len(),
-            "Loaded static GTFS schedule into memory"
-        );
-
-        let mut guard = self.schedule.write().await;
-        *guard = Some(schedule);
+        // Load into PostgreSQL for persistence and query access
+        static_data::load_schedule_to_db(&self.pool, &result.zip_path).await?;
+        info!("GTFS schedule loaded into PostgreSQL");
 
         Ok(())
     }
 
     /// Fetch GTFS-RT and produce departures for all relevant stops.
+    ///
+    /// Builds a partial schedule from PostgreSQL containing only data relevant
+    /// to the monitored stops, then processes the RT feed against it.
     pub async fn fetch_departures(
         &self,
         relevant_stop_ids: &HashSet<String>,
     ) -> Result<HashMap<String, Vec<Departure>>, GtfsError> {
-        let schedule_guard = self.schedule.read().await;
-        let schedule = schedule_guard.as_ref().ok_or(GtfsError::ScheduleNotLoaded)?;
+        // Build a lightweight schedule from PG for just the monitored stops
+        let schedule =
+            static_data::build_schedule_from_db(&self.pool, relevant_stop_ids).await?;
 
         let feed = realtime::fetch_feed(&self.client, &self.config.realtime_feed_url).await?;
 
@@ -86,7 +87,7 @@ impl GtfsProvider {
 
         let departures = realtime::process_trip_updates(
             &feed,
-            schedule,
+            &schedule,
             relevant_stop_ids,
             now,
             time_horizon,
@@ -96,14 +97,18 @@ impl GtfsProvider {
         Ok(departures)
     }
 
-    /// Check if the static schedule has been loaded.
+    /// Check if the GTFS schedule has been loaded into PostgreSQL.
     pub async fn is_schedule_loaded(&self) -> bool {
-        self.schedule.read().await.is_some()
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM gtfs_feed_meta WHERE id = 1")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0)
+            > 0
     }
 
-    /// Get a shared reference to the schedule for use by API handlers.
-    pub fn schedule(&self) -> Arc<RwLock<Option<GtfsSchedule>>> {
-        self.schedule.clone()
+    /// Get a reference to the database pool.
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     /// Get the configured timezone.

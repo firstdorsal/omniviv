@@ -6,7 +6,6 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use utoipa::ToSchema;
 
-
 /// Type of stop event
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -45,9 +44,6 @@ impl Departure {
 
 /// In-memory store for departure data
 pub type DepartureStore = Arc<RwLock<HashMap<String, Vec<Departure>>>>;
-
-/// Shared reference to the GTFS schedule for computing departures at arbitrary times
-pub type ScheduleStore = Arc<RwLock<Option<crate::providers::timetables::gtfs::static_data::GtfsSchedule>>>;
 
 /// Update notification for vehicle data changes
 #[derive(Debug, Clone, Serialize)]

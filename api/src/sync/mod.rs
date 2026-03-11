@@ -9,14 +9,18 @@ mod issues;
 mod types;
 
 // Re-export types for API compatibility
-pub use issues::{determine_transport_type, transport_type_from_route, OsmIssue, OsmIssueStore, OsmIssueType};
-pub use types::{Departure, DepartureStore, EventType, ScheduleStore, VehicleUpdate, VehicleUpdateSender};
+pub use issues::{
+    determine_transport_type, transport_type_from_route, IssueCategory, MatchCandidate, OsmIssue,
+    OsmIssueStore, OsmIssueType,
+};
+pub use types::{Departure, DepartureStore, EventType, VehicleUpdate, VehicleUpdateSender};
 
 use crate::config::{Area, Config, TransportType};
 use crate::providers::osm::{OsmClient, OsmElement, OsmRoute};
+use crate::providers::timetables::gtfs::static_data::OsmStopInfo;
 use crate::providers::timetables::gtfs::GtfsProvider;
 use chrono::Utc;
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
@@ -24,7 +28,7 @@ use tracing::{error, info, warn};
 
 /// Manages background synchronization of OSM and GTFS data
 pub struct SyncManager {
-    pool: SqlitePool,
+    pool: PgPool,
     osm_client: OsmClient,
     gtfs_provider: GtfsProvider,
     config: Arc<RwLock<Config>>,
@@ -35,10 +39,10 @@ pub struct SyncManager {
 }
 
 impl SyncManager {
-    pub fn new(pool: SqlitePool, config: Config) -> Result<Self, SyncError> {
+    pub fn new(pool: PgPool, config: Config) -> Result<Self, SyncError> {
         let osm_client = OsmClient::new().map_err(|e| SyncError::OsmError(e.to_string()))?;
 
-        let gtfs_provider = GtfsProvider::new(config.gtfs_sync.clone())?;
+        let gtfs_provider = GtfsProvider::new(config.gtfs_sync.clone(), pool.clone())?;
 
         let time_horizon_minutes = config.gtfs_sync.time_horizon_minutes;
 
@@ -65,11 +69,6 @@ impl SyncManager {
     /// Get a reference to the OSM issue store for API access
     pub fn issue_store(&self) -> OsmIssueStore {
         self.issues.clone()
-    }
-
-    /// Get a reference to the GTFS schedule for API access (time simulation queries)
-    pub fn schedule_store(&self) -> ScheduleStore {
-        self.gtfs_provider.schedule()
     }
 
     /// Get the departure time horizon in minutes
@@ -120,13 +119,20 @@ impl SyncManager {
         let _ = tokio::join!(osm_handle, gtfs_handle);
     }
 
-    /// Load all stop IFOPTs with coordinates from the database for GTFS mapping
-    async fn load_stop_coords(&self) -> Vec<(String, f64, f64)> {
-        let rows: Vec<(String, f64, f64)> = match sqlx::query_as(
+    /// Load all stop IFOPTs with names and coordinates from the database for GTFS mapping.
+    /// Prioritizes platforms over stop_positions since platforms represent the passenger
+    /// waiting area and are more authoritative for departure display.
+    async fn load_stop_info(&self) -> Vec<OsmStopInfo> {
+        // First, get all platforms (preferred source)
+        // Then, only add stop_positions for IFOPTs that don't have a platform
+        let rows: Vec<(String, Option<String>, f64, f64)> = match sqlx::query_as(
             r#"
-            SELECT ref_ifopt, lat, lon FROM platforms WHERE ref_ifopt IS NOT NULL
+            SELECT ref_ifopt, name, lat, lon FROM platforms WHERE ref_ifopt IS NOT NULL
             UNION
-            SELECT ref_ifopt, lat, lon FROM stop_positions WHERE ref_ifopt IS NOT NULL
+            SELECT sp.ref_ifopt, sp.name, sp.lat, sp.lon
+            FROM stop_positions sp
+            WHERE sp.ref_ifopt IS NOT NULL
+            AND sp.ref_ifopt NOT IN (SELECT ref_ifopt FROM platforms WHERE ref_ifopt IS NOT NULL)
             "#,
         )
         .fetch_all(&self.pool)
@@ -134,27 +140,152 @@ impl SyncManager {
         {
             Ok(rows) => rows,
             Err(e) => {
-                error!(error = %e, "Failed to fetch stop coordinates for GTFS mapping");
+                error!(error = %e, "Failed to fetch stop info for GTFS mapping");
                 Vec::new()
             }
         };
 
-        rows
+        rows.into_iter()
+            .map(|(ifopt, name, lat, lon)| OsmStopInfo {
+                ifopt,
+                name,
+                lat,
+                lon,
+            })
+            .collect()
     }
 
-    /// Build the IFOPT <-> GTFS stop ID mapping after schedule load
+    /// Build the IFOPT <-> GTFS stop ID mapping after schedule load.
+    ///
+    /// Stores the mapping in PostgreSQL via `build_ifopt_mapping_to_db`, then
+    /// also populates the in-memory schedule's mapping for realtime processing.
     async fn build_gtfs_mapping(&self) {
-        let db_stops = self.load_stop_coords().await;
-        if db_stops.is_empty() {
-            warn!("No stop coordinates in DB, skipping GTFS mapping");
+        use crate::providers::timetables::gtfs::static_data;
+
+        let osm_stops = self.load_stop_info().await;
+        if osm_stops.is_empty() {
+            warn!("No stop info in DB, skipping GTFS mapping");
+            let mut issues = self.issues.write().await;
+            issues.push(OsmIssue::data_processing_issue(
+                OsmIssueType::GtfsLoadFailed,
+                "No stop coordinates found in database, cannot map GTFS to OSM".to_string(),
+                None,
+            ));
             return;
         }
 
-        let schedule_store = self.gtfs_provider.schedule();
-        let mut guard = schedule_store.write().await;
-        if let Some(schedule) = guard.as_mut() {
-            schedule.build_ifopt_mapping(&db_stops, 200.0);
+        // Build mapping and store in PostgreSQL
+        let stats = match static_data::build_ifopt_mapping_to_db(
+            self.gtfs_provider.pool(),
+            &osm_stops,
+        )
+        .await
+        {
+            Ok(stats) => stats,
+            Err(e) => {
+                error!(error = %e, "Failed to build GTFS mapping in DB");
+                return;
+            }
+        };
+
+        // Report issues from the DB-based mapping stats
+        self.report_mapping_issues(&stats).await;
+    }
+
+    /// Report mapping statistics as issues for the issues API.
+    async fn report_mapping_issues(&self, stats: &crate::providers::timetables::gtfs::static_data::MappingStats) {
+        let mut issues = self.issues.write().await;
+
+        // Clear old mapping issues before adding new ones
+        issues.retain(|i| {
+            !matches!(
+                i.issue_type,
+                OsmIssueType::NoGtfsMatch
+                    | OsmIssueType::LowConfidenceMatch
+                    | OsmIssueType::UnmappedGtfsStop
+            )
+        });
+
+        // Report OSM stops that couldn't be matched or had low confidence
+        for osm_stop in stats.unmatched_osm.iter().take(100) {
+            let issue_type = if osm_stop.is_low_confidence {
+                OsmIssueType::LowConfidenceMatch
+            } else {
+                OsmIssueType::NoGtfsMatch
+            };
+
+            let description = if osm_stop.is_low_confidence {
+                format!(
+                    "Low confidence match for {} - best score {:.2}",
+                    osm_stop.name.as_deref().unwrap_or(&osm_stop.ifopt),
+                    osm_stop
+                        .candidates
+                        .first()
+                        .map(|c| c.combined_score)
+                        .unwrap_or(0.0)
+                )
+            } else {
+                format!(
+                    "No GTFS stop found within matching distance for {}",
+                    osm_stop.name.as_deref().unwrap_or(&osm_stop.ifopt)
+                )
+            };
+
+            let mut issue = OsmIssue::new(
+                0,
+                "osm",
+                "stop",
+                issue_type,
+                TransportType::Unknown,
+                description,
+                osm_stop.name.clone(),
+                Some(osm_stop.ifopt.clone()),
+                Some(osm_stop.lat),
+                Some(osm_stop.lon),
+            );
+
+            if !osm_stop.candidates.is_empty() {
+                issue = issue.with_match_candidates(osm_stop.candidates.clone());
+            }
+
+            issues.push(issue);
         }
+
+        if stats.unmatched_osm.len() > 100 {
+            info!(
+                total = stats.unmatched_osm.len(),
+                reported = 100,
+                "Additional unmatched OSM stops not reported to avoid flooding"
+            );
+        }
+
+        // Report unmatched GTFS stops
+        for gtfs_stop in stats.unmatched_gtfs.iter().take(100) {
+            issues.push(OsmIssue::unmapped_gtfs_stop(
+                &gtfs_stop.gtfs_stop_id,
+                gtfs_stop.gtfs_stop_name.as_deref(),
+                gtfs_stop.lat,
+                gtfs_stop.lon,
+            ));
+        }
+
+        if stats.unmatched_gtfs.len() > 100 {
+            info!(
+                total = stats.unmatched_gtfs.len(),
+                reported = 100,
+                "Additional unmatched GTFS stops not reported to avoid flooding"
+            );
+        }
+
+        info!(
+            total_osm_stops = stats.total_db_stops,
+            total_gtfs_stops = stats.total_gtfs_stops,
+            matched = stats.matched,
+            manual = stats.manual_count,
+            unmatched_osm = stats.unmatched_osm.len(),
+            unmatched_gtfs = stats.unmatched_gtfs.len(),
+            "GTFS-OSM mapping complete"
+        );
     }
 
     /// Run the GTFS departure sync loop
@@ -355,7 +486,7 @@ impl SyncManager {
         self.check_platform_stop_pairs(&mut tx, area_id).await?;
 
         // Update last_synced_at
-        sqlx::query("UPDATE areas SET last_synced_at = datetime('now') WHERE id = ?")
+        sqlx::query("UPDATE areas SET last_synced_at = now() WHERE id = $1")
             .bind(area_id)
             .execute(&mut *tx)
             .await
@@ -373,13 +504,13 @@ impl SyncManager {
     /// Insert or update area in database
     async fn upsert_area(
         &self,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut Transaction<'_, Postgres>,
         area: &Area,
     ) -> Result<i64, SyncError> {
         let result = sqlx::query(
             r#"
             INSERT INTO areas (name, south, west, north, east)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT(name) DO UPDATE SET
                 south = excluded.south,
                 west = excluded.west,
@@ -403,7 +534,7 @@ impl SyncManager {
     /// Store stations in database
     async fn store_stations(
         &self,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut Transaction<'_, Postgres>,
         stations: &[OsmElement],
         area_id: i64,
     ) -> Result<(), SyncError> {
@@ -460,7 +591,7 @@ impl SyncManager {
             sqlx::query(
                 r#"
                 INSERT INTO stations (osm_id, osm_type, name, ref_ifopt, lat, lon, tags, area_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, now())
                 ON CONFLICT(osm_id) DO UPDATE SET
                     osm_type = excluded.osm_type,
                     name = excluded.name,
@@ -469,7 +600,7 @@ impl SyncManager {
                     lon = excluded.lon,
                     tags = excluded.tags,
                     area_id = excluded.area_id,
-                    updated_at = datetime('now')
+                    updated_at = now()
                 "#,
             )
             .bind(station.id)
@@ -497,7 +628,7 @@ impl SyncManager {
     /// Store platforms in database with optional station mapping from stop_area relations
     async fn store_platforms(
         &self,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut Transaction<'_, Postgres>,
         platforms: &[OsmElement],
         area_id: i64,
         platform_station_map: &HashMap<i64, i64>,
@@ -575,7 +706,7 @@ impl SyncManager {
             sqlx::query(
                 r#"
                 INSERT INTO platforms (osm_id, osm_type, name, ref, ref_ifopt, lat, lon, tags, station_id, area_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, now())
                 ON CONFLICT(osm_id) DO UPDATE SET
                     osm_type = excluded.osm_type,
                     name = excluded.name,
@@ -586,7 +717,7 @@ impl SyncManager {
                     tags = excluded.tags,
                     station_id = COALESCE(excluded.station_id, platforms.station_id),
                     area_id = excluded.area_id,
-                    updated_at = datetime('now')
+                    updated_at = now()
                 "#,
             )
             .bind(platform.id)
@@ -616,7 +747,7 @@ impl SyncManager {
     /// Store stop positions in database with optional station mapping from stop_area relations
     async fn store_stop_positions(
         &self,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut Transaction<'_, Postgres>,
         stop_positions: &[OsmElement],
         area_id: i64,
         platform_station_map: &HashMap<i64, i64>,
@@ -694,7 +825,7 @@ impl SyncManager {
             sqlx::query(
                 r#"
                 INSERT INTO stop_positions (osm_id, osm_type, name, ref, ref_ifopt, lat, lon, tags, station_id, area_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, now())
                 ON CONFLICT(osm_id) DO UPDATE SET
                     osm_type = excluded.osm_type,
                     name = excluded.name,
@@ -705,7 +836,7 @@ impl SyncManager {
                     tags = excluded.tags,
                     station_id = COALESCE(excluded.station_id, stop_positions.station_id),
                     area_id = excluded.area_id,
-                    updated_at = datetime('now')
+                    updated_at = now()
                 "#,
             )
             .bind(stop.id)
@@ -735,7 +866,7 @@ impl SyncManager {
     /// Store routes in database with ways and stops
     async fn store_routes(
         &self,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut Transaction<'_, Postgres>,
         routes: &[OsmRoute],
         area_id: i64,
     ) -> Result<(), SyncError> {
@@ -768,7 +899,7 @@ impl SyncManager {
             sqlx::query(
                 r#"
                 INSERT INTO routes (osm_id, osm_type, name, ref, route_type, operator, network, color, tags, area_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, now())
                 ON CONFLICT(osm_id) DO UPDATE SET
                     osm_type = excluded.osm_type,
                     name = excluded.name,
@@ -779,7 +910,7 @@ impl SyncManager {
                     color = excluded.color,
                     tags = excluded.tags,
                     area_id = excluded.area_id,
-                    updated_at = datetime('now')
+                    updated_at = now()
                 "#,
             )
             .bind(route.osm_id)
@@ -797,13 +928,13 @@ impl SyncManager {
             ?;
 
             // Delete existing ways and stops for this route
-            sqlx::query("DELETE FROM route_ways WHERE route_id = ?")
+            sqlx::query("DELETE FROM route_ways WHERE route_id = $1")
                 .bind(route.osm_id)
                 .execute(&mut **tx)
                 .await
                 ?;
 
-            sqlx::query("DELETE FROM route_stops WHERE route_id = ?")
+            sqlx::query("DELETE FROM route_stops WHERE route_id = $1")
                 .bind(route.osm_id)
                 .execute(&mut **tx)
                 .await
@@ -825,7 +956,7 @@ impl SyncManager {
                 sqlx::query(
                     r#"
                     INSERT INTO route_ways (route_id, way_osm_id, sequence, geometry)
-                    VALUES (?, ?, ?, ?)
+                    VALUES ($1, $2, $3, $4::jsonb)
                     "#,
                 )
                 .bind(route.osm_id)
@@ -843,10 +974,10 @@ impl SyncManager {
                     r#"
                     INSERT INTO route_stops (route_id, stop_position_id, sequence, role)
                     VALUES (
-                        ?,
-                        (SELECT osm_id FROM stop_positions WHERE osm_id = ?),
-                        ?,
-                        ?
+                        $1,
+                        (SELECT osm_id FROM stop_positions WHERE osm_id = $2),
+                        $3,
+                        $4
                     )
                     "#,
                 )
@@ -872,14 +1003,14 @@ impl SyncManager {
     /// Resolve relations between features (platforms->stations, stop_positions->platforms, etc.)
     async fn resolve_relations(
         &self,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut Transaction<'_, Postgres>,
         area_id: i64,
     ) -> Result<(), SyncError> {
         info!("Resolving relations for area {}", area_id);
 
         // Fetch all stations for distance calculations
         let stations: Vec<(i64, f64, f64)> = sqlx::query_as(
-            "SELECT osm_id, lat, lon FROM stations WHERE area_id = ?",
+            "SELECT osm_id, lat, lon FROM stations WHERE area_id = $1",
         )
         .bind(area_id)
         .fetch_all(&mut **tx)
@@ -888,7 +1019,7 @@ impl SyncManager {
 
         // Link platforms to nearest station
         let platforms: Vec<(i64, f64, f64)> = sqlx::query_as(
-            "SELECT osm_id, lat, lon FROM platforms WHERE area_id = ? AND station_id IS NULL",
+            "SELECT osm_id, lat, lon FROM platforms WHERE area_id = $1 AND station_id IS NULL",
         )
         .bind(area_id)
         .fetch_all(&mut **tx)
@@ -910,7 +1041,7 @@ impl SyncManager {
                     dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Greater)
                 })
             {
-                sqlx::query("UPDATE platforms SET station_id = ? WHERE osm_id = ?")
+                sqlx::query("UPDATE platforms SET station_id = $1 WHERE osm_id = $2")
                     .bind(station_id)
                     .bind(platform_id)
                     .execute(&mut **tx)
@@ -921,7 +1052,7 @@ impl SyncManager {
 
         // Fetch platforms with their coords for stop_position linking
         let platforms_with_coords: Vec<(i64, f64, f64)> = sqlx::query_as(
-            "SELECT osm_id, lat, lon FROM platforms WHERE area_id = ?",
+            "SELECT osm_id, lat, lon FROM platforms WHERE area_id = $1",
         )
         .bind(area_id)
         .fetch_all(&mut **tx)
@@ -930,7 +1061,7 @@ impl SyncManager {
 
         // Link stop_positions to nearest platform (within ~50m)
         let stop_positions: Vec<(i64, f64, f64)> = sqlx::query_as(
-            "SELECT osm_id, lat, lon FROM stop_positions WHERE area_id = ? AND platform_id IS NULL",
+            "SELECT osm_id, lat, lon FROM stop_positions WHERE area_id = $1 AND platform_id IS NULL",
         )
         .bind(area_id)
         .fetch_all(&mut **tx)
@@ -951,7 +1082,7 @@ impl SyncManager {
                     dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Greater)
                 })
             {
-                sqlx::query("UPDATE stop_positions SET platform_id = ? WHERE osm_id = ?")
+                sqlx::query("UPDATE stop_positions SET platform_id = $1 WHERE osm_id = $2")
                     .bind(platform_id)
                     .bind(stop_id)
                     .execute(&mut **tx)
@@ -967,7 +1098,7 @@ impl SyncManager {
             SET station_id = (
                 SELECT station_id FROM platforms WHERE osm_id = stop_positions.platform_id
             )
-            WHERE area_id = ? AND station_id IS NULL AND platform_id IS NOT NULL
+            WHERE area_id = $1 AND station_id IS NULL AND platform_id IS NOT NULL
             "#,
         )
         .bind(area_id)
@@ -985,7 +1116,7 @@ impl SyncManager {
             station_id = (
                 SELECT station_id FROM stop_positions WHERE osm_id = route_stops.stop_position_id
             )
-            WHERE route_id IN (SELECT osm_id FROM routes WHERE area_id = ?)
+            WHERE route_id IN (SELECT osm_id FROM routes WHERE area_id = $1)
             "#,
         )
         .bind(area_id)
@@ -1001,7 +1132,7 @@ impl SyncManager {
                 station_id = (
                     SELECT station_id FROM platforms WHERE osm_id = route_stops.stop_position_id
                 )
-            WHERE route_id IN (SELECT osm_id FROM routes WHERE area_id = ?)
+            WHERE route_id IN (SELECT osm_id FROM routes WHERE area_id = $1)
             AND platform_id IS NULL
             AND stop_position_id IN (SELECT osm_id FROM platforms)
             "#,
@@ -1015,7 +1146,7 @@ impl SyncManager {
         let mut new_issues = Vec::new();
 
         let orphaned_platforms: Vec<(i64, String, Option<String>, Option<String>, f64, f64)> = sqlx::query_as(
-            "SELECT osm_id, osm_type, name, ref, lat, lon FROM platforms WHERE area_id = ? AND station_id IS NULL",
+            "SELECT osm_id, osm_type, name, ref, lat, lon FROM platforms WHERE area_id = $1 AND station_id IS NULL",
         )
         .bind(area_id)
         .fetch_all(&mut **tx)
@@ -1038,7 +1169,7 @@ impl SyncManager {
         }
 
         let orphaned_stops: Vec<(i64, String, Option<String>, Option<String>, f64, f64)> = sqlx::query_as(
-            "SELECT osm_id, osm_type, name, ref, lat, lon FROM stop_positions WHERE area_id = ? AND station_id IS NULL",
+            "SELECT osm_id, osm_type, name, ref, lat, lon FROM stop_positions WHERE area_id = $1 AND station_id IS NULL",
         )
         .bind(area_id)
         .fetch_all(&mut **tx)
@@ -1072,7 +1203,7 @@ impl SyncManager {
     /// Check for platforms without stop_positions and vice versa
     async fn check_platform_stop_pairs(
         &self,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut Transaction<'_, Postgres>,
         area_id: i64,
     ) -> Result<(), SyncError> {
         let mut new_issues = Vec::new();
@@ -1083,13 +1214,13 @@ impl SyncManager {
             r#"
             SELECT p.osm_id, p.osm_type, p.name, p.ref, p.ref_ifopt, p.lat, p.lon
             FROM platforms p
-            WHERE p.area_id = ?
+            WHERE p.area_id = $1
             AND p.ref_ifopt IS NOT NULL
             AND NOT EXISTS (
                 SELECT 1 FROM stop_positions sp
                 WHERE sp.area_id = p.area_id
-                AND ABS(sp.lat - p.lat) < ?
-                AND ABS(sp.lon - p.lon) < ?
+                AND ABS(sp.lat - p.lat) < $2
+                AND ABS(sp.lon - p.lon) < $3
             )
             "#,
         )
@@ -1119,13 +1250,13 @@ impl SyncManager {
             r#"
             SELECT sp.osm_id, sp.osm_type, sp.name, sp.ref, sp.ref_ifopt, sp.lat, sp.lon
             FROM stop_positions sp
-            WHERE sp.area_id = ?
+            WHERE sp.area_id = $1
             AND sp.ref_ifopt IS NOT NULL
             AND NOT EXISTS (
                 SELECT 1 FROM platforms p
                 WHERE p.area_id = sp.area_id
-                AND ABS(p.lat - sp.lat) < ?
-                AND ABS(p.lon - sp.lon) < ?
+                AND ABS(p.lat - sp.lat) < $2
+                AND ABS(p.lon - sp.lon) < $3
             )
             "#,
         )
