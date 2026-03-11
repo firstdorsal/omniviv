@@ -1,7 +1,9 @@
 import { useState } from "react";
-import { Moon, Sun } from "lucide-react";
+import { Cpu, Moon, Sun } from "lucide-react";
+import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
 import { Label } from "./ui/label";
+import { EspFlasherDialog } from "./EspFlasherDialog";
 import { featureManager } from "./vehicles/features";
 import type { RendezvousState } from "../hooks/useRendezvous";
 
@@ -23,6 +25,7 @@ export function FeaturesPanel({
     shouldFlash,
 }: FeaturesPanelProps) {
     const [features, setFeatures] = useState(featureManager.getAllFeatures());
+    const [espDialogOpen, setEspDialogOpen] = useState(false);
 
     const handleToggle = (featureId: string) => {
         featureManager.toggleFeature(featureId);
@@ -79,11 +82,9 @@ export function FeaturesPanel({
                                 <div className="mt-2 p-2 rounded bg-muted text-xs">
                                     <div className="flex items-center gap-2">
                                         <span
-                                            className="w-3 h-3 rounded-full shrink-0"
-                                            style={{
-                                                backgroundColor: rendezvousState.isRendezvous ? "#18ed31" : "#1155f5",
-                                                animation: shouldFlash ? "pulse 0.5s infinite" : "none",
-                                            }}
+                                            className={`w-3 h-3 rounded-full shrink-0 ${
+                                                rendezvousState.isRendezvous ? "bg-green-500" : "bg-blue-600"
+                                            } ${shouldFlash ? "animate-pulse" : ""}`}
                                         />
                                         <span>
                                             {rendezvousState.isRendezvous
@@ -121,6 +122,21 @@ export function FeaturesPanel({
                     ))}
                 </div>
             </div>
+
+            {/* Tools */}
+            <div className="mt-6 pt-4 border-t">
+                <h3 className="text-sm font-medium text-muted-foreground mb-3">Tools</h3>
+                <Button
+                    variant="outline"
+                    className="w-full gap-2"
+                    onClick={() => setEspDialogOpen(true)}
+                >
+                    <Cpu className="h-4 w-4" />
+                    ESP32 Flasher
+                </Button>
+            </div>
+
+            <EspFlasherDialog open={espDialogOpen} onOpenChange={setEspDialogOpen} />
         </div>
     );
 }

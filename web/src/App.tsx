@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, Bug, Clock, Github, Layers, Navigation, Settings, Wifi, WifiOff } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Bug, Clock, Github, Layers, Navigation, Settings, Wifi, WifiOff } from "lucide-react";
 import { TbWorldX } from "react-icons/tb";
 import { Api, Area, Route, RouteGeometry, Station, Vehicle } from "./api";
-import { BackendDiagnosticsPanel } from "./components/BackendDiagnosticsPanel";
 import { FeaturesPanel } from "./components/FeaturesPanel";
-import { OsmIssuesPanel } from "./components/IssuesPanel";
+import { OsmIssuesPanel, type MappingMapData } from "./components/IssuesPanel";
 import { NavigationPanel, type Location, type PickMode } from "./components/NavigationPanel";
 import { TimeControlPanel } from "./components/TimeControlPanel";
 import { Button } from "./components/ui/button";
@@ -16,7 +15,34 @@ import { useRendezvous } from "./hooks/useRendezvous";
 import { useTimeSimulation } from "./hooks/useTimeSimulation";
 import { useVehicleUpdates, type RouteVehicles } from "./hooks/useVehicleUpdates";
 
-type SidebarPanel = "navigation" | "layers" | "features" | "debug" | "issues" | "time" | "efa" | null;
+type SidebarPanel = "navigation" | "layers" | "features" | "debug" | "issues" | "time" | null;
+
+const VALID_PANELS = new Set(["navigation", "layers", "features", "debug", "issues", "time"]);
+
+function getInitialPanel(): SidebarPanel {
+    const params = new URLSearchParams(window.location.search);
+    const panel = params.get("panel");
+    if (panel && VALID_PANELS.has(panel)) return panel as SidebarPanel;
+    return null;
+}
+
+function updateUrlParams(updates: Record<string, string | null>) {
+    const params = new URLSearchParams(window.location.search);
+    for (const [key, value] of Object.entries(updates)) {
+        if (value === null) {
+            params.delete(key);
+        } else {
+            params.set(key, value);
+        }
+    }
+    const search = params.toString();
+    const base = search ? `${window.location.pathname}?${search}` : window.location.pathname;
+    window.history.replaceState(null, "", `${base}${window.location.hash}`);
+}
+
+function getUrlParam(key: string): string | null {
+    return new URLSearchParams(window.location.search).get(key);
+}
 
 let api: Api<unknown> | null = null;
 function getApi() {
@@ -102,7 +128,7 @@ export default function App() {
     const [stations, setStations] = useState<Station[]>([]);
     const [routes, setRoutes] = useState<RouteWithGeometry[]>([]);
     const [vehicles, setVehicles] = useState<RouteVehiclesData[]>([]);
-    const [activePanel, setActivePanel] = useState<SidebarPanel>(null);
+    const [activePanel, setActivePanel] = useState<SidebarPanel>(getInitialPanel);
     const [osmIssuesCount, setOsmIssuesCount] = useState<number | null>(null);
 
     // Navigation state
@@ -112,6 +138,10 @@ export default function App() {
 
     // Highlighted building state
     const [highlightedBuilding, setHighlightedBuilding] = useState<{ lat: number; lon: number; color?: string } | null>(null);
+
+    // Mapping visualization data (from IssuesPanel mapping tab)
+    const [mappingMapData, setMappingMapData] = useState<MappingMapData>({ lines: [], gtfsStops: [] });
+    const mapRef = useRef<Map>(null);
 
     // Theme state
     const [isDark, setIsDark] = useState(() => {
@@ -162,6 +192,15 @@ export default function App() {
         setOptions((prev) => ({ ...prev, [key]: value }));
     };
 
+    // Sync panel to URL
+    useEffect(() => {
+        updateUrlParams({
+            panel: activePanel,
+            // Clear sub-tab params when panel changes away from issues
+            ...(activePanel !== "issues" ? { tab: null, filter: null } : {}),
+        });
+    }, [activePanel]);
+
     // Toggle sidebar panel
     const togglePanel = (panel: SidebarPanel) => {
         setActivePanel((current) => (current === panel ? null : panel));
@@ -191,6 +230,11 @@ export default function App() {
     // Handler for pick mode changes from NavigationPanel
     const handlePickModeChange = useCallback((mode: PickMode) => {
         setPickMode(mode);
+    }, []);
+
+    // Fly the map to a specific location (used by mapping panel)
+    const handleFlyTo = useCallback((lat: number, lon: number) => {
+        mapRef.current?.flyTo(lat, lon);
     }, []);
 
     // Fetch OSM issues count
@@ -355,16 +399,6 @@ export default function App() {
                         aria-label="Settings"
                     >
                         <Settings className="h-5 w-5" />
-                    </Button>
-                    <Button
-                        variant={activePanel === "efa" ? "default" : "ghost"}
-                        size="icon"
-                        onClick={() => togglePanel("efa")}
-                        className="m-2"
-                        title="Backend Diagnostics"
-                        aria-label="Backend Diagnostics"
-                    >
-                        <Activity className="h-5 w-5" />
                     </Button>
                     <Button
                         variant={activePanel === "issues" ? "default" : "ghost"}
@@ -572,16 +606,20 @@ export default function App() {
                         )}
 
                         {activePanel === "issues" && (
-                            <OsmIssuesPanel />
+                            <OsmIssuesPanel
+                                onMapDataChange={setMappingMapData}
+                                onFlyTo={handleFlyTo}
+                                initialTab={getUrlParam("tab") || undefined}
+                                onTabChange={(tab) => updateUrlParams({ tab, filter: null })}
+                                initialFilter={getUrlParam("filter") || undefined}
+                                onFilterChange={(filter) => updateUrlParams({ filter })}
+                            />
                         )}
 
                         {activePanel === "time" && (
                             <TimeControlPanel timeSimulation={timeSimulation} />
                         )}
 
-                        {activePanel === "efa" && (
-                            <BackendDiagnosticsPanel />
-                        )}
                     </div>
                 )}
             </div>
@@ -589,6 +627,7 @@ export default function App() {
             {/* Map */}
             <div className="flex-1 h-full">
                 <Map
+                    ref={mapRef}
                     areas={areas}
                     stations={stations}
                     routes={routes}
@@ -601,6 +640,7 @@ export default function App() {
                     showVehicles={showVehicles}
                     debugOptions={debugOptions}
                     simulatedTime={timeSimulation.currentTime}
+                    timeSpeed={timeSimulation.speed}
                     onSetNavigationStart={handleSetNavigationStart}
                     onSetNavigationEnd={handleSetNavigationEnd}
                     pickMode={pickMode}
@@ -609,6 +649,8 @@ export default function App() {
                     navigationEnd={navEnd}
                     highlightedBuilding={highlightedBuilding}
                     onHighlightBuilding={setHighlightedBuilding}
+                    mappingLines={activePanel === "issues" ? mappingMapData.lines : []}
+                    mappingGtfsStops={activePanel === "issues" ? mappingMapData.gtfsStops : []}
                 />
             </div>
         </div>

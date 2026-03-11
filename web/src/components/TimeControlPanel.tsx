@@ -13,12 +13,20 @@ const SPEED_PRESETS = [1, 2, 5, 10, 30, 60];
 const MIN_SPEED = 0;
 const MAX_SPEED = 60;
 
-// Intl formatters
-const timeFormatter = new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-});
+// Time formatter - created lazily to use browser's locale at runtime
+let timeFormatter: Intl.DateTimeFormat | null = null;
+
+function getTimeFormatter(): Intl.DateTimeFormat {
+    if (!timeFormatter) {
+        const locale = typeof navigator !== 'undefined' ? navigator.language : undefined;
+        timeFormatter = new Intl.DateTimeFormat(locale, {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+        });
+    }
+    return timeFormatter;
+}
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
     weekday: "long",
@@ -46,7 +54,7 @@ export function TimeControlPanel({ timeSimulation }: TimeControlPanelProps) {
             {/* Current time display */}
             <div className="mb-4 p-3 bg-muted rounded-lg">
                 <div className="text-2xl font-mono tabular-nums text-center">
-                    {timeFormatter.format(currentTime)}
+                    {getTimeFormatter().format(currentTime)}
                 </div>
                 <div className="text-sm text-muted-foreground text-center mt-1">
                     {dateFormatter.format(currentTime)}
