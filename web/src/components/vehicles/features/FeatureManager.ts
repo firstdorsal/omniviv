@@ -3,42 +3,65 @@
  * Handles registration and state of vehicle rendering features
  */
 
-import type { RenderPositionFeature, VehicleRenderContext, RenderPosition, VehicleFeature } from "./types";
+import type { RenderPositionFeature, SpeedAdjustmentFeature, VehicleRenderContext, RenderPosition, VehicleFeature } from "./types";
 import type { LinearizedRoute } from "../vehicleUtils";
-import { collisionAvoidanceFeature } from "./collisionAvoidance";
 import { simulatedStopsFeature } from "./simulatedStops";
 
 const STORAGE_KEY = "vehicle-features";
 
+interface StoredFeatureState {
+    enabled: string[];
+    known: string[];
+}
+
 export class FeatureManager {
     private allFeatures: VehicleFeature[] = [];
     private renderPositionFeatures: RenderPositionFeature[] = [];
+    private speedAdjustmentFeatures: SpeedAdjustmentFeature[] = [];
     private enabledFeatures: Set<string>;
+    /** Feature IDs that were in localStorage at load time. null = no stored state (first visit). */
+    private knownFeatureIds: Set<string> | null;
 
     constructor() {
-        // Load enabled state from localStorage
-        this.enabledFeatures = this.loadEnabledFeatures();
+        const loaded = this.loadFeatureState();
+        this.enabledFeatures = loaded.enabled;
+        this.knownFeatureIds = loaded.known;
 
         // Register built-in features
         this.registerFeature(simulatedStopsFeature);
-        this.registerRenderPositionFeature(collisionAvoidanceFeature);
     }
 
-    private loadEnabledFeatures(): Set<string> {
+    private loadFeatureState(): { enabled: Set<string>; known: Set<string> | null } {
         try {
             const stored = localStorage.getItem(STORAGE_KEY);
             if (stored) {
-                return new Set(JSON.parse(stored));
+                const parsed = JSON.parse(stored);
+                // New format: { enabled: [...], known: [...] }
+                if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.enabled)) {
+                    return {
+                        enabled: new Set(parsed.enabled),
+                        known: new Set(parsed.known ?? parsed.enabled),
+                    };
+                }
+                // Old format: plain array of enabled IDs — migrate gracefully.
+                // Treat enabled set as known set so new features get their defaults applied.
+                if (Array.isArray(parsed)) {
+                    return { enabled: new Set(parsed), known: new Set(parsed) };
+                }
             }
         } catch {
             // Ignore parse errors
         }
-        return new Set();
+        return { enabled: new Set(), known: null };
     }
 
-    private saveEnabledFeatures(): void {
+    private saveFeatureState(): void {
         try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify([...this.enabledFeatures]));
+            const state: StoredFeatureState = {
+                enabled: [...this.enabledFeatures],
+                known: this.allFeatures.map(f => f.id),
+            };
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         } catch {
             // Ignore storage errors
         }
@@ -49,13 +72,7 @@ export class FeatureManager {
      */
     registerFeature(feature: VehicleFeature): void {
         this.allFeatures.push(feature);
-
-        // Apply default enabled state if not already set
-        if (!localStorage.getItem(STORAGE_KEY)) {
-            if (feature.defaultEnabled) {
-                this.enabledFeatures.add(feature.id);
-            }
-        }
+        this.applyDefaultEnabled(feature);
     }
 
     /**
@@ -64,20 +81,29 @@ export class FeatureManager {
     registerRenderPositionFeature(feature: RenderPositionFeature): void {
         this.allFeatures.push(feature);
         this.renderPositionFeatures.push(feature);
-
-        // Apply default enabled state if not already set
-        if (!localStorage.getItem(STORAGE_KEY)) {
-            if (feature.defaultEnabled) {
-                this.enabledFeatures.add(feature.id);
-            }
-        }
+        this.applyDefaultEnabled(feature);
     }
 
     /**
-     * Get all registered render position features
+     * Register a speed adjustment feature
      */
-    getRenderPositionFeatures(): RenderPositionFeature[] {
-        return [...this.renderPositionFeatures];
+    registerSpeedAdjustmentFeature(feature: SpeedAdjustmentFeature): void {
+        this.allFeatures.push(feature);
+        this.speedAdjustmentFeatures.push(feature);
+        this.applyDefaultEnabled(feature);
+    }
+
+    /**
+     * Enable a feature by default if:
+     * - No stored state exists (first visit), or
+     * - The feature is new (not in the known set from previous sessions)
+     */
+    private applyDefaultEnabled(feature: VehicleFeature): void {
+        if (!feature.defaultEnabled) return;
+
+        if (this.knownFeatureIds === null || !this.knownFeatureIds.has(feature.id)) {
+            this.enabledFeatures.add(feature.id);
+        }
     }
 
     /**
@@ -108,7 +134,7 @@ export class FeatureManager {
         } else {
             this.enabledFeatures.delete(featureId);
         }
-        this.saveEnabledFeatures();
+        this.saveFeatureState();
     }
 
     /**
@@ -121,7 +147,7 @@ export class FeatureManager {
     }
 
     /**
-     * Process render positions through all enabled features
+     * Process render positions through all enabled render position features
      */
     processRenderPositions(
         vehicles: VehicleRenderContext[],
@@ -133,6 +159,30 @@ export class FeatureManager {
                 feature.processPositions(vehicles, renderPositions, linearizedRoutes);
             }
         }
+    }
+
+    /**
+     * Compute per-vehicle speed multipliers from all enabled speed adjustment features.
+     * Returns a map of tripId -> combined speed multiplier.
+     */
+    computeSpeedAdjustments(
+        vehicles: VehicleRenderContext[],
+        linearizedRoutes: Map<number, LinearizedRoute>
+    ): Map<string, number> {
+        const combined = new Map<string, number>();
+
+        for (const feature of this.speedAdjustmentFeatures) {
+            if (!this.isEnabled(feature.id)) continue;
+
+            const adjustments = feature.computeSpeedAdjustments(vehicles, linearizedRoutes);
+            for (const [tripId, multiplier] of adjustments) {
+                const existing = combined.get(tripId) ?? 1.0;
+                // Multiply speed adjustments from different features
+                combined.set(tripId, existing * multiplier);
+            }
+        }
+
+        return combined;
     }
 }
 
