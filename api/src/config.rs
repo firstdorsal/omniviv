@@ -2,6 +2,21 @@ use serde::Deserialize;
 use std::path::Path;
 use tracing::warn;
 
+/// Read an environment variable, supporting the `_FILE` suffix convention.
+///
+/// If `{name}_FILE` is set, reads the file at that path and returns its contents (trimmed).
+/// Otherwise, reads the value of `{name}` directly.
+pub fn read_env_or_file(name: &str) -> Result<String, ConfigError> {
+    let file_var = format!("{}_FILE", name);
+    if let Ok(path) = std::env::var(&file_var) {
+        std::fs::read_to_string(&path)
+            .map(|s| s.trim().to_string())
+            .map_err(|e| ConfigError::ReadError(format!("Failed to read {}: {}", path, e)))
+    } else {
+        std::env::var(name).map_err(|_| ConfigError::MissingEnvVar(name.to_string()))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub areas: Vec<Area>,
@@ -23,8 +38,8 @@ pub struct Config {
 /// and refreshed periodically. The realtime feed (~1-5MB protobuf)
 /// is polled at a configurable interval.
 ///
-/// Loading the full Germany schedule requires ~512MB-1GB of RAM.
-/// The schedule is held entirely in memory for fast lookups.
+/// The GTFS schedule is loaded into PostgreSQL for persistent storage
+/// and queried at runtime. No in-memory schedule cache is maintained.
 #[derive(Debug, Clone, Deserialize)]
 pub struct GtfsSyncConfig {
     /// URL to download the static GTFS zip (default: gtfs.de all-Germany feed)
@@ -148,6 +163,28 @@ impl BoundingBox {
     pub fn to_overpass_string(&self) -> String {
         format!("{},{},{},{}", self.south, self.west, self.north, self.east)
     }
+
+    /// Validate that the bounding box coordinates are consistent and within range.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.south > self.north {
+            return Err("south > north".to_string());
+        }
+        if self.west > self.east {
+            return Err("west > east".to_string());
+        }
+        if self.south < -90.0 || self.north > 90.0 {
+            return Err("latitude out of range".to_string());
+        }
+        if self.west < -180.0 || self.east > 180.0 {
+            return Err("longitude out of range".to_string());
+        }
+        Ok(())
+    }
+
+    /// Check whether a coordinate falls within this bounding box.
+    pub fn contains(&self, lat: f64, lon: f64) -> bool {
+        lat >= self.south && lat <= self.north && lon >= self.west && lon <= self.east
+    }
 }
 
 /// Transport type for both configuration and runtime detection
@@ -182,7 +219,7 @@ impl Config {
         let content = std::fs::read_to_string(path.as_ref())
             .map_err(|e| ConfigError::ReadError(e.to_string()))?;
 
-        serde_yaml::from_str(&content)
+        serde_yaml_neo::from_str(&content)
             .map_err(|e| ConfigError::ParseError(e.to_string()))
     }
 }
@@ -193,6 +230,8 @@ pub enum ConfigError {
     ReadError(String),
     #[error("Failed to parse config: {0}")]
     ParseError(String),
+    #[error("Missing environment variable: {0}")]
+    MissingEnvVar(String),
 }
 
 #[cfg(test)]
@@ -226,7 +265,7 @@ mod tests {
             realtime_interval_secs: 30
             time_horizon_minutes: 60
         "#;
-        let config: GtfsSyncConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: GtfsSyncConfig = serde_yaml_neo::from_str(yaml).unwrap();
         assert_eq!(config.static_feed_url, "https://example.com/gtfs.zip");
         assert_eq!(config.realtime_feed_url, "https://example.com/rt.pb");
         assert_eq!(config.cache_dir, "/tmp/gtfs");
@@ -240,7 +279,7 @@ mod tests {
         let yaml = r#"
             realtime_interval_secs: 10
         "#;
-        let config: GtfsSyncConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: GtfsSyncConfig = serde_yaml_neo::from_str(yaml).unwrap();
         assert_eq!(config.realtime_interval_secs, 10);
         assert_eq!(config.static_refresh_hours, 24);
         assert_eq!(config.time_horizon_minutes, 120);
@@ -249,7 +288,7 @@ mod tests {
     #[test]
     fn gtfs_sync_config_deserialize_empty_uses_defaults() {
         let yaml = "{}";
-        let config: GtfsSyncConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: GtfsSyncConfig = serde_yaml_neo::from_str(yaml).unwrap();
         assert_eq!(config.static_refresh_hours, 24);
         assert_eq!(config.realtime_interval_secs, 15);
         assert_eq!(config.time_horizon_minutes, 120);
@@ -268,7 +307,7 @@ mod tests {
                 transport_types:
                   - tram
         "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = serde_yaml_neo::from_str(yaml).unwrap();
         assert_eq!(config.gtfs_sync.realtime_interval_secs, 15);
         assert_eq!(config.gtfs_sync.static_refresh_hours, 24);
         assert_eq!(config.gtfs_sync.time_horizon_minutes, 120);
@@ -291,7 +330,7 @@ mod tests {
               static_refresh_hours: 12
               time_horizon_minutes: 60
         "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = serde_yaml_neo::from_str(yaml).unwrap();
         assert_eq!(config.gtfs_sync.realtime_interval_secs, 30);
         assert_eq!(config.gtfs_sync.static_refresh_hours, 12);
         assert_eq!(config.gtfs_sync.time_horizon_minutes, 60);
@@ -324,7 +363,7 @@ mod tests {
         let yaml = r#"
             timezone: "America/New_York"
         "#;
-        let config: GtfsSyncConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: GtfsSyncConfig = serde_yaml_neo::from_str(yaml).unwrap();
         assert_eq!(config.parsed_timezone(), chrono_tz::America::New_York);
     }
 
@@ -333,7 +372,7 @@ mod tests {
         let yaml = r#"
             timezone: "Invalid/Timezone"
         "#;
-        let config: GtfsSyncConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: GtfsSyncConfig = serde_yaml_neo::from_str(yaml).unwrap();
         // Should fall back to Europe/Berlin
         assert_eq!(config.parsed_timezone(), chrono_tz::Europe::Berlin);
     }
