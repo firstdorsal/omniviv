@@ -14,6 +14,14 @@ deployment/data/
 # Deployment values (environment-specific)
 deployment/values.yaml
 
-# Planning files
+# Firmware build artifacts (built via firmware/build.sh)
+web/public/firmware/*.bin
+firmware/.pio/
+
+# Planning and review files
+# .plans/ contains code review findings, implementation plans, and temporary notes
+# These are working documents not intended for version control
 plan.md
 TODO.md
+PLAN.md
+.plans/

@@ -8,12 +8,18 @@ reverseProxy:
 domain: vindelicum.eu
 
 services:
+    postgres:
+        image: postgres:18-alpine
+        database: omniviv
+        storage:
+            volumeName: omniviv-postgres-data
+            absolutePath: null
+        shmSize: 256mb
     api:
         subdomain: omniviv-api
-        database:
-            type: sqlite
+        data:
             storage:
-                volumeName: omniviv-api-database
+                volumeName: omniviv-api-data
                 absolutePath: null
         build:
             enabled: true

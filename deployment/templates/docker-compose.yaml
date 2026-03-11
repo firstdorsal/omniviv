@@ -1,14 +1,35 @@
 {{- $apiHostname := mowsJoinDomain .services.api.subdomain (ternary "localhost" .domain (eq .routing "local")) -}}
 {{- $webHostname := mowsJoinDomain .services.web.subdomain (ternary "localhost" .domain (eq .routing "local")) -}}
 {{- $martinHostname := mowsJoinDomain .services.martin.subdomain (ternary "localhost" .domain (eq .routing "local")) -}}
-{{- if and .services.api.database.storage.volumeName .services.api.database.storage.absolutePath -}}
-{{- fail "Cannot specify both volumeName and absolutePath for api database storage" -}}
-{{- end -}}
-{{- if and .services.api.data.storage.volumeName .services.api.data.storage.absolutePath -}}
-{{- fail "Cannot specify both volumeName and absolutePath for api data storage" -}}
+{{- if and .services.postgres.storage.volumeName .services.postgres.storage.absolutePath -}}
+{{- fail "Cannot specify both volumeName and absolutePath for postgres storage" -}}
 {{- end -}}
 
 services:
+    postgres:
+        image: "{{ .services.postgres.image }}"
+        container_name: omniviv-postgres
+        restart: unless-stopped
+        environment:
+            POSTGRES_USER: $POSTGRES_USER
+            POSTGRES_PASSWORD: $POSTGRES_PASSWORD
+            POSTGRES_DB: {{ .services.postgres.database }}
+        volumes:
+            {{- if .services.postgres.storage.volumeName }}
+            - {{ .services.postgres.storage.volumeName }}:/var/lib/postgresql/data
+            {{- else if .services.postgres.storage.absolutePath }}
+            - {{ .services.postgres.storage.absolutePath }}:/var/lib/postgresql/data
+            {{- end }}
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d {{ .services.postgres.database }}"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 10s
+        networks:
+            - internal
+        shm_size: {{ .services.postgres.shmSize }}
+
     api:
         {{- if eq .services.api.build.enabled true }}
         build:
@@ -19,26 +40,33 @@ services:
         {{- end }}
         container_name: omniviv-api
         restart: unless-stopped
+        depends_on:
+            postgres:
+                condition: service_healthy
+        environment:
+            DATABASE_URL: "postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/{{ .services.postgres.database }}"
         volumes:
             - ./config/api/config.yaml:/app/config.yaml:ro
-            {{- if .services.api.database.storage.volumeName }}
-            - {{ .services.api.database.storage.volumeName }}:/app/database
-            {{- else if .services.api.database.storage.absolutePath }}
-            - {{ .services.api.database.storage.absolutePath }}:/app/database
-            {{- end }}
             {{- if .services.api.data.storage.volumeName }}
             - {{ .services.api.data.storage.volumeName }}:/app/data
             {{- else if .services.api.data.storage.absolutePath }}
             - {{ .services.api.data.storage.absolutePath }}:/app/data
             {{- end }}
-        mem_limit: 2g
+        mem_limit: 1g
+        healthcheck:
+            test: ["CMD", "/wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 10s
         cpus: 2
         networks:
             - {{ .reverseProxy.network }}
+            - internal
         labels:
             traefik:
                 docker:
-                    network: {{ .reverseProxy.network }}
+                    network: {{ .chart.projectName }}_{{ .reverseProxy.network }}
                 enable: true
                 http:
                     routers:
@@ -46,6 +74,12 @@ services:
                             rule: "Host(`{{ $apiHostname }}`)"
                             entrypoints: {{ ternary "websecure" "web" .tls }}
                             service: omniviv-api
+                        {{- if .lanIp }}
+                        omniviv-api-lan:
+                            rule: "Host(`{{ .lanIp }}`)"
+                            entrypoints: web
+                            service: omniviv-api
+                        {{- end }}
                             {{- if eq .tls true }}
                             tls:
                                 certresolver: "default"
@@ -69,6 +103,12 @@ services:
         {{- end }}
         container_name: omniviv-web
         restart: unless-stopped
+        healthcheck:
+            test: ["CMD", "/wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:80/"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 5s
         environment:
             CSP_CONNECT_SRC: {{ ternary "https://" "http://" .tls }}{{ $apiHostname }} {{ ternary "wss://" "ws://" .tls }}{{ $apiHostname }} {{ ternary "https://" "http://" .tls }}{{ $martinHostname }}
         volumes:
@@ -78,7 +118,7 @@ services:
         labels:
             traefik:
                 docker:
-                    network: {{ .reverseProxy.network }}
+                    network: {{ .chart.projectName }}_{{ .reverseProxy.network }}
                 enable: true
                 http:
                     routers:
@@ -103,6 +143,12 @@ services:
         image: "{{ .services.martin.image }}"
         container_name: omniviv-martin
         restart: unless-stopped
+        healthcheck:
+            test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 5s
         volumes:
             - "{{ .services.martin.dataPath }}mbtiles:/mbtiles:ro"
             - "{{ .services.martin.dataPath }}fonts:/fonts:ro"
@@ -113,7 +159,7 @@ services:
         labels:
             traefik:
                 docker:
-                    network: {{ .reverseProxy.network }}
+                    network: {{ .chart.projectName }}_{{ .reverseProxy.network }}
                 enable: true
                 http:
                     routers:
@@ -156,18 +202,17 @@ services:
             - /var/run/docker.sock:/var/run/docker.sock:ro
     {{- end }}
 
-{{- if or .services.api.database.storage.volumeName .services.api.data.storage.volumeName }}
 volumes:
-    {{- if .services.api.database.storage.volumeName }}
-    {{ .services.api.database.storage.volumeName }}:
+    {{- if .services.postgres.storage.volumeName }}
+    {{ .services.postgres.storage.volumeName }}:
     {{- end }}
     {{- if .services.api.data.storage.volumeName }}
     {{ .services.api.data.storage.volumeName }}:
     {{- end }}
-{{- end }}
 
 networks:
     {{ .reverseProxy.network }}:
         {{- if ne .reverseProxy.create true }}
         external: true
         {{- end }}
+    internal:
