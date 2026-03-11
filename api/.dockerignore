@@ -1,0 +1,6 @@
+target/
+data/
+database/
+data/gtfs/extracted/
+*.md
+.git/
