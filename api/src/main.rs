@@ -1,28 +1,24 @@
-pub mod api;
-mod config;
-mod providers;
-mod sync;
-
 use std::sync::Arc;
 
 use axum::{Router, routing::get};
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 #[cfg(feature = "dev-tools")]
-use axum_sql_viewer::SqlViewerLayer;
-#[cfg(feature = "dev-tools")]
 use tracing_web_console::TracingLayer;
 
-use config::Config;
-use sync::SyncManager;
+use omniviv_api::{
+    api,
+    config::{Config, read_env_or_file},
+    sync::{self, SyncManager},
+};
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "Live Tram API", version = "0.1.0"),
+    info(title = "Omniviv API", version = "0.1.0"),
     paths(
         api::areas::list::list_areas,
         api::areas::list::get_area,
@@ -33,9 +29,14 @@ use sync::SyncManager;
         api::stations::list::list_stations,
         api::departures::list_departures,
         api::departures::get_departures_by_stop,
+        api::departures::get_departures_by_gtfs_stop,
         api::vehicles::get_vehicles_by_route,
         api::issues::list_issues,
         api::health::health_check,
+        api::gtfs_stops::list_gtfs_stops,
+        api::mapping::set_mapping,
+        api::mapping::remove_mapping,
+        api::mapping::mapping_status,
     ),
     components(schemas(
         api::areas::list::Area,
@@ -54,16 +55,32 @@ use sync::SyncManager;
         api::departures::DepartureListResponse,
         api::departures::StopDeparturesRequest,
         api::departures::StopDeparturesResponse,
+        api::departures::GtfsStopDeparturesRequest,
+        api::departures::GtfsStopDeparturesResponse,
         api::vehicles::VehiclesByRouteRequest,
         api::vehicles::VehiclesByRouteResponse,
         api::vehicles::Vehicle,
         api::vehicles::VehicleStop,
         api::issues::IssueListResponse,
         api::health::HealthResponse,
+        api::gtfs_stops::GtfsStopResponse,
+        api::gtfs_stops::GtfsStopsListResponse,
+        api::mapping::SetMappingRequest,
+        api::mapping::SetMappingResponse,
+        api::mapping::RemoveMappingRequest,
+        api::mapping::RemoveMappingResponse,
+        api::mapping::MappingStatusRequest,
+        api::mapping::MappingStatusResponse,
+        api::mapping::MappingEntry,
+        api::mapping::MappingStatus,
+        api::mapping::MappingFilter,
+        api::mapping::CandidateStop,
         sync::Departure,
         sync::EventType,
         sync::OsmIssue,
         sync::OsmIssueType,
+        sync::IssueCategory,
+        sync::MatchCandidate,
     )),
     tags(
         (name = "areas", description = "Area management endpoints"),
@@ -72,7 +89,8 @@ use sync::SyncManager;
         (name = "departures", description = "Real-time departure information"),
         (name = "vehicles", description = "Live vehicle tracking"),
         (name = "issues", description = "OSM data quality issues"),
-        (name = "health", description = "Service health check")
+        (name = "health", description = "Service health check"),
+        (name = "mapping", description = "IFOPT-to-GTFS stop mapping management")
     )
 )]
 struct ApiDoc;
@@ -116,19 +134,15 @@ async fn main() {
         panic!("CORS configuration error: Either set 'cors_origins' with allowed origins, or set 'cors_permissive: true' for development");
     };
 
-    // Initialize SQLite database
-    let cwd = std::env::current_dir().expect("Failed to get current directory");
-    tracing::info!("Current working directory: {}", cwd.display());
-    let db_path = cwd.join("database");
-    if let Err(e) = std::fs::create_dir_all(&db_path) {
-        tracing::warn!("Could not create database directory: {}", e);
-    }
-    let db_file = db_path.join("data.db");
-    tracing::info!("Database path: {}, exists: {}", db_file.display(), db_file.exists());
-    let db_url = format!("sqlite:{}?mode=rwc", db_file.display());
-    let pool = SqlitePool::connect(&db_url)
+    // Read DATABASE_URL from environment (supports _FILE convention)
+    let database_url = read_env_or_file("DATABASE_URL")
+        .expect("DATABASE_URL environment variable must be set (or DATABASE_URL_FILE for file-based secret)");
+
+    // Connect to PostgreSQL
+    let pool = PgPool::connect(&database_url)
         .await
-        .expect("Failed to connect to SQLite database");
+        .expect("Failed to connect to PostgreSQL database");
+    tracing::info!("Connected to PostgreSQL");
 
     // Run migrations
     let migrator = sqlx::migrate!("./migrations");
@@ -144,7 +158,6 @@ async fn main() {
         SyncManager::new(pool.clone(), config).expect("Failed to initialize sync manager"),
     );
     let departure_store = sync_manager.departure_store();
-    let schedule_store = sync_manager.schedule_store();
     let time_horizon_minutes = sync_manager.time_horizon_minutes();
     let timezone = sync_manager.timezone();
     let issue_store = sync_manager.issue_store();
@@ -158,7 +171,7 @@ async fn main() {
     #[allow(unused_mut)] // mut needed when dev-tools feature is enabled
     let mut app = Router::new()
         .route("/", get(root))
-        .nest("/api", api::router(pool.clone(), departure_store, schedule_store, time_horizon_minutes, timezone, issue_store, vehicle_updates_tx))
+        .nest("/api", api::router(pool.clone(), departure_store, time_horizon_minutes, timezone, issue_store, vehicle_updates_tx))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
@@ -169,9 +182,8 @@ async fn main() {
     {
         let tracing_layer = TracingLayer::new("/tracing");
         app = app
-            .merge(SqlViewerLayer::sqlite("/sql-viewer", pool.clone()).into_router())
             .merge(tracing_layer.into_router());
-        tracing::warn!("Dev tools enabled: SQL Viewer and Tracing Console are accessible");
+        tracing::warn!("Dev tools enabled: Tracing Console is accessible");
     }
 
     // Start server
@@ -183,7 +195,6 @@ async fn main() {
     tracing::info!("Swagger UI: http://localhost:3000/swagger-ui");
     #[cfg(feature = "dev-tools")]
     {
-        tracing::info!("SQL Viewer: http://localhost:3000/sql-viewer");
         tracing::info!("Tracing Console: http://localhost:3000/tracing");
     }
 
@@ -193,5 +204,5 @@ async fn main() {
 }
 
 async fn root() -> &'static str {
-    "Live Tram API"
+    "Omniviv API"
 }

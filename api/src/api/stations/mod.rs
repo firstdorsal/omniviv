@@ -1,10 +1,15 @@
 pub mod list;
 
-use axum::Router;
-use sqlx::SqlitePool;
+pub use list::{StationPlatform, StationStopPosition, StationsState};
 
-pub fn router(pool: SqlitePool) -> Router {
+use axum::Router;
+use sqlx::PgPool;
+
+pub fn router(pool: PgPool) -> Router {
+    let state = StationsState {
+        pool,
+    };
     Router::new()
         .route("/", axum::routing::get(list::list_stations))
-        .with_state(pool)
+        .with_state(state)
 }

@@ -4,11 +4,17 @@ use axum::{
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, PgPool};
 use std::collections::HashMap;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::api::{ErrorResponse, internal_error};
+
+/// Combined state for stations endpoint
+#[derive(Clone)]
+pub struct StationsState {
+    pub pool: PgPool,
+}
 
 /// Internal struct for database row
 #[derive(Debug, FromRow)]
@@ -32,6 +38,8 @@ pub struct StationPlatform {
     pub ref_ifopt: Option<String>,
     pub lat: f64,
     pub lon: f64,
+    /// GTFS stop IDs matched to this platform via spatial matching
+    pub gtfs_stop_ids: Vec<String>,
 }
 
 /// Internal row struct for platform query
@@ -58,6 +66,8 @@ pub struct StationStopPosition {
     pub lat: f64,
     pub lon: f64,
     pub platform_id: Option<i64>,
+    /// GTFS stop IDs matched to this stop position via spatial matching
+    pub gtfs_stop_ids: Vec<String>,
 }
 
 /// Internal row struct for stop position query
@@ -110,9 +120,25 @@ pub struct StationQuery {
     tag = "stations"
 )]
 pub async fn list_stations(
-    State(pool): State<SqlitePool>,
+    State(state): State<StationsState>,
     Query(query): Query<StationQuery>,
 ) -> Result<Json<StationListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Get GTFS IFOPT -> stop ID mapping from the database
+    let ifopt_to_gtfs: HashMap<String, Vec<String>> = {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT ifopt, gtfs_stop_id FROM ifopt_gtfs_mapping ORDER BY ifopt, combined_score DESC",
+        )
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for (ifopt, gtfs_stop_id) in rows {
+            map.entry(ifopt).or_default().push(gtfs_stop_id);
+        }
+        map
+    };
+
     // Only return stations that have at least one platform linked to them
     // This filters out bus-only stop_areas when we only have tram platforms
     let station_rows: Vec<StationRow> = if let Some(area_id) = query.area_id {
@@ -121,12 +147,12 @@ pub async fn list_stations(
             SELECT DISTINCT s.osm_id, s.osm_type, s.name, s.ref_ifopt, s.lat, s.lon, s.area_id
             FROM stations s
             INNER JOIN platforms p ON p.station_id = s.osm_id
-            WHERE s.area_id = ?
+            WHERE s.area_id = $1
             ORDER BY s.name
             "#,
         )
         .bind(area_id)
-        .fetch_all(&pool)
+        .fetch_all(&state.pool)
         .await
     } else {
         sqlx::query_as(
@@ -137,7 +163,7 @@ pub async fn list_stations(
             ORDER BY s.name
             "#,
         )
-        .fetch_all(&pool)
+        .fetch_all(&state.pool)
         .await
     }
     .map_err(internal_error)?;
@@ -154,12 +180,12 @@ pub async fn list_stations(
         r#"
         SELECT station_id, osm_id, name, ref, ref_ifopt, lat, lon
         FROM platforms
-        WHERE station_id IN (SELECT value FROM json_each(?))
+        WHERE station_id = ANY($1::bigint[])
         ORDER BY ref, name
         "#,
     )
-    .bind(serde_json::to_string(&station_ids).unwrap_or_default())
-    .fetch_all(&pool)
+    .bind(&station_ids)
+    .fetch_all(&state.pool)
     .await
     .map_err(internal_error)?;
 
@@ -168,18 +194,26 @@ pub async fn list_stations(
         r#"
         SELECT station_id, osm_id, name, ref, ref_ifopt, lat, lon, platform_id
         FROM stop_positions
-        WHERE station_id IN (SELECT value FROM json_each(?))
+        WHERE station_id = ANY($1::bigint[])
         ORDER BY ref, name
         "#,
     )
-    .bind(serde_json::to_string(&station_ids).unwrap_or_default())
-    .fetch_all(&pool)
+    .bind(&station_ids)
+    .fetch_all(&state.pool)
     .await
     .map_err(internal_error)?;
 
-    // Group platforms and stop_positions by station_id
+    // Group platforms and stop_positions by station_id, adding GTFS stop IDs (deduplicated)
     let mut platforms_by_station: HashMap<i64, Vec<StationPlatform>> = HashMap::new();
     for row in platform_rows {
+        let mut gtfs_stop_ids = row
+            .ref_ifopt
+            .as_ref()
+            .and_then(|ifopt| ifopt_to_gtfs.get(ifopt))
+            .cloned()
+            .unwrap_or_default();
+        gtfs_stop_ids.sort();
+        gtfs_stop_ids.dedup();
         platforms_by_station
             .entry(row.station_id)
             .or_default()
@@ -190,11 +224,20 @@ pub async fn list_stations(
                 ref_ifopt: row.ref_ifopt,
                 lat: row.lat,
                 lon: row.lon,
+                gtfs_stop_ids,
             });
     }
 
     let mut stops_by_station: HashMap<i64, Vec<StationStopPosition>> = HashMap::new();
     for row in stop_rows {
+        let mut gtfs_stop_ids = row
+            .ref_ifopt
+            .as_ref()
+            .and_then(|ifopt| ifopt_to_gtfs.get(ifopt))
+            .cloned()
+            .unwrap_or_default();
+        gtfs_stop_ids.sort();
+        gtfs_stop_ids.dedup();
         stops_by_station
             .entry(row.station_id)
             .or_default()
@@ -206,6 +249,7 @@ pub async fn list_stations(
                 lat: row.lat,
                 lon: row.lon,
                 platform_id: row.platform_id,
+                gtfs_stop_ids,
             });
     }
 

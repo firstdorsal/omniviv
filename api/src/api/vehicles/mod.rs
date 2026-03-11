@@ -3,24 +3,22 @@ mod list;
 pub use list::*;
 
 use axum::{routing::post, Router};
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 
-use crate::sync::{DepartureStore, ScheduleStore};
+use crate::sync::DepartureStore;
 
 #[derive(Clone)]
 pub struct VehiclesState {
-    pub pool: SqlitePool,
+    pub pool: PgPool,
     pub departure_store: DepartureStore,
-    pub schedule_store: ScheduleStore,
     pub time_horizon_minutes: u32,
     pub timezone: chrono_tz::Tz,
 }
 
-pub fn router(pool: SqlitePool, departure_store: DepartureStore, schedule_store: ScheduleStore, time_horizon_minutes: u32, timezone: chrono_tz::Tz) -> Router {
+pub fn router(pool: PgPool, departure_store: DepartureStore, time_horizon_minutes: u32, timezone: chrono_tz::Tz) -> Router {
     let state = VehiclesState {
         pool,
         departure_store,
-        schedule_store,
         time_horizon_minutes,
         timezone,
     };

@@ -1,28 +1,35 @@
 use axum::{extract::State, routing::get, Json, Router};
 use serde::Serialize;
+use sqlx::{FromRow, PgPool};
 use utoipa::ToSchema;
-
-use crate::sync::ScheduleStore;
 
 #[derive(Clone)]
 pub struct HealthState {
-    pub schedule_store: ScheduleStore,
+    pub pool: PgPool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HealthResponse {
     /// Whether the service is running
     pub healthy: bool,
-    /// Whether the static GTFS schedule has been loaded into memory
+    /// Whether the static GTFS schedule has been loaded into PostgreSQL
     pub gtfs_schedule_loaded: bool,
-    /// Number of GTFS stops in the loaded schedule
-    pub gtfs_stop_count: usize,
-    /// Number of GTFS routes in the loaded schedule
-    pub gtfs_route_count: usize,
-    /// Number of GTFS trips in the loaded schedule
-    pub gtfs_trip_count: usize,
+    /// Number of GTFS stops in the database
+    pub gtfs_stop_count: i64,
+    /// Number of GTFS routes in the database
+    pub gtfs_route_count: i64,
+    /// Number of GTFS trips in the database
+    pub gtfs_trip_count: i64,
     /// Number of IFOPT-to-GTFS stop mappings
-    pub ifopt_mapping_count: usize,
+    pub ifopt_mapping_count: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct FeedMeta {
+    stop_count: i64,
+    route_count: i64,
+    trip_count: i64,
+    mapping_count: i64,
 }
 
 /// Health check endpoint
@@ -35,19 +42,18 @@ pub struct HealthResponse {
     tag = "health"
 )]
 pub async fn health_check(State(state): State<HealthState>) -> Json<HealthResponse> {
-    let schedule_guard = state.schedule_store.read().await;
-    let (loaded, stop_count, route_count, trip_count, ifopt_count) =
-        if let Some(schedule) = schedule_guard.as_ref() {
-            (
-                true,
-                schedule.stops.len(),
-                schedule.routes.len(),
-                schedule.trips.len(),
-                schedule.ifopt_to_gtfs.len(),
-            )
-        } else {
-            (false, 0, 0, 0, 0)
-        };
+    let meta = sqlx::query_as::<_, FeedMeta>(
+        "SELECT stop_count, route_count, trip_count, mapping_count FROM gtfs_feed_meta WHERE id = 1",
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let (loaded, stop_count, route_count, trip_count, mapping_count) = match meta {
+        Some(m) => (true, m.stop_count, m.route_count, m.trip_count, m.mapping_count),
+        None => (false, 0, 0, 0, 0),
+    };
 
     Json(HealthResponse {
         healthy: true,
@@ -55,12 +61,12 @@ pub async fn health_check(State(state): State<HealthState>) -> Json<HealthRespon
         gtfs_stop_count: stop_count,
         gtfs_route_count: route_count,
         gtfs_trip_count: trip_count,
-        ifopt_mapping_count: ifopt_count,
+        ifopt_mapping_count: mapping_count,
     })
 }
 
-pub fn router(schedule_store: ScheduleStore) -> Router {
-    let state = HealthState { schedule_store };
+pub fn router(pool: PgPool) -> Router {
+    let state = HealthState { pool };
     Router::new()
         .route("/", get(health_check))
         .with_state(state)

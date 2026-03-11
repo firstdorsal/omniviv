@@ -7,7 +7,7 @@ use utoipa::ToSchema;
 
 use super::VehiclesState;
 use crate::api::ErrorResponse;
-use crate::providers::timetables::gtfs::realtime;
+use crate::providers::timetables::gtfs::{realtime, static_data};
 use crate::sync::{Departure, EventType};
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -47,7 +47,7 @@ pub struct VehicleStop {
     /// Stop name (if available)
     pub stop_name: Option<String>,
     /// Sequence number on the route
-    pub sequence: i64,
+    pub sequence: i32,
     /// Latitude
     pub lat: f64,
     /// Longitude
@@ -66,7 +66,7 @@ pub struct VehicleStop {
 
 #[derive(Debug, FromRow)]
 struct RouteStopInfo {
-    sequence: i64,
+    sequence: i32,
     stop_ifopt: Option<String>,
     stop_name: Option<String>,
     lat: Option<f64>,
@@ -96,7 +96,7 @@ pub async fn get_vehicles_by_route(
 ) -> Result<Json<VehiclesByRouteResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Get route info
     let route_info: Option<RouteInfo> = sqlx::query_as(
-        "SELECT ref as line_ref FROM routes WHERE osm_id = ?",
+        "SELECT ref as line_ref FROM routes WHERE osm_id = $1",
     )
     .bind(request.route_id)
     .fetch_optional(&state.pool)
@@ -132,7 +132,7 @@ pub async fn get_vehicles_by_route(
         LEFT JOIN stop_positions sp ON rs.stop_position_id = sp.osm_id
         LEFT JOIN platforms p ON rs.platform_id = p.osm_id
         LEFT JOIN stations st ON rs.station_id = st.osm_id
-        WHERE rs.route_id = ?
+        WHERE rs.route_id = $1
         ORDER BY rs.sequence
         "#,
     )
@@ -149,7 +149,7 @@ pub async fn get_vehicles_by_route(
     })?;
 
     // Build a map of stop_ifopt -> (sequence, name, lat, lon)
-    let stop_info_map: HashMap<String, (i64, Option<String>, f64, f64)> = route_stops
+    let stop_info_map: HashMap<String, (i32, Option<String>, f64, f64)> = route_stops
         .iter()
         .filter_map(|s| {
             let ifopt = s.stop_ifopt.as_ref()?;
@@ -174,14 +174,13 @@ pub async fn get_vehicles_by_route(
 
     // Get departures either from the store (real-time) or schedule (simulated time)
     let trip_departures: HashMap<String, Vec<Departure>> = if let Some(ref_time) = simulated_time {
-        // Compute departures from static schedule for the simulated time
-        let schedule_guard = state.schedule_store.read().await;
-        match schedule_guard.as_ref() {
-            Some(schedule) => {
-                let stop_ids: HashSet<String> = stop_ifopts.iter().map(|s| s.to_string()).collect();
+        // Compute departures from static schedule (loaded from PG) for the simulated time
+        let stop_ids: HashSet<String> = stop_ifopts.iter().map(|s| s.to_string()).collect();
+        match static_data::build_schedule_from_db(&state.pool, &stop_ids).await {
+            Ok(schedule) => {
                 let time_horizon = Duration::minutes(state.time_horizon_minutes as i64);
                 let all_departures = realtime::compute_schedule_departures(
-                    schedule,
+                    &schedule,
                     &stop_ids,
                     ref_time,
                     time_horizon,
@@ -207,7 +206,7 @@ pub async fn get_vehicles_by_route(
                 }
                 result
             }
-            None => HashMap::new(),
+            Err(_) => HashMap::new(),
         }
     } else {
         // Use real-time departure store
@@ -297,6 +296,11 @@ pub async fn get_vehicles_by_route(
 
             // Sort stops by sequence
             stops.sort_by_key(|s| s.sequence);
+
+            // Need at least 2 stops to show a moving vehicle
+            if stops.len() < 2 {
+                return None;
+            }
 
             Some(Vehicle {
                 trip_id,

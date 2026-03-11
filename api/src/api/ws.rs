@@ -8,20 +8,47 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use tokio::sync::broadcast;
+use tracing::warn;
 
 use super::vehicles::{Vehicle, VehicleStop};
-use crate::providers::timetables::gtfs::realtime;
-use crate::sync::{DepartureStore, EventType, ScheduleStore, VehicleUpdateSender};
+use crate::providers::timetables::gtfs::{realtime, static_data};
+use crate::sync::{DepartureStore, EventType, VehicleUpdateSender};
+
+/// Error type for internal WebSocket data-building operations.
+/// Converts to String for WebSocket error messages while providing
+/// structured logging of the underlying cause.
+#[derive(Debug, thiserror::Error)]
+enum WsError {
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] sqlx::Error),
+}
+
+impl WsError {
+    /// Convert to a user-facing error string, logging the internal details.
+    fn into_message(self, context: &str) -> String {
+        match &self {
+            WsError::DatabaseError(e) => {
+                tracing::error!(error = %e, context, "WebSocket database error");
+            }
+        }
+        format!("{}: {}", context, self)
+    }
+}
+
+/// Maximum number of routes a single WebSocket client can subscribe to
+const MAX_ROUTE_SUBSCRIPTIONS: usize = 100;
+
+/// Time threshold in seconds - if reference time is within this of now, treat as real-time
+const REALTIME_THRESHOLD_SECONDS: i64 = 180;
 
 #[derive(Clone)]
 pub struct WsState {
-    pub pool: SqlitePool,
+    pub pool: PgPool,
     pub departure_store: DepartureStore,
-    pub schedule_store: ScheduleStore,
     pub time_horizon_minutes: u32,
     pub timezone: chrono_tz::Tz,
     pub vehicle_updates_tx: VehicleUpdateSender,
@@ -165,13 +192,25 @@ pub async fn ws_vehicles(
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
+/// Commands sent from the receiver task to the forward task
+#[derive(Debug)]
+enum SubscriptionCommand {
+    SubscribeRoutes {
+        route_ids: Vec<i64>,
+        reference_time: Option<String>,
+    },
+    /// Send an error message to the client
+    SendError {
+        message: String,
+    },
+}
+
 async fn handle_socket(socket: WebSocket, state: WsState) {
     let (mut sender, mut receiver) = socket.split();
     let mut vehicle_rx = state.vehicle_updates_tx.subscribe();
     let mut subscribed_routes: HashSet<i64> = HashSet::new();
     let mut previous_state = PreviousState::default();
 
-    // Send connected message
     let connected_msg = ServerMessage::Connected {
         message: "Connected to vehicle updates. Send subscribe message with route_ids.".to_string(),
     };
@@ -180,7 +219,7 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
     }
 
     // Channel to communicate subscriptions from receiver task to sender task
-    let (sub_tx, mut sub_rx) = tokio::sync::mpsc::channel::<(Vec<i64>, Option<String>)>(16);
+    let (sub_tx, mut sub_rx) = tokio::sync::mpsc::channel::<SubscriptionCommand>(16);
 
     // Clone state for the forward task
     let forward_state = state.clone();
@@ -192,37 +231,47 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
         loop {
             tokio::select! {
                 // Handle subscription updates
-                Some((route_ids, ref_time)) = sub_rx.recv() => {
-                    subscribed_routes = route_ids.iter().copied().collect();
-                    simulated_time = parse_ws_reference_time(&ref_time);
-                    // Reset previous state when subscription changes
-                    previous_state = PreviousState::default();
+                Some(cmd) = sub_rx.recv() => {
+                    match cmd {
+                        SubscriptionCommand::SubscribeRoutes { route_ids, reference_time } => {
+                            subscribed_routes = route_ids.iter().copied().collect();
+                            simulated_time = parse_ws_reference_time(&reference_time);
+                            // Reset previous state when subscription changes
+                            previous_state = PreviousState::default();
 
-                    // Send full data for newly subscribed routes
-                    if !subscribed_routes.is_empty() {
-                        let routes: Vec<i64> = subscribed_routes.iter().copied().collect();
-                        match build_vehicle_data(&forward_state, &routes, simulated_time).await {
-                            Ok(data) => {
-                                // Initialize previous state with current data
-                                for route in &data {
-                                    for vehicle in &route.vehicles {
-                                        let key = (route.route_id, vehicle.trip_id.clone());
-                                        let hash = compute_vehicle_hash(vehicle);
-                                        previous_state.vehicle_hashes.insert(key, hash);
+                            // Send full data for newly subscribed routes
+                            if !subscribed_routes.is_empty() {
+                                let routes: Vec<i64> = subscribed_routes.iter().copied().collect();
+                                match build_vehicle_data(&forward_state, &routes, simulated_time).await {
+                                    Ok(data) => {
+                                        // Initialize previous state with current data
+                                        for route in &data {
+                                            for vehicle in &route.vehicles {
+                                                let key = (route.route_id, vehicle.trip_id.clone());
+                                                let hash = compute_vehicle_hash(vehicle);
+                                                previous_state.vehicle_hashes.insert(key, hash);
+                                            }
+                                        }
+                                        let msg = ServerMessage::Vehicles { routes: data };
+                                        if let Ok(json) = serde_json::to_string(&msg) {
+                                            if sender.send(Message::Text(json.into())).await.is_err() {
+                                                break;
+                                            }
+                                        }
                                     }
-                                }
-                                let msg = ServerMessage::Vehicles { routes: data };
-                                if let Ok(json) = serde_json::to_string(&msg) {
-                                    if sender.send(Message::Text(json.into())).await.is_err() {
-                                        break;
+                                    Err(e) => {
+                                        let msg = ServerMessage::Error { message: e.into_message("Failed to build vehicle data") };
+                                        if let Ok(json) = serde_json::to_string(&msg) {
+                                            let _ = sender.send(Message::Text(json.into())).await;
+                                        }
                                     }
                                 }
                             }
-                            Err(e) => {
-                                let msg = ServerMessage::Error { message: e };
-                                if let Ok(json) = serde_json::to_string(&msg) {
-                                    let _ = sender.send(Message::Text(json.into())).await;
-                                }
+                        }
+                        SubscriptionCommand::SendError { message } => {
+                            let msg = ServerMessage::Error { message };
+                            if let Ok(json) = serde_json::to_string(&msg) {
+                                let _ = sender.send(Message::Text(json.into())).await;
                             }
                         }
                     }
@@ -231,20 +280,20 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
                 result = vehicle_rx.recv() => {
                     match result {
                         Ok(_update) => {
+                            // Skip if no subscriptions
                             if subscribed_routes.is_empty() {
                                 continue;
                             }
+
                             // For simulated time, skip broadcast updates (schedule data doesn't change)
                             if simulated_time.is_some() {
                                 continue;
                             }
+
                             let routes: Vec<i64> = subscribed_routes.iter().copied().collect();
                             match build_vehicle_data(&forward_state, &routes, None).await {
                                 Ok(data) => {
-                                    // Compute changes from previous state
                                     let changes = compute_changes(&mut previous_state, &data);
-
-                                    // Only send if there are actual changes
                                     if !changes.is_empty() {
                                         let msg = ServerMessage::VehiclesUpdate { changes };
                                         if let Ok(json) = serde_json::to_string(&msg) {
@@ -255,7 +304,7 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::warn!("Failed to build vehicle data: {}", e);
+                                    tracing::warn!(error = %e, "Failed to build vehicle data");
                                 }
                             }
                         }
@@ -271,11 +320,21 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
     while let Some(msg) = receiver.next().await {
         match msg {
             Ok(Message::Text(text)) => {
-                if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
-                    match client_msg {
+                match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(client_msg) => match client_msg {
                         ClientMessage::Subscribe { route_ids, reference_time } => {
-                            let _ = sub_tx.send((route_ids, reference_time)).await;
+                            if route_ids.len() > MAX_ROUTE_SUBSCRIPTIONS {
+                                let error_msg = format!("Cannot subscribe to more than {} routes", MAX_ROUTE_SUBSCRIPTIONS);
+                                let _ = sub_tx.send(SubscriptionCommand::SendError { message: error_msg }).await;
+                                continue;
+                            }
+                            let _ = sub_tx.send(SubscriptionCommand::SubscribeRoutes { route_ids, reference_time }).await;
                         }
+                    },
+                    Err(e) => {
+                        warn!("Failed to parse WebSocket message: {}", e);
+                        let error_msg = format!("Invalid message format: {}", e);
+                        let _ = sub_tx.send(SubscriptionCommand::SendError { message: error_msg }).await;
                     }
                 }
             }
@@ -298,8 +357,24 @@ struct RouteInfo {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+struct RouteInfoWithId {
+    osm_id: i64,
+    line_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
 struct RouteStopInfo {
-    sequence: i64,
+    sequence: i32,
+    stop_ifopt: Option<String>,
+    stop_name: Option<String>,
+    lat: Option<f64>,
+    lon: Option<f64>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct RouteStopInfoWithRoute {
+    route_id: i64,
+    sequence: i32,
     stop_ifopt: Option<String>,
     stop_name: Option<String>,
     lat: Option<f64>,
@@ -311,48 +386,74 @@ async fn build_vehicle_data(
     state: &WsState,
     route_ids: &[i64],
     simulated_time: Option<DateTime<Utc>>,
-) -> Result<Vec<RouteVehicles>, String> {
+) -> Result<Vec<RouteVehicles>, WsError> {
+    if route_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Batch query: Get all route info at once
+    let route_infos: Vec<RouteInfoWithId> = sqlx::query_as(
+        "SELECT osm_id, ref as line_ref FROM routes WHERE osm_id = ANY($1::bigint[])",
+    )
+    .bind(route_ids)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(WsError::from)?;
+
+    let route_info_map: HashMap<i64, RouteInfo> = route_infos
+        .into_iter()
+        .map(|r| (r.osm_id, RouteInfo { line_ref: r.line_ref }))
+        .collect();
+
+    // Batch query: Get all route stops at once
+    let all_route_stops: Vec<RouteStopInfoWithRoute> = sqlx::query_as(
+        r#"
+        SELECT
+            rs.route_id,
+            rs.sequence,
+            COALESCE(sp.ref_ifopt, p.ref_ifopt, st.ref_ifopt) as stop_ifopt,
+            COALESCE(sp.name, p.name, st.name) as stop_name,
+            COALESCE(sp.lat, p.lat, st.lat) as lat,
+            COALESCE(sp.lon, p.lon, st.lon) as lon
+        FROM route_stops rs
+        LEFT JOIN stop_positions sp ON rs.stop_position_id = sp.osm_id
+        LEFT JOIN platforms p ON rs.platform_id = p.osm_id
+        LEFT JOIN stations st ON rs.station_id = st.osm_id
+        WHERE rs.route_id = ANY($1::bigint[])
+        ORDER BY rs.route_id, rs.sequence
+        "#,
+    )
+    .bind(route_ids)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(WsError::from)?;
+
+    // Group stops by route_id
+    let mut route_stops_map: HashMap<i64, Vec<RouteStopInfo>> = HashMap::new();
+    for rs in all_route_stops {
+        route_stops_map.entry(rs.route_id).or_default().push(RouteStopInfo {
+            sequence: rs.sequence,
+            stop_ifopt: rs.stop_ifopt,
+            stop_name: rs.stop_name,
+            lat: rs.lat,
+            lon: rs.lon,
+        });
+    }
+
     let mut results = Vec::new();
 
     for &route_id in route_ids {
-        // Get route info
-        let route_info: Option<RouteInfo> = sqlx::query_as(
-            "SELECT ref as line_ref FROM routes WHERE osm_id = ?",
-        )
-        .bind(route_id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| format!("Database error: {}", e))?;
-
-        let route_info = match route_info {
+        // Get route info from pre-fetched map
+        let route_info = match route_info_map.get(&route_id) {
             Some(r) => r,
             None => continue, // Skip unknown routes
         };
 
-        // Get route stops
-        let route_stops: Vec<RouteStopInfo> = sqlx::query_as(
-            r#"
-            SELECT
-                rs.sequence,
-                COALESCE(sp.ref_ifopt, p.ref_ifopt, st.ref_ifopt) as stop_ifopt,
-                COALESCE(sp.name, p.name, st.name) as stop_name,
-                COALESCE(sp.lat, p.lat, st.lat) as lat,
-                COALESCE(sp.lon, p.lon, st.lon) as lon
-            FROM route_stops rs
-            LEFT JOIN stop_positions sp ON rs.stop_position_id = sp.osm_id
-            LEFT JOIN platforms p ON rs.platform_id = p.osm_id
-            LEFT JOIN stations st ON rs.station_id = st.osm_id
-            WHERE rs.route_id = ?
-            ORDER BY rs.sequence
-            "#,
-        )
-        .bind(route_id)
-        .fetch_all(&state.pool)
-        .await
-        .map_err(|e| format!("Database error: {}", e))?;
+        // Get route stops from pre-fetched map (take ownership to avoid cloning the whole Vec)
+        let route_stops = route_stops_map.remove(&route_id).unwrap_or_default();
 
         // Build stop info map
-        let stop_info_map: HashMap<String, (i64, Option<String>, f64, f64)> = route_stops
+        let stop_info_map: HashMap<String, (i32, Option<String>, f64, f64)> = route_stops
             .iter()
             .filter_map(|s| {
                 let ifopt = s.stop_ifopt.as_ref()?;
@@ -367,7 +468,7 @@ async fn build_vehicle_data(
         if stop_ifopts.is_empty() {
             results.push(RouteVehicles {
                 route_id,
-                line_number: route_info.line_ref,
+                line_number: route_info.line_ref.clone(),
                 vehicles: vec![],
             });
             continue;
@@ -375,13 +476,12 @@ async fn build_vehicle_data(
 
         // Get departures either from store (real-time) or schedule (simulated time)
         let trip_departures: HashMap<String, Vec<crate::sync::Departure>> = if let Some(ref_time) = simulated_time {
-            let schedule_guard = state.schedule_store.read().await;
-            match schedule_guard.as_ref() {
-                Some(schedule) => {
-                    let stop_ids: HashSet<String> = stop_ifopts.iter().map(|s| s.to_string()).collect();
+            let stop_ids: HashSet<String> = stop_ifopts.iter().map(|s| s.to_string()).collect();
+            match static_data::build_schedule_from_db(&state.pool, &stop_ids).await {
+                Ok(schedule) => {
                     let time_horizon = Duration::minutes(state.time_horizon_minutes as i64);
                     let all_departures = realtime::compute_schedule_departures(
-                        schedule,
+                        &schedule,
                         &stop_ids,
                         ref_time,
                         time_horizon,
@@ -406,7 +506,7 @@ async fn build_vehicle_data(
                     }
                     result
                 }
-                None => HashMap::new(),
+                Err(_) => HashMap::new(),
             }
         } else {
             let store = state.departure_store.read().await;
@@ -493,6 +593,11 @@ async fn build_vehicle_data(
 
                 stops.sort_by_key(|s| s.sequence);
 
+                // Need at least 2 stops to show a moving vehicle
+                if stops.len() < 2 {
+                    return None;
+                }
+
                 Some(Vehicle {
                     trip_id,
                     line_number,
@@ -511,7 +616,7 @@ async fn build_vehicle_data(
 
         results.push(RouteVehicles {
             route_id,
-            line_number: route_info.line_ref,
+            line_number: route_info.line_ref.clone(),
             vehicles,
         });
     }
@@ -525,9 +630,9 @@ fn parse_ws_reference_time(reference_time: &Option<String>) -> Option<DateTime<U
     let parsed = DateTime::parse_from_rfc3339(rt).ok()?;
     let dt = parsed.with_timezone(&Utc);
 
-    // If the reference time is within 3 minutes of now, treat it as real-time
+    // If the reference time is within threshold of now, treat it as real-time
     let diff = (dt - Utc::now()).num_seconds().abs();
-    if diff < 180 {
+    if diff < REALTIME_THRESHOLD_SECONDS {
         return None;
     }
     Some(dt)

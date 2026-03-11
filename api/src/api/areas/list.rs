@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use serde::Serialize;
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, PgPool};
 use utoipa::ToSchema;
 
 use crate::api::{ErrorResponse, internal_error};
@@ -17,8 +17,8 @@ pub struct Area {
     pub west: f64,
     pub north: f64,
     pub east: f64,
-    pub last_synced_at: Option<String>,
-    pub created_at: String,
+    pub last_synced_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Serialize, ToSchema, FromRow)]
@@ -47,7 +47,7 @@ pub struct AreaListResponse {
     tag = "areas"
 )]
 pub async fn list_areas(
-    State(pool): State<SqlitePool>,
+    State(pool): State<PgPool>,
 ) -> Result<Json<AreaListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let areas: Vec<Area> = sqlx::query_as(
         r#"
@@ -86,7 +86,7 @@ pub async fn list_areas(
     tag = "areas"
 )]
 pub async fn get_area(
-    State(pool): State<SqlitePool>,
+    State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> Result<Json<Area>, (StatusCode, Json<ErrorResponse>)> {
     let area: Option<Area> = sqlx::query_as(
@@ -101,7 +101,7 @@ pub async fn get_area(
             last_synced_at,
             created_at
         FROM areas
-        WHERE id = ?
+        WHERE id = $1
         "#,
     )
     .bind(id)
@@ -135,7 +135,7 @@ pub async fn get_area(
     tag = "areas"
 )]
 pub async fn get_area_stats(
-    State(pool): State<SqlitePool>,
+    State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> Result<Json<AreaStats>, (StatusCode, Json<ErrorResponse>)> {
     // Single query to get area info and all counts (fixes N+1 query issue)
@@ -149,7 +149,7 @@ pub async fn get_area_stats(
             (SELECT COUNT(*) FROM stop_positions WHERE area_id = a.id) as stop_position_count,
             (SELECT COUNT(*) FROM routes WHERE area_id = a.id) as route_count
         FROM areas a
-        WHERE a.id = ?
+        WHERE a.id = $1
         "#,
     )
     .bind(id)
