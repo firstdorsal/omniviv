@@ -1,0 +1,11 @@
+{
+  "version": "0.1.0",
+  "board": "VIEWE-UEDX24320024E-WB-A",
+  "description": "Omniviv Departure Board",
+  "configOffset": 4259840,
+  "files": [
+    { "name": "bootloader.bin", "offset": 0 },
+    { "name": "partitions.bin", "offset": 32768 },
+    { "name": "firmware.bin", "offset": 65536 }
+  ]
+}
