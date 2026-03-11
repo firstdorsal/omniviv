@@ -1,5 +1,9 @@
 import type { Vehicle, VehicleStop } from "../../api";
-import { featureManager, shouldStopAtStation, getDwellTimeMs } from "./features";
+// IMPORTANT: Import directly from feature files, NOT from the barrel (./features).
+// The barrel registers collisionAvoidance which imports this file — using the barrel
+// here would create a circular dependency.
+import { featureManager } from "./features/FeatureManager";
+import { shouldStopAtStation, getDwellTimeMs } from "./features/simulatedStops";
 
 export interface VehiclePosition {
     tripId: string;
@@ -764,12 +768,10 @@ export function easeInOutProgress(progress: number): number {
 
     if (progress < accelEnd) {
         // Acceleration phase: cubic ease-in
-        // Maps 0-0.15 to 0-0.15 with smooth start
         const t = progress / accelEnd;
         return accelEnd * (t * t * (3 - 2 * t));
     } else if (progress > decelStart) {
         // Deceleration phase: cubic ease-out
-        // Maps 0.85-1 to 0.85-1 with smooth end
         const t = (progress - decelStart) / (1 - decelStart);
         const eased = t * t * (3 - 2 * t);
         return decelStart + (1 - decelStart) * eased;
@@ -786,18 +788,17 @@ export interface SmoothedVehiclePosition extends VehiclePosition {
     renderedLon: number;
     renderedLat: number;
     renderedBearing: number;
-    speedMultiplier: number;
     lastUpdateTime: number;
-    // Smoothed route position (interpolated from target)
     renderedLinearPosition?: number;
+    /** Track which segment we're on to detect backward teleporting from GTFS-RT updates */
+    prevStopIfopt?: string;
+    nextStopIfopt?: string;
 }
 
 // Thresholds for position smoothing
 const SNAP_DISTANCE_METERS = 500; // Distance above which we snap instead of smooth
-const SMOOTH_DISTANCE_METERS = 50; // Distance below which we consider "on track"
-const MAX_SPEED_MULTIPLIER = 2.0;
-const MIN_SPEED_MULTIPLIER = 0.5;
-const BEARING_SMOOTHING = 0.15; // How fast bearing catches up (0-1)
+// Bearing smoothing: exponential decay half-life in ms
+const BEARING_HALF_LIFE_MS = 200;
 
 /**
  * Calculate haversine distance between two coordinates in meters
@@ -831,20 +832,28 @@ export function createSmoothedPosition(target: VehiclePosition): SmoothedVehicle
         renderedLon: target.lon,
         renderedLat: target.lat,
         renderedBearing: target.bearing,
-        speedMultiplier: 1.0,
         lastUpdateTime: Date.now(),
         renderedLinearPosition: target.routeLinearPosition,
+        prevStopIfopt: target.currentStop?.stop_ifopt,
+        nextStopIfopt: target.nextStop?.stop_ifopt,
     };
 }
 
 /**
- * Update smoothed position to move toward target position
- * Uses speed adjustment (acceleration/deceleration) rather than teleporting
+ * Update smoothed position to move toward target position.
+ *
+ * Uses route-based smoothing when a linearized route is available:
+ * - Smooths the `routeLinearPosition` with forward-only clamping
+ * - Derives lat/lon from the smoothed linear position on the route
+ * - Prevents backward teleporting caused by GTFS-RT time estimate changes
+ *
+ * Falls back to direct lat/lon smoothing when no route is available.
  */
 export function updateSmoothedPosition(
     current: SmoothedVehiclePosition,
     target: VehiclePosition,
-    deltaMs: number
+    deltaMs: number,
+    linearizedRoute?: LinearizedRoute | null
 ): SmoothedVehiclePosition {
     const distance = haversineDistanceCoords(
         current.renderedLon,
@@ -853,6 +862,11 @@ export function updateSmoothedPosition(
         target.lat
     );
 
+    // Detect if the vehicle changed segments (different prev/next stops)
+    const sameSegment =
+        current.prevStopIfopt === target.currentStop?.stop_ifopt &&
+        current.nextStopIfopt === target.nextStop?.stop_ifopt;
+
     // If distance is too large, snap to target (vehicle likely jumped routes or restarted)
     if (distance > SNAP_DISTANCE_METERS) {
         return {
@@ -860,62 +874,58 @@ export function updateSmoothedPosition(
             renderedLon: target.lon,
             renderedLat: target.lat,
             renderedBearing: target.bearing,
-            speedMultiplier: 1.0,
             lastUpdateTime: Date.now(),
+            renderedLinearPosition: target.routeLinearPosition,
+            prevStopIfopt: target.currentStop?.stop_ifopt,
+            nextStopIfopt: target.nextStop?.stop_ifopt,
         };
     }
 
-    // Calculate speed multiplier based on distance to target
-    let speedMultiplier = 1.0;
-    if (distance > SMOOTH_DISTANCE_METERS) {
-        // Determine if we're behind or ahead by comparing progress
-        const isBehind = current.progress < target.progress;
-
-        if (isBehind) {
-            // Speed up to catch up (max 2x)
-            speedMultiplier = 1.0 + (distance / SNAP_DISTANCE_METERS) * (MAX_SPEED_MULTIPLIER - 1.0);
-            speedMultiplier = Math.min(speedMultiplier, MAX_SPEED_MULTIPLIER);
-        } else {
-            // Slow down to let target catch up (min 0.5x)
-            speedMultiplier = 1.0 - (distance / SNAP_DISTANCE_METERS) * (1.0 - MIN_SPEED_MULTIPLIER);
-            speedMultiplier = Math.max(speedMultiplier, MIN_SPEED_MULTIPLIER);
-        }
-    }
-
-    // Smoothly interpolate speed multiplier to avoid jerky changes
-    const smoothedSpeedMultiplier = current.speedMultiplier + (speedMultiplier - current.speedMultiplier) * 0.1;
-
-    // Calculate how much to move toward target this frame
-    // Base movement: move fraction of distance based on delta time
-    // At 50ms intervals, we want to catch up smoothly over ~1-2 seconds
-    const catchupFactor = (deltaMs / 1000) * smoothedSpeedMultiplier * 2.0;
-    const moveFraction = Math.min(1, catchupFactor);
-
-    // Interpolate position toward target
-    const newLon = current.renderedLon + (target.lon - current.renderedLon) * moveFraction;
-    const newLat = current.renderedLat + (target.lat - current.renderedLat) * moveFraction;
-
-    // Smoothly interpolate bearing
+    // Smoothly interpolate bearing (frame-rate independent)
     let bearingDiff = target.bearing - current.renderedBearing;
-    // Handle wrap-around (e.g., 350 -> 10 should go +20, not -340)
     if (bearingDiff > 180) bearingDiff -= 360;
     if (bearingDiff < -180) bearingDiff += 360;
-    const newBearing = (current.renderedBearing + bearingDiff * BEARING_SMOOTHING + 360) % 360;
+    const bearingDecay = 1 - Math.pow(0.5, deltaMs / BEARING_HALF_LIFE_MS);
+    const newBearing = (current.renderedBearing + bearingDiff * bearingDecay + 360) % 360;
 
-    // Smoothly interpolate linear position along route
-    let newLinearPosition = target.routeLinearPosition;
-    if (current.renderedLinearPosition !== undefined && target.routeLinearPosition !== undefined) {
-        newLinearPosition = current.renderedLinearPosition +
-            (target.routeLinearPosition - current.renderedLinearPosition) * moveFraction;
+    // Route-based smoothing: smooth the linear position and derive lat/lon from route
+    if (linearizedRoute &&
+        current.renderedLinearPosition !== undefined &&
+        target.routeLinearPosition !== undefined) {
+
+        // Forward-only clamping: when on the same segment (between the same stops),
+        // never let the target linear position go backward.
+        // This prevents backward teleporting when GTFS-RT updates change estimated times.
+        const isInTransit = target.status === "in_transit" || target.status === "approaching";
+        let effectiveTargetLinear = target.routeLinearPosition;
+        if (isInTransit && sameSegment && effectiveTargetLinear < current.renderedLinearPosition) {
+            effectiveTargetLinear = current.renderedLinearPosition;
+        }
+
+        // Derive lat/lon from the route at the (possibly clamped) target linear position
+        const routePos = getPositionAtDistance(linearizedRoute, effectiveTargetLinear);
+
+        return {
+            ...target,
+            renderedLon: routePos.lon,
+            renderedLat: routePos.lat,
+            renderedBearing: newBearing,
+            lastUpdateTime: Date.now(),
+            renderedLinearPosition: effectiveTargetLinear,
+            prevStopIfopt: target.currentStop?.stop_ifopt,
+            nextStopIfopt: target.nextStop?.stop_ifopt,
+        };
     }
 
+    // Fallback: direct lat/lon assignment (no route geometry available)
     return {
         ...target,
-        renderedLon: newLon,
-        renderedLat: newLat,
+        renderedLon: target.lon,
+        renderedLat: target.lat,
         renderedBearing: newBearing,
-        speedMultiplier: smoothedSpeedMultiplier,
         lastUpdateTime: Date.now(),
-        renderedLinearPosition: newLinearPosition,
+        renderedLinearPosition: target.routeLinearPosition,
+        prevStopIfopt: target.currentStop?.stop_ifopt,
+        nextStopIfopt: target.nextStop?.stop_ifopt,
     };
 }

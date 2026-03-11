@@ -11,7 +11,9 @@ describe("formatTime", () => {
     it("uses browser default locale (not hardcoded de-DE)", () => {
         const isoString = "2026-02-02T14:30:00Z";
         const date = new Date(isoString);
-        const expected = new Intl.DateTimeFormat(undefined, {
+        // Match the implementation which uses navigator.language
+        const locale = typeof navigator !== 'undefined' ? navigator.language : undefined;
+        const expected = new Intl.DateTimeFormat(locale, {
             hour: "2-digit",
             minute: "2-digit",
             second: "2-digit",

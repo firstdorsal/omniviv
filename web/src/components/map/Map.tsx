@@ -5,7 +5,9 @@ import React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Area, Station, StationPlatform, StationStopPosition } from "../../api";
 import type { RouteVehicles, RouteWithGeometry } from "../../App";
+import type { MappingLine, MappingGtfsStop } from "../MappingManager";
 import { getConfig } from "../../config";
+import { GtfsStopPopup } from "../GtfsStopPopup";
 import { PlatformPopup } from "../PlatformPopup";
 import { StationPopup } from "../StationPopup";
 import { Button } from "../ui/button";
@@ -71,6 +73,7 @@ interface MapProps {
     showVehicles: boolean;
     debugOptions: DebugOptions;
     simulatedTime: Date;
+    timeSpeed: number;
     onSetNavigationStart?: (lat: number, lon: number) => void;
     onSetNavigationEnd?: (lat: number, lon: number) => void;
     pickMode?: PickMode;
@@ -79,6 +82,8 @@ interface MapProps {
     navigationEnd?: NavigationLocation | null;
     highlightedBuilding?: HighlightedBuilding | null;
     onHighlightBuilding?: (building: HighlightedBuilding | null) => void;
+    mappingLines?: MappingLine[];
+    mappingGtfsStops?: MappingGtfsStop[];
 }
 
 interface ContextMenuState {
@@ -123,6 +128,11 @@ export default class Map extends React.Component<MapProps, MapState> {
     // Data caches
     private routeColors = new globalThis.Map<string, string>();
     private routeGeometries = new globalThis.Map<number, number[][][]>();
+    private hashSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // Guards against stale async initialization (e.g. React StrictMode double-mount).
+    // Each componentDidMount increments this; async callbacks abort if it changed.
+    private initGeneration = 0;
 
     constructor(props: MapProps) {
         super(props);
@@ -146,8 +156,14 @@ export default class Map extends React.Component<MapProps, MapState> {
         };
     }
 
+    /** Fly the map camera to a specific location */
+    public flyTo(lat: number, lon: number) {
+        this.map?.flyTo({ center: [lon, lat], zoom: 17, duration: 1000 });
+    }
+
     componentDidMount() {
-        this.initializeMap();
+        this.initGeneration++;
+        this.initializeMap(this.initGeneration);
         this.updateRouteData();
     }
 
@@ -185,13 +201,19 @@ export default class Map extends React.Component<MapProps, MapState> {
                 // Always update the vehicles reference so animation loop uses latest data
                 this.vehicleRenderer?.setVehicles(this.props.vehicles);
                 if (this.props.showVehicles) {
-                    this.updateVehicles();
+                    // Ensure animation is running (may have been stopped by StrictMode remount).
+                    // startAnimation() is a no-op if already running. The loop picks up
+                    // new vehicles via this.currentVehicles on the next frame.
+                    this.vehicleRenderer?.startAnimation();
                 }
             }
             // Update simulated time reference for vehicle position calculations
             if (prevProps.simulatedTime !== this.props.simulatedTime) {
                 this.vehicleRenderer?.setSimulatedTime(this.props.simulatedTime);
                 this.vehicleTracker?.setSimulatedTime(this.props.simulatedTime);
+            }
+            if (prevProps.timeSpeed !== this.props.timeSpeed) {
+                this.vehicleRenderer?.setTimeSpeed(this.props.timeSpeed);
             }
         }
 
@@ -223,6 +245,12 @@ export default class Map extends React.Component<MapProps, MapState> {
             this.updateNavigationPointsLayer();
         }
 
+        // Update mapping visualization lines and GTFS stops
+        // Also re-snap when stations change since line endpoints are derived from station coordinates
+        if (prevProps.mappingLines !== this.props.mappingLines || prevProps.mappingGtfsStops !== this.props.mappingGtfsStops || prevProps.stations !== this.props.stations) {
+            this.layerManager?.updateMappingData(this.props.mappingLines ?? [], this.props.mappingGtfsStops ?? [], this.props.stations);
+        }
+
         // Update highlighted building
         if (prevProps.highlightedBuilding !== this.props.highlightedBuilding) {
             // Reset cached geometry when coordinates change
@@ -234,6 +262,7 @@ export default class Map extends React.Component<MapProps, MapState> {
     }
 
     componentWillUnmount() {
+        if (this.hashSyncTimer) clearTimeout(this.hashSyncTimer);
         this.cleanup();
     }
 
@@ -281,6 +310,7 @@ export default class Map extends React.Component<MapProps, MapState> {
             this.props.showPlatforms
         );
         this.layerManager.updateRoutes(this.props.routes, this.props.showRoutes);
+        this.layerManager.updateMappingData(this.props.mappingLines ?? [], this.props.mappingGtfsStops ?? [], this.props.stations);
 
         if (this.props.showVehicles) {
             this.startVehicleAnimation();
@@ -364,17 +394,59 @@ export default class Map extends React.Component<MapProps, MapState> {
         });
     };
 
-    private async initializeMap() {
-        if (!this.mapContainer.current || this.map) return;
+    private parseHashParams() {
+        const defaults = { lat: 48.371, lng: 10.898, zoom: 12, pitch: 30, bearing: 0 };
+        const hash = window.location.hash.replace("#", "");
+        if (!hash) return defaults;
+
+        const parts = hash.split(",").map(Number);
+        if (parts.length < 3 || parts.some(isNaN)) return defaults;
+
+        return {
+            lat: parts[0],
+            lng: parts[1],
+            zoom: parts[2],
+            pitch: parts[3] ?? defaults.pitch,
+            bearing: parts[4] ?? defaults.bearing,
+        };
+    }
+
+    private syncHash = () => {
+        if (!this.map) return;
+        const center = this.map.getCenter();
+        const zoom = this.map.getZoom();
+        const pitch = this.map.getPitch();
+        const bearing = this.map.getBearing();
+        const hash = `#${center.lat.toFixed(5)},${center.lng.toFixed(5)},${zoom.toFixed(2)},${pitch.toFixed(0)},${bearing.toFixed(0)}`;
+        window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
+    };
+
+    private syncHashDebounced = () => {
+        if (this.hashSyncTimer) clearTimeout(this.hashSyncTimer);
+        this.hashSyncTimer = setTimeout(this.syncHash, 300);
+    };
+
+    private async initializeMap(generation: number) {
+        if (!this.mapContainer.current) return;
+
+        // Clean up any in-progress or completed previous initialization
+        this.cleanup();
 
         const style = await loadMapStyle();
+
+        // Abort if a newer initialization was started (e.g. StrictMode remount)
+        if (generation !== this.initGeneration) return;
+
+        // Restore map position from URL hash (format: #lat,lng,zoom,pitch,bearing)
+        const hashParams = this.parseHashParams();
 
         this.map = new maplibregl.Map({
             container: this.mapContainer.current,
             style,
-            center: [10.898, 48.371],
-            zoom: 12,
-            pitch: 30,
+            center: [hashParams.lng, hashParams.lat],
+            zoom: hashParams.zoom,
+            pitch: hashParams.pitch,
+            bearing: hashParams.bearing,
             attributionControl: false,
         });
 
@@ -382,7 +454,7 @@ export default class Map extends React.Component<MapProps, MapState> {
             console.error("Map error:", e.error?.message || e);
         });
 
-        // Update bearing, zoom, and scale on map move
+        // Update bearing, zoom, scale, and URL hash on map move
         this.map.on("move", () => {
             if (!this.map) return;
             this.setState({
@@ -390,10 +462,11 @@ export default class Map extends React.Component<MapProps, MapState> {
                 zoom: this.map.getZoom(),
             });
             this.updateScale();
+            this.syncHashDebounced();
         });
 
         this.map.on("load", () => {
-            if (!this.map) return;
+            if (!this.map || generation !== this.initGeneration) return;
 
             // Enable globe projection
             this.map.setProjection({ type: "globe" });
@@ -461,6 +534,8 @@ export default class Map extends React.Component<MapProps, MapState> {
         this.map.on("mouseleave", "stations-circle", () => { if (this.map) this.map.getCanvas().style.cursor = ""; });
         this.map.on("mouseenter", "platforms-circle", () => { if (this.map) this.map.getCanvas().style.cursor = "pointer"; });
         this.map.on("mouseleave", "platforms-circle", () => { if (this.map) this.map.getCanvas().style.cursor = ""; });
+        this.map.on("mouseenter", "mapping-gtfs-circle", () => { if (this.map) this.map.getCanvas().style.cursor = "pointer"; });
+        this.map.on("mouseleave", "mapping-gtfs-circle", () => { if (this.map) this.map.getCanvas().style.cursor = ""; });
         this.map.on("mouseenter", "vehicles-marker", () => { if (this.map) this.map.getCanvas().style.cursor = "pointer"; });
         this.map.on("mouseleave", "vehicles-marker", () => { if (this.map) this.map.getCanvas().style.cursor = ""; });
 
@@ -499,6 +574,18 @@ export default class Map extends React.Component<MapProps, MapState> {
                     return;
                 }
             }
+        });
+
+        // GTFS stop click - show departures popup
+        this.map.on("click", "mapping-gtfs-circle", (e) => {
+            if (!e.features || e.features.length === 0) return;
+            const feature = e.features[0];
+            const coordinates = (feature.geometry as GeoJSON.Point).coordinates.slice() as [number, number];
+            const stopId = feature.properties?.stopId ?? "";
+            const stopName = feature.properties?.name ?? stopId;
+            const ifopt = feature.properties?.ifopt || null;
+            const isAssigned = feature.properties?.isAssigned === true || feature.properties?.isAssigned === "true";
+            this.showPopup(coordinates, <GtfsStopPopup stopId={stopId} stopName={stopName} ifopt={ifopt} isAssigned={isAssigned} routeColors={this.routeColors} referenceTime={this.props.simulatedTime} />);
         });
 
         // Vehicle click - toggle tracking
@@ -1060,9 +1147,10 @@ export default class Map extends React.Component<MapProps, MapState> {
 
     private startVehicleAnimation() {
         if (!this.vehicleRenderer) return;
-        // Set the current vehicles data and simulated time before starting animation
+        // Set the current vehicles data, simulated time, and speed before starting animation
         this.vehicleRenderer.setVehicles(this.props.vehicles);
         this.vehicleRenderer.setSimulatedTime(this.props.simulatedTime);
+        this.vehicleRenderer.setTimeSpeed(this.props.timeSpeed);
         this.vehicleRenderer.startAnimation();
     }
 

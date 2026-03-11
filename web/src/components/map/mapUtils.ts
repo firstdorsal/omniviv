@@ -10,15 +10,24 @@ export function getPlatformDisplayName(platform: StationPlatform | StationStopPo
     return "?";
 }
 
-// Internationalized time formatter using browser default locale
-const timeFormatter = new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-});
+// Time formatter - created lazily to use browser's locale at runtime
+let timeFormatter: Intl.DateTimeFormat | null = null;
+
+function getTimeFormatter(): Intl.DateTimeFormat {
+    if (!timeFormatter) {
+        // Use navigator.language explicitly to respect browser locale
+        const locale = typeof navigator !== 'undefined' ? navigator.language : undefined;
+        timeFormatter = new Intl.DateTimeFormat(locale, {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+        });
+    }
+    return timeFormatter;
+}
 
 // Format time from ISO string using the browser's locale
 export function formatTime(isoString: string): string {
     const date = new Date(isoString);
-    return timeFormatter.format(date);
+    return getTimeFormatter().format(date);
 }
