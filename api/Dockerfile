@@ -8,10 +8,8 @@ RUN cargo install cargo-chef
 
 FROM chef-builder AS planner
 WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
-COPY build.rs ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src src
-COPY proto proto
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef-builder AS builder
@@ -21,8 +19,7 @@ ARG SERVICE_NAME
 USER root
 WORKDIR /build
 
-# Install protobuf-compiler (pinning causes dependency issues with security updates)
-RUN apt-get update && apt-get install -y upx protobuf-compiler
+RUN apt-get update && apt-get install -y upx
 
 # Build dependencies (cached layer)
 COPY --from=planner /build/recipe.json recipe.json
@@ -33,10 +30,8 @@ RUN if [ "${PROFILE}" = "release" ]; then \
     fi
 
 # Build application
-COPY Cargo.toml Cargo.lock ./
-COPY build.rs ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src src
-COPY proto proto
 COPY migrations migrations
 
 RUN cargo build --bin ${BINARY_NAME} --profile=${PROFILE}

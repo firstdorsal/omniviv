@@ -32,8 +32,10 @@ gtfs_sync:
   realtime_feed_url: "https://realtime.gtfs.de/realtime-free.pb"
   # Local cache directory for the static GTFS zip
   cache_dir: "./data/gtfs"
-  # How often to re-download static GTFS data (hours)
-  static_refresh_hours: 24
+  # How often to re-download static GTFS data (hours).
+  # Shorter intervals ensure timely pickup of service changes like strikes.
+  # Uses HTTP conditional requests so no data is transferred if unchanged.
+  static_refresh_hours: 6
   # How often to poll the GTFS-RT feed (seconds, feed updates every ~10s)
   realtime_interval_secs: 15
   # Only show departures up to this many minutes in the future

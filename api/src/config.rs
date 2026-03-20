@@ -188,7 +188,7 @@ impl BoundingBox {
 }
 
 /// Transport type for both configuration and runtime detection
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
     Tram,
@@ -210,6 +210,19 @@ impl TransportType {
             TransportType::Train => "train",
             TransportType::Ferry => "ferry",
             TransportType::Unknown => "unknown",
+        }
+    }
+
+    /// Convert a GTFS route_type integer to a TransportType.
+    /// Handles both standard and extended GTFS route types.
+    pub fn from_gtfs_route_type(route_type: i32) -> Self {
+        match route_type {
+            0 | 900 => TransportType::Tram,
+            1 | 400 => TransportType::Subway,
+            2 | 100 => TransportType::Train,
+            3 | 700 | 800 => TransportType::Bus,
+            4 => TransportType::Ferry,
+            _ => TransportType::Unknown,
         }
     }
 }

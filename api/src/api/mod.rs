@@ -1,6 +1,7 @@
 pub mod areas;
 pub mod departures;
 pub mod error;
+pub mod utils;
 pub mod gtfs_stops;
 pub mod health;
 pub mod issues;

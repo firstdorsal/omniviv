@@ -46,8 +46,9 @@ impl SyncManager {
 
         let time_horizon_minutes = config.gtfs_sync.time_horizon_minutes;
 
-        // Create broadcast channel for vehicle updates (capacity 16 - clients will get latest state anyway)
-        let (vehicle_updates_tx, _) = broadcast::channel(16);
+        // Create broadcast channel for vehicle updates.
+        // Higher capacity prevents Lagged errors that silently drop updates for slow clients.
+        let (vehicle_updates_tx, _) = broadcast::channel(128);
 
         Ok(Self {
             pool,
@@ -90,12 +91,12 @@ impl SyncManager {
     pub async fn start(self: Arc<Self>) {
         info!("Starting sync manager");
 
-        // Initial OSM sync on startup
-        self.sync_all_areas().await;
-
-        // Spawn OSM sync loop (every 6 hours)
+        // Spawn OSM sync (initial + periodic refresh every 6 hours)
         let osm_self = self.clone();
         let osm_handle = tokio::spawn(async move {
+            // Initial sync on startup
+            osm_self.sync_all_areas().await;
+
             let mut interval =
                 tokio::time::interval(tokio::time::Duration::from_secs(6 * 60 * 60));
             // Skip the first tick which fires immediately (we already synced above)
@@ -107,10 +108,12 @@ impl SyncManager {
             }
         });
 
-        // Spawn GTFS sync loop
+        // Spawn GTFS sync loop (runs concurrently with OSM sync)
         let gtfs_self = self.clone();
         let gtfs_handle = tokio::spawn(async move {
-            // Wait for initial OSM sync to populate stops with IFOPTs
+            // Brief delay so that if OSM sync is fast, stops are populated
+            // before the GTFS mapping step. If OSM is slow, GTFS still starts
+            // independently — the mapping will be rebuilt on the next refresh.
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             gtfs_self.run_gtfs_sync_loop().await;
         });
@@ -127,12 +130,13 @@ impl SyncManager {
         // Then, only add stop_positions for IFOPTs that don't have a platform
         let rows: Vec<(String, Option<String>, f64, f64)> = match sqlx::query_as(
             r#"
-            SELECT ref_ifopt, name, lat, lon FROM platforms WHERE ref_ifopt IS NOT NULL
-            UNION
-            SELECT sp.ref_ifopt, sp.name, sp.lat, sp.lon
-            FROM stop_positions sp
-            WHERE sp.ref_ifopt IS NOT NULL
-            AND sp.ref_ifopt NOT IN (SELECT ref_ifopt FROM platforms WHERE ref_ifopt IS NOT NULL)
+            SELECT DISTINCT ON (ref_ifopt) ref_ifopt, name, lat, lon
+            FROM (
+                SELECT ref_ifopt, name, lat, lon, 1 AS priority FROM platforms WHERE ref_ifopt IS NOT NULL
+                UNION ALL
+                SELECT ref_ifopt, name, lat, lon, 2 AS priority FROM stop_positions WHERE ref_ifopt IS NOT NULL
+            ) combined
+            ORDER BY ref_ifopt, priority, lat, lon
             "#,
         )
         .fetch_all(&self.pool)
@@ -201,34 +205,36 @@ impl SyncManager {
             !matches!(
                 i.issue_type,
                 OsmIssueType::NoGtfsMatch
-                    | OsmIssueType::LowConfidenceMatch
+                    | OsmIssueType::AmbiguousGtfsMatch
                     | OsmIssueType::UnmappedGtfsStop
             )
         });
 
-        // Report OSM stops that couldn't be matched or had low confidence
+        // Report OSM stops that couldn't be matched
+        use crate::providers::timetables::gtfs::static_data::UnmatchedReason;
         for osm_stop in stats.unmatched_osm.iter().take(100) {
-            let issue_type = if osm_stop.is_low_confidence {
-                OsmIssueType::LowConfidenceMatch
-            } else {
-                OsmIssueType::NoGtfsMatch
-            };
-
-            let description = if osm_stop.is_low_confidence {
-                format!(
-                    "Low confidence match for {} - best score {:.2}",
-                    osm_stop.name.as_deref().unwrap_or(&osm_stop.ifopt),
-                    osm_stop
-                        .candidates
-                        .first()
-                        .map(|c| c.combined_score)
-                        .unwrap_or(0.0)
-                )
-            } else {
-                format!(
-                    "No GTFS stop found within matching distance for {}",
-                    osm_stop.name.as_deref().unwrap_or(&osm_stop.ifopt)
-                )
+            let (issue_type, description) = match &osm_stop.reason {
+                UnmatchedReason::NoRouteData => (
+                    OsmIssueType::NoGtfsMatch,
+                    format!(
+                        "No route data available for {} — cannot match automatically",
+                        osm_stop.name.as_deref().unwrap_or(&osm_stop.ifopt)
+                    ),
+                ),
+                UnmatchedReason::NoDefinitiveCandidate => (
+                    OsmIssueType::NoGtfsMatch,
+                    format!(
+                        "No definitive route-based match for {}",
+                        osm_stop.name.as_deref().unwrap_or(&osm_stop.ifopt)
+                    ),
+                ),
+                UnmatchedReason::AmbiguousMatch => (
+                    OsmIssueType::AmbiguousGtfsMatch,
+                    format!(
+                        "Multiple definitive route-based matches for {} — ambiguous",
+                        osm_stop.name.as_deref().unwrap_or(&osm_stop.ifopt)
+                    ),
+                ),
             };
 
             let mut issue = OsmIssue::new(
@@ -481,6 +487,9 @@ impl SyncManager {
 
         // Resolve remaining relations (fallback for unmapped platforms)
         self.resolve_relations(&mut tx, area_id).await?;
+
+        // Apply platform way overrides from OSM route membership data
+        self.apply_platform_way_overrides(&mut tx, &features.routes).await?;
 
         // Check for missing platform/stop_position pairs
         self.check_platform_stop_pairs(&mut tx, area_id).await?;
@@ -968,14 +977,15 @@ impl SyncManager {
                 ?;
             }
 
-            // Insert stops
+            // Insert stops — also set platform_id directly when the member is a platform node
             for stop in &route.stops {
                 sqlx::query(
                     r#"
-                    INSERT INTO route_stops (route_id, stop_position_id, sequence, role)
+                    INSERT INTO route_stops (route_id, stop_position_id, platform_id, sequence, role)
                     VALUES (
                         $1,
                         (SELECT osm_id FROM stop_positions WHERE osm_id = $2),
+                        (SELECT osm_id FROM platforms WHERE osm_id = $2),
                         $3,
                         $4
                     )
@@ -1107,12 +1117,13 @@ impl SyncManager {
         ?;
 
         // Resolve route_stops references from stop_positions
+        // Only set platform_id where it hasn't been directly set (e.g. from node-platform members)
         sqlx::query(
             r#"
             UPDATE route_stops
-            SET platform_id = (
+            SET platform_id = COALESCE(route_stops.platform_id, (
                 SELECT platform_id FROM stop_positions WHERE osm_id = route_stops.stop_position_id
-            ),
+            )),
             station_id = (
                 SELECT station_id FROM stop_positions WHERE osm_id = route_stops.stop_position_id
             )
@@ -1197,6 +1208,83 @@ impl SyncManager {
         }
 
         info!("Finished resolving relations for area {}", area_id);
+        Ok(())
+    }
+
+    /// Apply platform way overrides from OSM route membership data.
+    ///
+    /// OSM route relations include way-type platform members that explicitly associate
+    /// a platform with a route. This is more authoritative than proximity-based matching
+    /// (which can swap platforms that are very close together, e.g. ~1.5m at Königsplatz).
+    ///
+    /// For each route's platform_way_members, find the route_stop with the nearest
+    /// sequence number and set its platform_id to the platform way's osm_id.
+    async fn apply_platform_way_overrides(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        routes: &[OsmRoute],
+    ) -> Result<(), SyncError> {
+        let mut overrides_applied = 0u32;
+
+        for route in routes {
+            if route.platform_way_members.is_empty() {
+                continue;
+            }
+
+            // Get all route_stops for this route with their sequences
+            let route_stops: Vec<(i64, i64, i32)> = sqlx::query_as(
+                r#"
+                SELECT id, COALESCE(stop_position_id, 0), sequence
+                FROM route_stops
+                WHERE route_id = $1
+                ORDER BY sequence
+                "#,
+            )
+            .bind(route.osm_id)
+            .fetch_all(&mut **tx)
+            .await?;
+
+            if route_stops.is_empty() {
+                continue;
+            }
+
+            for &(platform_way_id, platform_seq) in &route.platform_way_members {
+                // Check that this platform way exists in our platforms table
+                let platform_exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM platforms WHERE osm_id = $1)",
+                )
+                .bind(platform_way_id)
+                .fetch_one(&mut **tx)
+                .await?;
+
+                if !platform_exists {
+                    continue;
+                }
+
+                // Find the route_stop with the nearest sequence number
+                if let Some((rs_id, _, _)) = route_stops
+                    .iter()
+                    .min_by_key(|(_, _, seq)| (platform_seq - seq).unsigned_abs())
+                {
+                    sqlx::query(
+                        "UPDATE route_stops SET platform_id = $1 WHERE id = $2",
+                    )
+                    .bind(platform_way_id)
+                    .bind(rs_id)
+                    .execute(&mut **tx)
+                    .await?;
+                    overrides_applied += 1;
+                }
+            }
+        }
+
+        if overrides_applied > 0 {
+            info!(
+                overrides = overrides_applied,
+                "Applied platform way overrides from OSM route membership"
+            );
+        }
+
         Ok(())
     }
 

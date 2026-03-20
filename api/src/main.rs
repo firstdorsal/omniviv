@@ -106,6 +106,13 @@ async fn main() {
         )
         .init();
 
+    // Log build info
+    tracing::info!(
+        built = env!("BUILD_TIMESTAMP"),
+        version = env!("CARGO_PKG_VERSION"),
+        "omniviv-api starting"
+    );
+
     // Load config
     let config = Config::load("config.yaml").expect("Failed to load config");
     config.gtfs_sync.validate();
