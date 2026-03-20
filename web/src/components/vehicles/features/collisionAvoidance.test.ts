@@ -1,71 +1,110 @@
-import { describe, it, expect } from "vitest";
-import { collisionAvoidanceFeature, SEPARATION_DISTANCE, MIN_SPEED_MULTIPLIER, MAX_SPEED_MULTIPLIER } from "./collisionAvoidance";
-import type { VehicleRenderContext } from "./types";
+import { describe, it, expect, beforeEach } from "vitest";
+import {
+    computePositionCaps,
+    COLLISION_AVOIDANCE_FEATURE_ID,
+    MIN_VEHICLE_SEPARATION,
+    _resetFollowerStates,
+} from "./collisionAvoidance";
 import type { LinearizedRoute, SmoothedVehiclePosition } from "../vehicleUtils";
+import { getPositionAtDistance } from "../vehicleUtils";
 
 // --- Helpers ---
 
-function makeStraightRoute(lengthMeters: number): LinearizedRoute {
+function makeStraightRoute(lengthMeters: number, startLon = 10.0): LinearizedRoute {
     const degreesPerMeter = 1 / 74000;
-    const startLon = 10.0;
     const numPoints = 100;
     const coords: number[][] = [];
     const distances: number[] = [];
-
     for (let i = 0; i <= numPoints; i++) {
         const frac = i / numPoints;
         coords.push([startLon + frac * lengthMeters * degreesPerMeter, 48.0]);
         distances.push(frac * lengthMeters);
     }
-
     return { coords, distances, totalLength: lengthMeters };
 }
 
-/**
- * Create a vehicle context with rendered position at a specific point along a route.
- * Both vehicles on the same route and different routes use the same coordinate system
- * to simulate shared physical track.
- */
-function makeVehicle(
+function makeDivergingRoute(sharedLength: number, divergedLength: number): LinearizedRoute {
+    const degLon = 1 / 74000;
+    const degLat = 1 / 111320;
+    const n1 = 50, n2 = 50;
+    const coords: number[][] = [];
+    const distances: number[] = [];
+    let total = 0;
+
+    for (let i = 0; i <= n1; i++) {
+        const frac = i / n1;
+        const lon = 10.0 + frac * sharedLength * degLon;
+        if (coords.length > 0) total += Math.abs((lon - coords[coords.length - 1][0]) * 74000);
+        coords.push([lon, 48.0]);
+        distances.push(total);
+    }
+    const lastLon = coords[coords.length - 1][0];
+    for (let i = 1; i <= n2; i++) {
+        const frac = i / n2;
+        const lat = 48.0 + frac * divergedLength * degLat;
+        total += Math.abs((lat - coords[coords.length - 1][1]) * 111320);
+        coords.push([lastLon, lat]);
+        distances.push(total);
+    }
+    return { coords, distances, totalLength: total };
+}
+
+function makeSmoothedPosition(
     tripId: string,
-    routeId: number,
     linearPosition: number,
+    lineNumber = "1",
     bearing = 90,
     status: SmoothedVehiclePosition["status"] = "in_transit",
-): VehicleRenderContext {
-    // Place the rendered position along the route (west→east at lat=48)
-    const degreesPerMeter = 1 / 74000;
-    const renderedLon = 10.0 + linearPosition * degreesPerMeter;
-    const renderedLat = 48.0;
-
+): SmoothedVehiclePosition {
+    const degPerM = 1 / 74000;
+    const lon = 10.0 + linearPosition * degPerM;
     return {
         tripId,
-        routeId,
-        linearPosition,
-        smoothedPosition: {
-            tripId,
-            lineNumber: "1",
-            destination: "Test",
-            lon: renderedLon,
-            lat: renderedLat,
-            bearing,
-            status,
-            progress: 0.5,
-            delayMinutes: null,
-            renderedLon,
-            renderedLat,
-            renderedBearing: bearing,
-            lastUpdateTime: Date.now(),
-            renderedLinearPosition: linearPosition,
-        },
+        lineNumber,
+        destination: "Test",
+        lon, lat: 48.0,
+        bearing,
+        status,
+        progress: 0.5,
+        delayMinutes: null,
+        renderedLon: lon,
+        renderedLat: 48.0,
+        renderedBearing: bearing,
+        lastUpdateTime: Date.now(),
+        renderedLinearPosition: linearPosition,
     };
 }
 
-function computeAdjustments(
-    vehicles: VehicleRenderContext[],
+/**
+ * Simulate one frame: compute caps, apply them to smoothed positions.
+ * Returns the effective linear positions after capping.
+ * Mirrors the logic in VehicleRenderer.renderFrame().
+ */
+function applyFrame(
+    infos: Array<{ tripId: string; routeId: number; lineNumber: string }>,
+    smoothed: Map<string, SmoothedVehiclePosition>,
     routes: Map<number, LinearizedRoute>,
 ): Map<string, number> {
-    return collisionAvoidanceFeature.computeSpeedAdjustments(vehicles, routes);
+    const caps = computePositionCaps(infos, smoothed, routes);
+    const result = new Map<string, number>();
+
+    for (const { tripId, routeId } of infos) {
+        const sp = smoothed.get(tripId);
+        if (!sp || sp.renderedLinearPosition === undefined) continue;
+
+        let pos = sp.renderedLinearPosition;
+        const cap = caps.get(tripId);
+        if (cap) {
+            const route = routes.get(routeId);
+            if (route) {
+                // Never backwards: effectiveCap = max(cap, current)
+                const effectiveCap = Math.max(cap.maxLinearPosition, pos);
+                if (pos > effectiveCap) pos = effectiveCap;
+            }
+        }
+        result.set(tripId, pos);
+    }
+    return result;
 }
 
 // --- Tests ---
@@ -74,245 +113,172 @@ describe("collisionAvoidanceFeature", () => {
     const route = makeStraightRoute(2000);
     const routes = new Map([[1, route]]);
 
-    describe("basic behavior", () => {
-        it("returns no adjustments when vehicles are far apart", () => {
-            const vehicles = [
-                makeVehicle("a", 1, 500),
-                makeVehicle("b", 1, 600),
+    beforeEach(() => {
+        _resetFollowerStates();
+    });
+
+    it("has correct feature ID", () => {
+        expect(COLLISION_AVOIDANCE_FEATURE_ID).toBe("collision-avoidance");
+    });
+
+    describe("computePositionCaps", () => {
+        it("returns no caps for far-apart vehicles", () => {
+            const smoothed = new Map([
+                ["a", makeSmoothedPosition("a", 400)],
+                ["b", makeSmoothedPosition("b", 600)],
+            ]);
+            const infos = [
+                { tripId: "a", routeId: 1, lineNumber: "1" },
+                { tripId: "b", routeId: 1, lineNumber: "1" },
             ];
-
-            const result = computeAdjustments(vehicles, routes);
-
-            expect(result.size).toBe(0);
+            const caps = computePositionCaps(infos, smoothed, routes);
+            expect(caps.size).toBe(0);
         });
 
-        it("slows follower and speeds leader when too close", () => {
-            // 10m apart < SEPARATION_DISTANCE (40m)
-            const vehicles = [
-                makeVehicle("follower", 1, 490),
-                makeVehicle("leader", 1, 500),
+        it("returns no caps for opposite-direction vehicles", () => {
+            const smoothed = new Map([
+                ["out", makeSmoothedPosition("out", 498, "1", 90)],
+                ["in", makeSmoothedPosition("in", 500, "1", 270)],
+            ]);
+            const infos = [
+                { tripId: "out", routeId: 1, lineNumber: "1" },
+                { tripId: "in", routeId: 1, lineNumber: "1" },
             ];
-
-            const result = computeAdjustments(vehicles, routes);
-
-            const followerSpeed = result.get("follower")!;
-            const leaderSpeed = result.get("leader")!;
-
-            expect(followerSpeed).toBeLessThan(1.0);
-            expect(leaderSpeed).toBeGreaterThan(1.0);
+            const caps = computePositionCaps(infos, smoothed, routes);
+            expect(caps.size).toBe(0);
         });
 
-        it("applies stronger adjustments for closer vehicles", () => {
-            // Very close (5m)
-            const closeVehicles = [
-                makeVehicle("close-follower", 1, 495),
-                makeVehicle("close-leader", 1, 500),
+        it("caps follower behind leader on same route", () => {
+            const smoothed = new Map([
+                ["behind", makeSmoothedPosition("behind", 490)],
+                ["ahead", makeSmoothedPosition("ahead", 500)],
+            ]);
+            const infos = [
+                { tripId: "behind", routeId: 1, lineNumber: "1" },
+                { tripId: "ahead", routeId: 1, lineNumber: "1" },
             ];
+            const caps = computePositionCaps(infos, smoothed, routes);
 
-            // Moderately close (30m)
-            const moderateVehicles = [
-                makeVehicle("mod-follower", 1, 470),
-                makeVehicle("mod-leader", 1, 500),
-            ];
+            // behind is follower → has cap, ahead is leader → no cap
+            expect(caps.has("behind")).toBe(true);
+            expect(caps.has("ahead")).toBe(false);
 
-            const closeResult = computeAdjustments(closeVehicles, routes);
-            const modResult = computeAdjustments(moderateVehicles, routes);
-
-            const closeFollowerSpeed = closeResult.get("close-follower")!;
-            const modFollowerSpeed = modResult.get("mod-follower")!;
-
-            // Closer vehicles should have more extreme adjustments
-            expect(closeFollowerSpeed).toBeLessThan(modFollowerSpeed);
+            // Cap should be leader position - MIN_VEHICLE_SEPARATION
+            expect(caps.get("behind")!.maxLinearPosition).toBeCloseTo(500 - MIN_VEHICLE_SEPARATION, 0);
         });
 
-        it("returns max adjustment at distance zero", () => {
-            const vehicles = [
-                makeVehicle("follower", 1, 500),
-                makeVehicle("leader", 1, 500),
+        it("line 2 follows line 6 (higher line number leads)", () => {
+            const route2 = makeStraightRoute(2000);
+            const multiRoutes = new Map([[1, route], [2, route2]]);
+            const smoothed = new Map([
+                ["line2", makeSmoothedPosition("line2", 502, "2")],
+                ["line6", makeSmoothedPosition("line6", 500, "6")],
+            ]);
+            const infos = [
+                { tripId: "line2", routeId: 1, lineNumber: "2" },
+                { tripId: "line6", routeId: 2, lineNumber: "6" },
             ];
+            const caps = computePositionCaps(infos, smoothed, multiRoutes);
 
-            const result = computeAdjustments(vehicles, routes);
-
-            // One of them should get MIN_SPEED_MULTIPLIER
-            const speeds = [...result.values()];
-            const minSpeed = Math.min(...speeds);
-            const maxSpeed = Math.max(...speeds);
-
-            expect(minSpeed).toBeCloseTo(MIN_SPEED_MULTIPLIER, 2);
-            expect(maxSpeed).toBeCloseTo(MAX_SPEED_MULTIPLIER, 2);
+            expect(caps.has("line2")).toBe(true);  // follower
+            expect(caps.has("line6")).toBe(false);  // leader
         });
 
-        it("handles single vehicle (no adjustments)", () => {
-            const vehicles = [makeVehicle("solo", 1, 500)];
+        it("does not cap at_stop vehicles", () => {
+            const smoothed = new Map([
+                ["stopped", makeSmoothedPosition("stopped", 498, "2", 90, "at_stop")],
+                ["leader", makeSmoothedPosition("leader", 500, "6")],
+            ]);
+            const infos = [
+                { tripId: "stopped", routeId: 1, lineNumber: "2" },
+                { tripId: "leader", routeId: 1, lineNumber: "6" },
+            ];
+            const caps = computePositionCaps(infos, smoothed, routes);
+            expect(caps.has("stopped")).toBe(false);
+        });
 
-            const result = computeAdjustments(vehicles, routes);
+        it("does not cap vehicles on diverged routes", () => {
+            const straight = makeStraightRoute(2000);
+            const diverging = makeDivergingRoute(500, 1500);
+            const multiRoutes = new Map([[1, straight], [2, diverging]]);
 
-            expect(result.size).toBe(0);
+            const degLon = 1 / 74000;
+            const degLat = 1 / 111320;
+            const smoothed = new Map([
+                ["a", makeSmoothedPosition("a", 600, "2")],
+                ["b", (() => {
+                    const sp = makeSmoothedPosition("b", 600, "6");
+                    sp.renderedLon = 10.0 + 500 * degLon;
+                    sp.renderedLat = 48.0 + 100 * degLat;
+                    return sp;
+                })()],
+            ]);
+            const infos = [
+                { tripId: "a", routeId: 1, lineNumber: "2" },
+                { tripId: "b", routeId: 2, lineNumber: "6" },
+            ];
+            const caps = computePositionCaps(infos, smoothed, multiRoutes);
+            expect(caps.size).toBe(0);
         });
     });
 
-    describe("direction and status filtering", () => {
-        it("does not adjust vehicles traveling in opposite directions", () => {
-            const vehicles = [
-                makeVehicle("outbound", 1, 498, 90),
-                makeVehicle("inbound", 1, 500, 270),
-            ];
-
-            const result = computeAdjustments(vehicles, routes);
-
-            expect(result.size).toBe(0);
-        });
-
-        it("adjusts vehicles at exactly 90° bearing difference", () => {
-            const vehicles = [
-                makeVehicle("follower", 1, 498, 45),
-                makeVehicle("leader", 1, 500, 135),
-            ];
-
-            const result = computeAdjustments(vehicles, routes);
-
-            // 135 - 45 = 90° which is NOT > 90, so they ARE adjusted
-            expect(result.size).toBeGreaterThan(0);
-        });
-
-        it("does not adjust at 91° bearing difference", () => {
-            const vehicles = [
-                makeVehicle("follower", 1, 498, 44),
-                makeVehicle("leader", 1, 500, 135),
-            ];
-
-            const result = computeAdjustments(vehicles, routes);
-
-            expect(result.size).toBe(0);
-        });
-
-        it("does not slow down at_stop vehicles", () => {
-            const vehicles = [
-                makeVehicle("stopped", 1, 498, 90, "at_stop"),
-                makeVehicle("leader", 1, 500),
-            ];
-
-            const result = computeAdjustments(vehicles, routes);
-
-            // Leader may get a speed boost, but stopped vehicle should not be slowed
-            expect(result.has("stopped")).toBe(false);
-        });
-
-        it("does not speed up at_stop leaders", () => {
-            const vehicles = [
-                makeVehicle("follower", 1, 498),
-                makeVehicle("stopped-leader", 1, 500, 90, "at_stop"),
-            ];
-
-            const result = computeAdjustments(vehicles, routes);
-
-            // Follower gets slowed, but the stopped leader should not be sped up
-            expect(result.get("follower")).toBeLessThan(1.0);
-            expect(result.has("stopped-leader")).toBe(false);
-        });
-
-        it("does not adjust waiting vehicles", () => {
-            const vehicles = [
-                makeVehicle("waiting", 1, 498, 90, "waiting"),
-                makeVehicle("leader", 1, 500),
-            ];
-
-            const result = computeAdjustments(vehicles, routes);
-
-            expect(result.has("waiting")).toBe(false);
-        });
-
-        it("does not speed up waiting leaders", () => {
-            const vehicles = [
-                makeVehicle("follower", 1, 498),
-                makeVehicle("waiting-leader", 1, 500, 90, "waiting"),
-            ];
-
-            const result = computeAdjustments(vehicles, routes);
-
-            expect(result.get("follower")).toBeLessThan(1.0);
-            expect(result.has("waiting-leader")).toBe(false);
-        });
-    });
-
-    describe("cross-route separation", () => {
-        it("separates vehicles on different routes sharing the same track", () => {
-            const route2 = makeStraightRoute(2000);
-            const multiRoutes = new Map([
-                [1, route],
-                [2, route2],
+    describe("cap application (never backwards)", () => {
+        it("does not push vehicle backwards when cap is behind current position", () => {
+            // Follower at 490, leader at 500 → cap = 450.
+            // Since 450 < 490, effectiveCap = max(450, 490) = 490.
+            // Vehicle stays at 490 (frozen, NOT pushed back to 450).
+            const smoothed = new Map([
+                ["f", makeSmoothedPosition("f", 490, "2")],
+                ["l", makeSmoothedPosition("l", 500, "6")],
             ]);
-
-            // Lines 4 and 6 on the same physical track, very close
-            const vehicles = [
-                makeVehicle("line4", 1, 498),
-                makeVehicle("line6", 2, 500),
+            const infos = [
+                { tripId: "f", routeId: 1, lineNumber: "2" },
+                { tripId: "l", routeId: 1, lineNumber: "6" },
             ];
+            const result = applyFrame(infos, smoothed, routes);
 
-            const result = computeAdjustments(vehicles, multiRoutes);
-
-            // Cross-route: should still detect proximity and adjust
-            const line4Speed = result.get("line4")!;
-            const line6Speed = result.get("line6")!;
-
-            expect(line4Speed).toBeLessThan(1.0);
-            expect(line6Speed).toBeGreaterThan(1.0);
+            // Must be >= 490 (never backwards)
+            expect(result.get("f")!).toBeGreaterThanOrEqual(490);
         });
 
-        it("does not separate cross-route vehicles that are far apart", () => {
-            const route2 = makeStraightRoute(2000);
-            const multiRoutes = new Map([
-                [1, route],
-                [2, route2],
+        it("caps forward movement when vehicle would advance past safe distance", () => {
+            // Simulate: follower was at 440 last frame (behind cap of 450).
+            // After smoothing it would advance to e.g. 460.
+            // Cap = 500 - 50 = 450. Since 450 > 440 (prev), effectiveCap = 450.
+            // Vehicle is capped at 450 (prevented from reaching 460).
+            const smoothed = new Map([
+                ["f", makeSmoothedPosition("f", 460, "2")], // "after smoothing"
+                ["l", makeSmoothedPosition("l", 500, "6")],
             ]);
+            // Store the "previous" position to simulate the Math.max logic
+            smoothed.get("f")!.renderedLinearPosition = 460;
 
-            const vehicles = [
-                makeVehicle("a", 1, 400),
-                makeVehicle("b", 2, 500),
+            const infos = [
+                { tripId: "f", routeId: 1, lineNumber: "2" },
+                { tripId: "l", routeId: 1, lineNumber: "6" },
             ];
+            const caps = computePositionCaps(infos, smoothed, routes);
 
-            const result = computeAdjustments(vehicles, multiRoutes);
-
-            expect(result.size).toBe(0);
+            // The cap should exist and be ~450
+            expect(caps.has("f")).toBe(true);
+            expect(caps.get("f")!.maxLinearPosition).toBeCloseTo(450, 0);
         });
-    });
 
-    describe("multiple vehicle interactions", () => {
-        it("applies the strongest slowdown when a vehicle is close to multiple others", () => {
-            // Vehicle at 500 is close to vehicles at 498 and 502 (on different routes)
-            const route2 = makeStraightRoute(2000);
-            const route3 = makeStraightRoute(2000);
-            const multiRoutes = new Map([
-                [1, route],
-                [2, route2],
-                [3, route3],
+        it("allows vehicle to advance freely when cap is ahead", () => {
+            // Follower at 300, leader at 500 → cap = 450.
+            // 300 < 450, so no capping needed.
+            const smoothed = new Map([
+                ["f", makeSmoothedPosition("f", 300, "2")],
+                ["l", makeSmoothedPosition("l", 500, "6")],
             ]);
-
-            const vehicles = [
-                makeVehicle("behind", 1, 498),
-                makeVehicle("middle", 2, 500),
-                makeVehicle("ahead", 3, 502),
+            const infos = [
+                { tripId: "f", routeId: 1, lineNumber: "2" },
+                { tripId: "l", routeId: 1, lineNumber: "6" },
             ];
+            const result = applyFrame(infos, smoothed, routes);
 
-            const result = computeAdjustments(vehicles, multiRoutes);
-
-            // "behind" should be slowed (follower to both "middle" and "ahead")
-            expect(result.get("behind")).toBeLessThan(1.0);
-        });
-
-        it("handles three same-route vehicles bunched up", () => {
-            const vehicles = [
-                makeVehicle("c", 1, 495),
-                makeVehicle("b", 1, 498),
-                makeVehicle("a", 1, 500),
-            ];
-
-            const result = computeAdjustments(vehicles, routes);
-
-            // c should be slowed (close to b), b should be slowed (close to a)
-            // a should be sped up (close to b)
-            expect(result.get("c")).toBeLessThan(1.0);
-            expect(result.get("a")).toBeGreaterThan(1.0);
+            // Vehicle freely at 300 (cap 450 is ahead)
+            expect(result.get("f")!).toBe(300);
         });
     });
 });

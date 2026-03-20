@@ -20,9 +20,25 @@ vi.mock("./vehicleUtils", () => ({
 }));
 vi.mock("./features", () => ({
     featureManager: {
+        isEnabled: vi.fn(() => false),
         processRenderPositions: vi.fn(),
         computeSpeedAdjustments: vi.fn(() => new Map()),
     },
+    CollisionOffsetController: class {
+        computeAndApply = vi.fn();
+        deleteTrip = vi.fn();
+    },
+    COLLISION_AVOIDANCE_FEATURE_ID: "collision-avoidance",
+}));
+vi.mock("./VehicleLifecycleMonitor", () => ({
+    VehicleLifecycleMonitor: class {
+        setAnomalyCallback = vi.fn();
+        update = vi.fn();
+        clear = vi.fn();
+        getStats = vi.fn(() => ({}));
+        getAnomalies = vi.fn(() => []);
+    },
+    installMonitorGlobal: vi.fn(),
 }));
 
 function createMockLayerManager() {

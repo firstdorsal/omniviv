@@ -17,17 +17,36 @@ import {
     updateSmoothedPosition,
     type LinearizedRoute,
     type SmoothedVehiclePosition,
-    type VehiclePosition,
+    type VehiclePosition
 } from "./vehicleUtils";
-import { featureManager, type VehicleRenderContext, type RenderPosition } from "./features";
+import { VehicleLifecycleMonitor, installMonitorGlobal, type VehicleSnapshot } from "./VehicleLifecycleMonitor";
+import {
+    featureManager,
+    COLLISION_AVOIDANCE_FEATURE_ID,
+    type VehicleRenderContext,
+    type RenderPosition as FeatureRenderPosition,
+} from "./features";
+import { computePositionCaps } from "./features/collisionAvoidance";
 
 const ANIMATION_INTERVAL = 50;
 
+/** How long to retain a smoothed position after a vehicle disappears from data (ms).
+ *  Prevents teleporting when vehicles flicker in/out due to GTFS-RT update timing. */
+const SMOOTHED_POSITION_GRACE_MS = 10_000;
+
+/** 3D vehicle models are hidden below this zoom level (must match MapLayerManager minzoom). */
+const MODEL_3D_MIN_ZOOM = 15;
+
 export interface DebugOptions {
     show3DModels: boolean;
+    /** Minimum zoom level at which 3D vehicle models are shown (0 = always). */
+    model3DMinZoom: number;
     showDebugSegments: boolean;
     showDebugOnlyTracked: boolean;
 }
+
+// RenderPosition is imported from features as FeatureRenderPosition
+type RenderPosition = FeatureRenderPosition;
 
 export class VehicleRenderer {
     private layerManager: MapLayerManager;
@@ -35,8 +54,10 @@ export class VehicleRenderer {
     private routeGeometries: globalThis.Map<number, number[][][]>;
     private linearizedRoutes = new globalThis.Map<number, LinearizedRoute>();
     private smoothedPositions = new globalThis.Map<string, SmoothedVehiclePosition>();
-    /** Accumulated linear position offsets (meters) from collision avoidance */
-    private collisionOffsets = new globalThis.Map<string, number>();
+    /** Timestamp (performance.now) when each vehicle was last seen in active data.
+     *  Smoothed positions are kept for SMOOTHED_POSITION_GRACE_MS after disappearing
+     *  so vehicles that flicker in/out don't teleport on re-entry. */
+    private vehicleLastSeen = new globalThis.Map<string, number>();
     private vehicleIcons = new Set<string>();
     private animationId: number | null = null;
     private lastAnimationTime = 0;
@@ -45,26 +66,39 @@ export class VehicleRenderer {
     private currentVehicles: RouteVehicles[] = [];
 
     // Cached target positions - recalculated every frame
-    private cachedTargets: { position: VehiclePosition; routeId: number; routeColor: string }[] = [];
+    private cachedTargets: { position: VehiclePosition; routeId: number; routeColor: string }[] =
+        [];
     private cachedActiveTripIds = new Set<string>();
 
     // Time interpolation: React timer provides authoritative time every ~50ms.
     // Between updates, we interpolate linearly using the known time speed.
     // This avoids discrete sub-pixel jumps that cause visible pixel-level teleporting.
     private simulatedTime: Date = new Date();
-    private lastAuthoritativeSimTime = 0;   // ms since epoch, from last setSimulatedTime
-    private lastAuthoritativeRealTime = 0;  // performance.now() ms, when last setSimulatedTime was called
+    private lastAuthoritativeSimTime = 0; // ms since epoch, from last setSimulatedTime
+    private lastAuthoritativeRealTime = 0; // performance.now() ms, when last setSimulatedTime was called
     // Time speed from the simulation controller (1.0 = real-time, 10.0 = 10x).
     // Set explicitly via setTimeSpeed() - NOT computed from call timing, which is noisy
     // due to variable React render delays.
     private timeSpeed = 1.0;
+    private currentZoom = 12;
 
     /** Counter for target recalculations - exposed for testing */
     _recalcCount = 0;
 
     private onTrackedVehicleLost?: () => void;
+    /** Called when tracking transitions to a new trip (loop). Receives the new trip_id. */
+    private onTrackedTripChanged?: (newTripId: string) => void;
     private trackedTripId: string | null = null;
-    private debugOptions: DebugOptions = { show3DModels: true, showDebugSegments: false, showDebugOnlyTracked: true };
+    /** Maps trip_id → next_trip_id for seamless loop transitions. */
+    private nextTripMap = new globalThis.Map<string, string>();
+    private debugOptions: DebugOptions = {
+        show3DModels: true,
+        showDebugSegments: false,
+        showDebugOnlyTracked: true
+    };
+
+    /** Lifecycle monitor for automated anomaly detection. */
+    private lifecycleMonitor = new VehicleLifecycleMonitor();
 
     constructor(
         layerManager: MapLayerManager,
@@ -75,6 +109,8 @@ export class VehicleRenderer {
         this.routeColors = routeColors;
         this.routeGeometries = routeGeometries;
         this.buildLinearizedRoutes();
+
+        installMonitorGlobal(this.lifecycleMonitor);
     }
 
     /**
@@ -110,6 +146,13 @@ export class VehicleRenderer {
     }
 
     /**
+     * Set callback for when tracking transitions to a new trip (loop continuation)
+     */
+    setOnTrackedTripChanged(callback: (newTripId: string) => void): void {
+        this.onTrackedTripChanged = callback;
+    }
+
+    /**
      * Set the currently tracked trip ID
      */
     setTrackedTripId(tripId: string | null): void {
@@ -121,6 +164,9 @@ export class VehicleRenderer {
      */
     setDebugOptions(options: DebugOptions): void {
         this.debugOptions = options;
+        // Sync the MapLibre layer minzoom with the configurable setting
+        const minZoom = options.model3DMinZoom ?? MODEL_3D_MIN_ZOOM;
+        this.layerManager.setVehicleModelsMinZoom(minZoom);
     }
 
     /**
@@ -145,6 +191,10 @@ export class VehicleRenderer {
      */
     setTimeSpeed(speed: number): void {
         this.timeSpeed = speed;
+    }
+
+    setZoom(zoom: number): void {
+        this.currentZoom = zoom;
     }
 
     /**
@@ -222,7 +272,8 @@ export class VehicleRenderer {
         this.layerManager.clearVehicleData();
         this.layerManager.updateDebugSegments([]);
         this.smoothedPositions.clear();
-        this.collisionOffsets.clear();
+        this.vehicleLastSeen.clear();
+        this.lifecycleMonitor.clear();
     }
 
     /**
@@ -232,18 +283,30 @@ export class VehicleRenderer {
     private recalculateTargets(): void {
         this._recalcCount++;
         const now = this.simulatedTime;
-        const vehiclesByTripId = new globalThis.Map<string, { vehicle: RouteVehicles["vehicles"][0]; routeId: number; stopCount: number }>();
+        const vehiclesByTripId = new globalThis.Map<
+            string,
+            { vehicle: RouteVehicles["vehicles"][0]; routeId: number; stopCount: number }
+        >();
 
+        this.nextTripMap.clear();
         for (const routeVehicles of this.currentVehicles) {
             for (const vehicle of routeVehicles.vehicles) {
                 const existing = vehiclesByTripId.get(vehicle.trip_id);
                 if (!existing || vehicle.stops.length > existing.stopCount) {
-                    vehiclesByTripId.set(vehicle.trip_id, { vehicle, routeId: routeVehicles.routeId, stopCount: vehicle.stops.length });
+                    vehiclesByTripId.set(vehicle.trip_id, {
+                        vehicle,
+                        routeId: routeVehicles.routeId,
+                        stopCount: vehicle.stops.length
+                    });
+                }
+                if (vehicle.next_trip_id) {
+                    this.nextTripMap.set(vehicle.trip_id, vehicle.next_trip_id);
                 }
             }
         }
 
-        const allPositions: { position: VehiclePosition; routeId: number; routeColor: string }[] = [];
+        const allPositions: { position: VehiclePosition; routeId: number; routeColor: string }[] =
+            [];
         const completingAtLocation = new Set<string>();
         const activeTripIds = new Set<string>();
 
@@ -252,10 +315,12 @@ export class VehicleRenderer {
             const routeColor = this.routeColors.get(vehicle.line_number ?? "") ?? "#3b82f6";
             const targetPosition = calculateVehiclePosition(vehicle, routeGeometry ?? [], now);
 
+
             if (targetPosition && targetPosition.status !== "completed") {
                 allPositions.push({ position: targetPosition, routeId, routeColor });
                 const lastStop = vehicle.stops[vehicle.stops.length - 1];
-                const isOnFinalSegment = targetPosition.nextStop?.stop_ifopt === lastStop?.stop_ifopt;
+                const isOnFinalSegment =
+                    targetPosition.nextStop?.stop_ifopt === lastStop?.stop_ifopt;
                 if (isOnFinalSegment && targetPosition.progress > 0.5 && lastStop?.stop_ifopt) {
                     completingAtLocation.add(`${targetPosition.lineNumber}:${lastStop.stop_ifopt}`);
                 }
@@ -293,28 +358,95 @@ export class VehicleRenderer {
         const allPositions = this.cachedTargets;
         const activeTripIds = this.cachedActiveTripIds;
 
-        // Compute speed adjustments from previous frame's smoothed positions.
-        // This uses geographic proximity to detect overlapping vehicles and
-        // returns per-vehicle speed multipliers (< 1.0 = slow down, > 1.0 = speed up).
-        const speedAdjustments = this.computeSpeedAdjustments(allPositions);
+        // Compute forward-movement caps from leader/follower detection.
+        // Uses PREVIOUS frame's smoothed positions so leaders' positions are stable.
+        // The cap prevents a follower from advancing past (leader − 50m) on its route,
+        // but NEVER pushes a vehicle backwards (caller applies Math.max with current pos).
+        let positionCaps = new globalThis.Map<string, { maxLinearPosition: number; routeId: number }>();
+        if (featureManager.isEnabled(COLLISION_AVOIDANCE_FEATURE_ID)) {
+            const vehicleInfo = allPositions.map(({ position, routeId }) => ({
+                tripId: position.tripId,
+                routeId,
+                lineNumber: position.lineNumber,
+            }));
+            positionCaps = computePositionCaps(
+                vehicleInfo,
+                this.smoothedPositions,
+                this.linearizedRoutes,
+            );
+        }
 
         // Update smoothed positions toward targets
         // Pass linearized route for route-based smoothing with forward-only clamping
         for (const { position: targetPosition, routeId } of allPositions) {
             const linearizedRoute = this.linearizedRoutes.get(routeId);
-            let smoothedPosition = this.smoothedPositions.get(targetPosition.tripId);
-            if (smoothedPosition) {
-                smoothedPosition = updateSmoothedPosition(smoothedPosition, targetPosition, deltaMs, linearizedRoute);
+            const previousPosition = this.smoothedPositions.get(targetPosition.tripId);
+            let smoothedPosition: SmoothedVehiclePosition;
+            if (previousPosition) {
+                smoothedPosition = updateSmoothedPosition(
+                    previousPosition,
+                    targetPosition,
+                    deltaMs,
+                    linearizedRoute,
+                    this.timeSpeed,
+                );
             } else {
                 smoothedPosition = createSmoothedPosition(targetPosition);
             }
+
+            // Apply collision avoidance cap: prevent forward movement past safe distance.
+            // NEVER move backwards — Math.max with previous position guarantees this.
+            const cap = positionCaps.get(targetPosition.tripId);
+            if (cap && linearizedRoute &&
+                smoothedPosition.renderedLinearPosition !== undefined) {
+                const prevLinear = previousPosition?.renderedLinearPosition ?? smoothedPosition.renderedLinearPosition;
+                // effectiveCap: the cap, but never behind where the vehicle already was
+                const effectiveCap = Math.max(cap.maxLinearPosition, prevLinear);
+                if (smoothedPosition.renderedLinearPosition > effectiveCap) {
+                    const capped = getPositionAtDistance(linearizedRoute, effectiveCap);
+                    smoothedPosition = {
+                        ...smoothedPosition,
+                        renderedLinearPosition: effectiveCap,
+                        renderedLon: capped.lon,
+                        renderedLat: capped.lat,
+                    };
+                }
+            }
+
             this.smoothedPositions.set(targetPosition.tripId, smoothedPosition);
         }
 
-        // Accumulate collision offsets from speed adjustments and apply to smoothed positions.
-        // This shifts vehicles along their own routes to create visual separation.
-        this.updateCollisionOffsets(speedAdjustments, deltaMs);
-        this.applyCollisionOffsets(allPositions);
+        // Feed lifecycle monitor (includes speed diagnostics for anomaly detection)
+        const monitorSnapshots = new globalThis.Map<string, VehicleSnapshot>();
+        for (const { position: targetPosition, routeId } of allPositions) {
+            const sp = this.smoothedPositions.get(targetPosition.tripId);
+            if (!sp) continue;
+
+            // Compute schedule-derived speed from target position data
+            let scheduleSpeedMps: number | undefined;
+            let distToNextStop: number | undefined;
+            if (targetPosition.nextStopLinearPosition !== undefined &&
+                sp.renderedLinearPosition !== undefined) {
+                distToNextStop = targetPosition.nextStopLinearPosition - sp.renderedLinearPosition;
+            }
+            if (distToNextStop !== undefined &&
+                targetPosition.msToNextStop !== undefined &&
+                targetPosition.msToNextStop > 0) {
+                scheduleSpeedMps = Math.max(0, distToNextStop / (targetPosition.msToNextStop / 1000));
+            }
+
+            monitorSnapshots.set(targetPosition.tripId, {
+                lon: sp.renderedLon,
+                lat: sp.renderedLat,
+                linearPosition: sp.renderedLinearPosition ?? 0,
+                status: sp.status,
+                routeId,
+                scheduleSpeedMps,
+                distToNextStop,
+                msToNextStop: targetPosition.msToNextStop,
+            });
+        }
+        this.lifecycleMonitor.update(monitorSnapshots);
 
         // Collect vehicle context for feature processing
         const vehicleContexts: VehicleRenderContext[] = [];
@@ -325,7 +457,6 @@ export class VehicleRenderer {
             const linearizedRoute = this.linearizedRoutes.get(routeId);
             if (!linearizedRoute) continue;
 
-            // Use smoothed linear position when available (more stable than re-projecting lon/lat)
             let linearPosition: number;
             if (smoothedPosition.renderedLinearPosition !== undefined) {
                 linearPosition = smoothedPosition.renderedLinearPosition;
@@ -342,6 +473,7 @@ export class VehicleRenderer {
                 tripId: targetPosition.tripId,
                 routeId,
                 linearPosition,
+                lineNumber: smoothedPosition.lineNumber ?? "0",
                 smoothedPosition,
             });
         }
@@ -362,10 +494,10 @@ export class VehicleRenderer {
             if (!smoothedPosition) continue;
 
             // Get processed render position (or fall back to smoothed)
-            const renderPos = renderPositions.get(targetPosition.tripId) ?? {
+            const renderPos: RenderPosition = renderPositions.get(targetPosition.tripId) ?? {
                 lon: smoothedPosition.renderedLon,
                 lat: smoothedPosition.renderedLat,
-                bearing: smoothedPosition.renderedBearing,
+                bearing: smoothedPosition.renderedBearing
             };
 
             // Create vehicle marker icon
@@ -390,29 +522,33 @@ export class VehicleRenderer {
                     color: routeColor,
                     iconId,
                     currentStopName: smoothedPosition.currentStop?.stop_name ?? null,
-                    nextStopName: smoothedPosition.nextStop?.stop_name ?? null,
+                    nextStopName: smoothedPosition.nextStop?.stop_name ?? null
                 },
-                geometry: { type: "Point", coordinates: [renderPos.lon, renderPos.lat] },
+                geometry: { type: "Point", coordinates: [renderPos.lon, renderPos.lat] }
             });
 
             // Generate 3D model features and debug visualization
             const linearizedRoute = this.linearizedRoutes.get(routeId);
             const isTracked = targetPosition.tripId === this.trackedTripId;
 
-            const showDebugForThis = this.debugOptions.showDebugSegments &&
+            const showDebugForThis =
+                this.debugOptions.showDebugSegments &&
                 (!this.debugOptions.showDebugOnlyTracked || isTracked);
 
-            if (this.debugOptions.show3DModels || showDebugForThis) {
-                const { modelFeatures: segmentFeatures, debugFeatures: segDebugFeatures } = this.generateModelFeatures(
-                    smoothedPosition,
-                    renderPos,
-                    linearizedRoute,
-                    routeColor,
-                    vehicleModel,
-                    segmentDistances,
-                    showDebugForThis
-                );
-                if (this.debugOptions.show3DModels) {
+            const minZoom = this.debugOptions.model3DMinZoom ?? MODEL_3D_MIN_ZOOM;
+            const show3DAtZoom = this.debugOptions.show3DModels && this.currentZoom >= minZoom;
+            if (show3DAtZoom || showDebugForThis) {
+                const { modelFeatures: segmentFeatures, debugFeatures: segDebugFeatures } =
+                    this.generateModelFeatures(
+                        smoothedPosition,
+                        linearizedRoute,
+                        routeColor,
+                        vehicleModel,
+                        segmentDistances,
+                        showDebugForThis,
+                        renderPos,
+                    );
+                if (show3DAtZoom) {
                     modelFeatures.push(...segmentFeatures);
                 }
                 if (showDebugForThis) {
@@ -421,17 +557,45 @@ export class VehicleRenderer {
             }
         }
 
-        // Cleanup old smoothed positions and collision offsets
+        // Update last-seen timestamps for active vehicles, and prune stale ones.
+        const now = performance.now();
+        for (const tripId of activeTripIds) {
+            this.vehicleLastSeen.set(tripId, now);
+        }
         for (const tripId of this.smoothedPositions.keys()) {
             if (!activeTripIds.has(tripId)) {
-                this.smoothedPositions.delete(tripId);
-                this.collisionOffsets.delete(tripId);
+                const lastSeen = this.vehicleLastSeen.get(tripId) ?? 0;
+                if (now - lastSeen > SMOOTHED_POSITION_GRACE_MS) {
+                    this.smoothedPositions.delete(tripId);
+                    this.vehicleLastSeen.delete(tripId);
+                }
             }
         }
 
-        // Check if tracked vehicle still exists
-        if (this.trackedTripId && !this.smoothedPositions.has(this.trackedTripId)) {
-            this.onTrackedVehicleLost?.();
+        // Seamless loop transition: when tracked vehicle completes or disappears,
+        // switch to the next trip if available.
+        if (this.trackedTripId) {
+            const trackedSp = this.smoothedPositions.get(this.trackedTripId);
+            const nextTripId = this.nextTripMap.get(this.trackedTripId);
+
+            if (!trackedSp) {
+                // Vehicle gone entirely
+                if (nextTripId && this.smoothedPositions.has(nextTripId)) {
+                    this.trackedTripId = nextTripId;
+                    this.onTrackedTripChanged?.(nextTripId);
+                } else {
+                    this.onTrackedVehicleLost?.();
+                }
+            } else if (trackedSp.status === "completed" || trackedSp.status === "at_stop") {
+                // Vehicle at final stop or completed — transition early if next trip is active
+                if (nextTripId && this.smoothedPositions.has(nextTripId)) {
+                    const isAtFinalStop = !trackedSp.nextStop;
+                    if (trackedSp.status === "completed" || isAtFinalStop) {
+                        this.trackedTripId = nextTripId;
+                        this.onTrackedTripChanged?.(nextTripId);
+                    }
+                }
+            }
         }
 
         // Update all layers together
@@ -455,12 +619,12 @@ export class VehicleRenderer {
      */
     private generateModelFeatures(
         smoothedPosition: SmoothedVehiclePosition,
-        renderPos: { lon: number; lat: number; bearing: number },
         linearizedRoute: LinearizedRoute | undefined,
         routeColor: string,
         vehicleModel: ReturnType<typeof getAugsburgVehicleModel>,
         segmentDistances: ReturnType<typeof calculateSegmentDistances>,
-        showDebug = false
+        showDebug = false,
+        renderPos?: RenderPosition,
     ): { modelFeatures: GeoJSON.Feature[]; debugFeatures: GeoJSON.Feature[] } {
         const modelFeatures: GeoJSON.Feature[] = [];
         const debugFeatures: GeoJSON.Feature[] = [];
@@ -470,16 +634,20 @@ export class VehicleRenderer {
             return { modelFeatures: [], debugFeatures: [] };
         }
 
-        // Use the smoothed linear position when available (more stable than re-projecting lon/lat)
-        // Re-projecting lon/lat via findPositionOnRoute can be unstable near route curves
+        // Use the collision-adjusted render position when available, falling back
+        // to the smoothed linear position. This ensures the 3D model is always
+        // co-located with the marker icon.
         let linearPosition: number;
-        if (smoothedPosition.renderedLinearPosition !== undefined) {
+        if (renderPos) {
+            const projected = findPositionOnRoute(linearizedRoute, renderPos.lon, renderPos.lat);
+            linearPosition = projected.linearPosition;
+        } else if (smoothedPosition.renderedLinearPosition !== undefined) {
             linearPosition = smoothedPosition.renderedLinearPosition;
         } else {
             const routePosition = findPositionOnRoute(
                 linearizedRoute,
-                renderPos.lon,
-                renderPos.lat
+                smoothedPosition.renderedLon,
+                smoothedPosition.renderedLat
             );
             linearPosition = routePosition.linearPosition;
         }
@@ -500,8 +668,10 @@ export class VehicleRenderer {
             const rearPos = positions[i * 2 + 1];
 
             const polygon = this.createSegmentPolygon(
-                frontPos.lon, frontPos.lat,
-                rearPos.lon, rearPos.lat,
+                frontPos.lon,
+                frontPos.lat,
+                rearPos.lon,
+                rearPos.lat,
                 vehicleModel.width
             );
 
@@ -512,9 +682,9 @@ export class VehicleRenderer {
                         color: routeColor,
                         tripId: smoothedPosition.tripId,
                         carIndex: segInfo.index,
-                        height: segInfo.segment.height,
+                        height: segInfo.segment.height
                     },
-                    geometry: { type: "Polygon", coordinates: [polygon] },
+                    geometry: { type: "Polygon", coordinates: [polygon] }
                 });
             }
         }
@@ -553,119 +723,25 @@ export class VehicleRenderer {
         const halfWidth = width / 2;
 
         const corners = [
-            [frontLon + (perpX * halfWidth) / metersPerDegreeLon, frontLat + (perpY * halfWidth) / metersPerDegreeLat],
-            [frontLon - (perpX * halfWidth) / metersPerDegreeLon, frontLat - (perpY * halfWidth) / metersPerDegreeLat],
-            [rearLon - (perpX * halfWidth) / metersPerDegreeLon, rearLat - (perpY * halfWidth) / metersPerDegreeLat],
-            [rearLon + (perpX * halfWidth) / metersPerDegreeLon, rearLat + (perpY * halfWidth) / metersPerDegreeLat],
+            [
+                frontLon + (perpX * halfWidth) / metersPerDegreeLon,
+                frontLat + (perpY * halfWidth) / metersPerDegreeLat
+            ],
+            [
+                frontLon - (perpX * halfWidth) / metersPerDegreeLon,
+                frontLat - (perpY * halfWidth) / metersPerDegreeLat
+            ],
+            [
+                rearLon - (perpX * halfWidth) / metersPerDegreeLon,
+                rearLat - (perpY * halfWidth) / metersPerDegreeLat
+            ],
+            [
+                rearLon + (perpX * halfWidth) / metersPerDegreeLon,
+                rearLat + (perpY * halfWidth) / metersPerDegreeLat
+            ]
         ];
         corners.push(corners[0]);
         return corners;
-    }
-
-    /**
-     * Build vehicle contexts from previous frame's smoothed positions and
-     * compute speed adjustments for collision avoidance.
-     */
-    private computeSpeedAdjustments(
-        allPositions: { position: VehiclePosition; routeId: number; routeColor: string }[]
-    ): globalThis.Map<string, number> {
-        const vehicleContexts: VehicleRenderContext[] = [];
-        for (const { position: targetPosition, routeId } of allPositions) {
-            const smoothedPosition = this.smoothedPositions.get(targetPosition.tripId);
-            if (!smoothedPosition) continue;
-
-            const linearizedRoute = this.linearizedRoutes.get(routeId);
-            if (!linearizedRoute) continue;
-
-            let linearPosition: number;
-            if (smoothedPosition.renderedLinearPosition !== undefined) {
-                linearPosition = smoothedPosition.renderedLinearPosition;
-            } else {
-                const routePosition = findPositionOnRoute(
-                    linearizedRoute,
-                    smoothedPosition.renderedLon,
-                    smoothedPosition.renderedLat
-                );
-                linearPosition = routePosition.linearPosition;
-            }
-
-            vehicleContexts.push({
-                tripId: targetPosition.tripId,
-                routeId,
-                linearPosition,
-                smoothedPosition,
-            });
-        }
-
-        return featureManager.computeSpeedAdjustments(vehicleContexts, this.linearizedRoutes);
-    }
-
-    /**
-     * Accumulate per-vehicle linear position offsets from speed adjustments.
-     * Followers get pushed back, leaders get pushed forward, creating
-     * gradual visual separation without position jumps or bearing flips.
-     */
-    private updateCollisionOffsets(
-        speedAdjustments: globalThis.Map<string, number>,
-        deltaMs: number
-    ): void {
-        const ESTIMATED_SPEED_MPS = 8.3; // ~30 km/h typical tram speed
-        const MAX_OFFSET = 100; // max offset in meters
-        const DECAY_RATE = 0.98; // per-frame decay when no longer adjusted
-        const MIN_OFFSET = 0.1; // snap to 0 below this
-
-        // Scale accumulation by timeSpeed so offsets keep up with faster vehicle movement.
-        // At 10x speed, vehicles traverse 10x more route per frame, so offsets must grow 10x faster.
-        const timeScale = this.timeSpeed;
-
-        for (const [tripId, multiplier] of speedAdjustments) {
-            const speedDiff = (multiplier - 1.0) * ESTIMATED_SPEED_MPS;
-            const currentOffset = this.collisionOffsets.get(tripId) ?? 0;
-            const newOffset = Math.max(-MAX_OFFSET, Math.min(MAX_OFFSET,
-                currentOffset + speedDiff * (deltaMs / 1000) * timeScale
-            ));
-            this.collisionOffsets.set(tripId, newOffset);
-        }
-
-        // Decay offsets for vehicles no longer being adjusted
-        for (const [tripId, offset] of this.collisionOffsets) {
-            if (!speedAdjustments.has(tripId)) {
-                const decayed = offset * DECAY_RATE;
-                if (Math.abs(decayed) < MIN_OFFSET) {
-                    this.collisionOffsets.delete(tripId);
-                } else {
-                    this.collisionOffsets.set(tripId, decayed);
-                }
-            }
-        }
-    }
-
-    /**
-     * Apply accumulated collision offsets to smoothed positions.
-     * Shifts each vehicle along its own route by the offset distance,
-     * keeping the original bearing to prevent model orientation flips.
-     */
-    private applyCollisionOffsets(
-        allPositions: { position: VehiclePosition; routeId: number; routeColor: string }[]
-    ): void {
-        for (const { position: targetPosition, routeId } of allPositions) {
-            const offset = this.collisionOffsets.get(targetPosition.tripId);
-            if (!offset || offset === 0) continue;
-
-            const smoothedPosition = this.smoothedPositions.get(targetPosition.tripId);
-            if (!smoothedPosition || smoothedPosition.renderedLinearPosition === undefined) continue;
-
-            const linearizedRoute = this.linearizedRoutes.get(routeId);
-            if (!linearizedRoute) continue;
-
-            const offsetLinearPosition = smoothedPosition.renderedLinearPosition + offset;
-            const newPos = getPositionAtDistance(linearizedRoute, offsetLinearPosition);
-
-            smoothedPosition.renderedLinearPosition = offsetLinearPosition;
-            smoothedPosition.renderedLon = newPos.lon;
-            smoothedPosition.renderedLat = newPos.lat;
-            // Keep renderedBearing unchanged to prevent model orientation flips
-        }
     }
 
     /**
@@ -699,7 +775,8 @@ export class VehicleRenderer {
         this.stopAnimation();
         this.vehicleIcons.clear();
         this.smoothedPositions.clear();
-        this.collisionOffsets.clear();
+        this.vehicleLastSeen.clear();
         this.linearizedRoutes.clear();
+        this.lifecycleMonitor.clear();
     }
 }

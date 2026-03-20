@@ -20,6 +20,12 @@ export interface VehiclePosition {
     // Route position info for 3D model placement
     routeSegmentIndex?: number;      // Which segment of the flattened route the vehicle is on
     routeLinearPosition?: number;    // Distance from start of route in meters
+    /** Linear position of the next stop on the route (meters from start). */
+    nextStopLinearPosition?: number;
+    /** Simulated milliseconds remaining until the next stop's arrival time.
+     *  Used together with nextStopLinearPosition to compute the required travel
+     *  speed so the vehicle arrives on time without exponential-smoothing jumps. */
+    msToNextStop?: number;
 }
 
 /**
@@ -275,6 +281,7 @@ export function calculateVehiclePosition(
             routeGeometry
         );
 
+        const nextStopRoutePos = findLinearPositionOnRoute(nextStop.lon, nextStop.lat, routeGeometry);
         return {
             tripId: vehicle.trip_id,
             lineNumber: vehicle.line_number,
@@ -289,6 +296,8 @@ export function calculateVehiclePosition(
             delayMinutes: prevStop.delay_minutes ?? nextStop.delay_minutes ?? null,
             routeSegmentIndex: position.segmentIndex,
             routeLinearPosition: position.linearPosition,
+            nextStopLinearPosition: nextStopRoutePos?.linearPosition,
+            msToNextStop: arrivalTime - now,
         };
     }
 
@@ -796,9 +805,14 @@ export interface SmoothedVehiclePosition extends VehiclePosition {
 }
 
 // Thresholds for position smoothing
-const SNAP_DISTANCE_METERS = 500; // Distance above which we snap instead of smooth
+const SNAP_DISTANCE_METERS = 1000; // Distance above which we snap instead of smooth (route change/restart)
 // Bearing smoothing: exponential decay half-life in ms
 const BEARING_HALF_LIFE_MS = 200;
+/** Maximum rendered vehicle speed in m/s (70 km/h).
+ * Clamps the per-frame linear position delta so that even large target jumps
+ * (from GTFS-RT time corrections) don't cause the vehicle to visually "speed"
+ * at hundreds of km/h. Augsburg trams max out at ~70 km/h in service. */
+const MAX_RENDERED_SPEED_MS = 70 / 3.6;
 
 /**
  * Calculate haversine distance between two coordinates in meters
@@ -853,7 +867,8 @@ export function updateSmoothedPosition(
     current: SmoothedVehiclePosition,
     target: VehiclePosition,
     deltaMs: number,
-    linearizedRoute?: LinearizedRoute | null
+    linearizedRoute?: LinearizedRoute | null,
+    timeSpeed = 1.0,
 ): SmoothedVehiclePosition {
     const distance = haversineDistanceCoords(
         current.renderedLon,
@@ -902,8 +917,61 @@ export function updateSmoothedPosition(
             effectiveTargetLinear = current.renderedLinearPosition;
         }
 
-        // Derive lat/lon from the route at the (possibly clamped) target linear position
-        const routePos = getPositionAtDistance(linearizedRoute, effectiveTargetLinear);
+        // Arrival-time-based speed: advance at the speed needed to reach the next
+        // stop by its scheduled arrival time.  When GTFS-RT updates change times,
+        // only the *speed* changes — the rendered position never jumps.
+        let smoothedLinear: number;
+        const simDeltaMs = deltaMs * timeSpeed;
+        if (isInTransit &&
+            target.nextStopLinearPosition !== undefined &&
+            target.msToNextStop !== undefined &&
+            target.msToNextStop > 0) {
+            const distToStop = target.nextStopLinearPosition - current.renderedLinearPosition;
+            const timeToStopSec = target.msToNextStop / 1000;
+            const requiredSpeed = Math.max(0, distToStop / timeToStopSec);
+            const clampedSpeed = Math.min(requiredSpeed, MAX_RENDERED_SPEED_MS);
+            smoothedLinear = current.renderedLinearPosition + clampedSpeed * (simDeltaMs / 1000);
+        } else {
+            // At stop, waiting, or missing schedule info: advance toward target
+            // at max speed instead of snapping, to prevent forward teleportation
+            // when collision avoidance held the vehicle back.
+            const maxAdvance = MAX_RENDERED_SPEED_MS * (simDeltaMs / 1000);
+            if (effectiveTargetLinear > current.renderedLinearPosition + maxAdvance) {
+                smoothedLinear = current.renderedLinearPosition + maxAdvance;
+            } else {
+                smoothedLinear = effectiveTargetLinear;
+            }
+        }
+
+        // Derive lat/lon from the route at the smoothed linear position
+        const routePos = getPositionAtDistance(linearizedRoute, smoothedLinear);
+
+        // When the target jumps to a new stop segment (time-based) but the rendered
+        // position hasn't visually reached the boundary stop yet, keep showing the
+        // OLD stop names so the UI matches what the user sees on the map.
+        // Without this, smoothing/speed-clamping lag causes "next stop: Rosenaustraße"
+        // while the vehicle is still visually approaching Hauptbahnhof.
+        if (!sameSegment && target.currentStop) {
+            const boundary = findPositionOnRoute(
+                linearizedRoute, target.currentStop.lon, target.currentStop.lat
+            );
+            if (smoothedLinear < boundary.linearPosition - 5) {
+                return {
+                    ...target,
+                    currentStop: current.currentStop,
+                    nextStop: current.nextStop,
+                    status: current.status,
+                    delayMinutes: current.delayMinutes,
+                    renderedLon: routePos.lon,
+                    renderedLat: routePos.lat,
+                    renderedBearing: newBearing,
+                    lastUpdateTime: Date.now(),
+                    renderedLinearPosition: smoothedLinear,
+                    prevStopIfopt: current.prevStopIfopt,
+                    nextStopIfopt: current.nextStopIfopt,
+                };
+            }
+        }
 
         return {
             ...target,
@@ -911,7 +979,7 @@ export function updateSmoothedPosition(
             renderedLat: routePos.lat,
             renderedBearing: newBearing,
             lastUpdateTime: Date.now(),
-            renderedLinearPosition: effectiveTargetLinear,
+            renderedLinearPosition: smoothedLinear,
             prevStopIfopt: target.currentStop?.stop_ifopt,
             nextStopIfopt: target.nextStop?.stop_ifopt,
         };

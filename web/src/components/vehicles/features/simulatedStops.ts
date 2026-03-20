@@ -66,7 +66,7 @@ export function getDwellTimeMs(tripId: string, stopIfopt: string): number {
 
 export const simulatedStopsFeature: VehicleFeature = {
     id: "simulated-stops",
-    name: "Simulated Station Stops",
-    description: "Vehicles stop at stations even without explicit dwell time (probability varies by time of day)",
+    name: "Simulierte Haltestellenstopps",
+    description: "Fahrzeuge halten an Haltestellen auch ohne explizite Haltezeit (Wahrscheinlichkeit variiert nach Tageszeit)",
     defaultEnabled: true,
 };

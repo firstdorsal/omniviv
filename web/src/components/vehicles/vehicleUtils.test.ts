@@ -6,6 +6,7 @@ import {
     easeInOutProgress,
     calculateVehiclePosition,
     linearizeRoute,
+    getPositionAtDistance,
     type VehiclePosition,
     type SmoothedVehiclePosition,
 } from "./vehicleUtils";
@@ -81,7 +82,7 @@ const simpleRouteGeometry: number[][][] = [
 // --- updateSmoothedPosition tests ---
 
 describe("updateSmoothedPosition", () => {
-    it("snaps to target when distance > SNAP_DISTANCE_METERS (500m)", () => {
+    it("snaps to target when distance > SNAP_DISTANCE_METERS (1000m)", () => {
         // Current position far from target (different city essentially)
         const current = makeSmoothed({
             renderedLon: 0.0,
@@ -497,8 +498,11 @@ describe("updateSmoothedPosition with route-based smoothing", () => {
         expect(result.renderedLinearPosition).toBeGreaterThanOrEqual(linearPos);
     });
 
-    it("allows forward movement on same segment", () => {
+    it("allows forward movement on same segment at schedule speed", () => {
         const linearPos = route.totalLength * 0.3;
+        const SPEED_MPS = 8.33; // ~30 km/h
+        const distToStop = route.totalLength - linearPos;
+        const msToNextStop = (distToStop / SPEED_MPS) * 1000;
 
         const current = makeSmoothed({
             status: "in_transit",
@@ -513,21 +517,24 @@ describe("updateSmoothedPosition with route-based smoothing", () => {
             nextStopIfopt: stopB.stop_ifopt,
         });
 
-        // Target is 200m ahead (within snap threshold)
-        const forwardLinearPos = linearPos + 200;
         const target = makePosition({
             status: "in_transit",
             lon: 10.031,
             lat: 48.031,
-            routeLinearPosition: forwardLinearPos,
+            routeLinearPosition: linearPos + 200,
             currentStop: stopA,
             nextStop: stopB,
+            nextStopLinearPosition: route.totalLength,
+            msToNextStop,
         });
 
         const result = updateSmoothedPosition(current, target, 16, route);
 
-        // Should snap to target position (moveFraction=1.0)
-        expect(result.renderedLinearPosition!).toBe(forwardLinearPos);
+        // Should advance by speed * deltaMs (= 8.33 * 0.016 = 0.133m)
+        const expectedDelta = SPEED_MPS * (16 / 1000);
+        const actualDelta = result.renderedLinearPosition! - linearPos;
+        expect(actualDelta).toBeGreaterThan(0);
+        expect(actualDelta).toBeCloseTo(expectedDelta, 1);
     });
 
     it("allows backward movement when segment changes", () => {
@@ -568,23 +575,21 @@ describe("updateSmoothedPosition with route-based smoothing", () => {
     });
 
     it("maintains smooth speed when target advances continuously each frame", () => {
-        // This tests the key scenario: with continuous time advancement in VehicleRenderer,
-        // the target moves by a tiny amount each frame. The smoothing should produce
-        // near-constant speed with very low variation (< 5% CV).
+        // With arrival-time-based speed, each frame computes speed from
+        // remaining distance to stop / remaining time. As both decrease together,
+        // speed stays roughly constant.
         const FRAME_MS = 16;
         const SPEED_MPS = 8.33; // ~30 km/h
-        const distPerFrame = SPEED_MPS * (FRAME_MS / 1000); // ~0.133m per frame
+        const distPerFrame = SPEED_MPS * (FRAME_MS / 1000);
         const startPos = route.totalLength * 0.2;
-
-        // Use route-derived coordinates so haversine distance stays within snap threshold.
-        // The route goes from (10.0, 48.0) to (10.05, 48.05) to (10.1, 48.1).
-        // At 20% of ~14.8km = ~2960m, we're at approximately t=0.4 on the first segment:
-        // lon ≈ 10.0 + 0.4*0.05 = 10.02, lat ≈ 48.0 + 0.4*0.05 = 48.02
         const startLon = 10.02;
         const startLat = 48.02;
-        // Per-frame advance in degrees (very small - ~0.133m in lon/lat)
         const lonPerMeter = 1 / (111320 * Math.cos(startLat * Math.PI / 180));
         const latPerMeter = 1 / 111320;
+
+        // Schedule: next stop at end of route, time computed for desired speed
+        const totalDistToStop = route.totalLength - startPos;
+        const totalTimeMs = (totalDistToStop / SPEED_MPS) * 1000;
 
         let smoothed = makeSmoothed({
             status: "in_transit",
@@ -595,31 +600,20 @@ describe("updateSmoothedPosition with route-based smoothing", () => {
             prevStopIfopt: stopA.stop_ifopt, nextStopIfopt: stopB.stop_ifopt,
         });
 
-        // Warm up for 50 frames (ensure convergence)
-        for (let i = 1; i <= 50; i++) {
-            const targetPos = startPos + i * distPerFrame;
-            const target = makePosition({
-                status: "in_transit",
-                // Keep target lon/lat matching the route position
-                lon: startLon + i * distPerFrame * lonPerMeter * 0.707,
-                lat: startLat + i * distPerFrame * latPerMeter * 0.707,
-                routeLinearPosition: targetPos,
-                currentStop: stopA, nextStop: stopB,
-            });
-            smoothed = updateSmoothedPosition(smoothed, target, FRAME_MS, route);
-        }
-
-        // Measure speed over 60 frames
+        // Run 60 frames, feeding decreasing msToNextStop each frame
         const deltas: number[] = [];
         let prevLinear = smoothed.renderedLinearPosition!;
-        for (let i = 51; i <= 110; i++) {
+        for (let i = 1; i <= 60; i++) {
             const targetPos = startPos + i * distPerFrame;
+            const msToNextStop = totalTimeMs - i * FRAME_MS;
             const target = makePosition({
                 status: "in_transit",
                 lon: startLon + i * distPerFrame * lonPerMeter * 0.707,
                 lat: startLat + i * distPerFrame * latPerMeter * 0.707,
                 routeLinearPosition: targetPos,
                 currentStop: stopA, nextStop: stopB,
+                nextStopLinearPosition: route.totalLength,
+                msToNextStop: msToNextStop > 0 ? msToNextStop : 1,
             });
             smoothed = updateSmoothedPosition(smoothed, target, FRAME_MS, route);
             deltas.push(smoothed.renderedLinearPosition! - prevLinear);
@@ -633,6 +627,217 @@ describe("updateSmoothedPosition with route-based smoothing", () => {
         const mean = deltas.reduce((a, b) => a + b, 0) / deltas.length;
         const stddev = Math.sqrt(deltas.map(d => (d - mean) ** 2).reduce((a, b) => a + b, 0) / deltas.length);
         expect(stddev / mean).toBeLessThan(0.05);
+    });
+
+    it("uses schedule speed instead of chasing target after GTFS-RT jump", () => {
+        // Simulate a GTFS-RT correction: target jumps 500m ahead, but there are
+        // 120 seconds left to the next stop.  The vehicle should advance at the
+        // schedule speed (~30 km/h), NOT at 70 km/h or exponential-chase speed.
+        const linearPos = route.totalLength * 0.2;
+        const FRAME_MS = 16;
+        const distToStop = route.totalLength - linearPos;
+        const MS_TO_STOP = (distToStop / 8.33) * 1000; // 30 km/h schedule speed
+
+        const current = makeSmoothed({
+            status: "in_transit",
+            lon: 10.02,
+            lat: 48.02,
+            renderedLon: 10.02,
+            renderedLat: 48.02,
+            renderedLinearPosition: linearPos,
+            currentStop: stopA,
+            nextStop: stopB,
+            prevStopIfopt: stopA.stop_ifopt,
+            nextStopIfopt: stopB.stop_ifopt,
+        });
+
+        // Target jumps 500m ahead (GTFS-RT time correction)
+        const target = makePosition({
+            status: "in_transit",
+            lon: 10.025,
+            lat: 48.025,
+            routeLinearPosition: linearPos + 500,
+            currentStop: stopA,
+            nextStop: stopB,
+            nextStopLinearPosition: route.totalLength,
+            msToNextStop: MS_TO_STOP,
+        });
+
+        // First frame after jump
+        const result = updateSmoothedPosition(current, target, FRAME_MS, route);
+        const delta = result.renderedLinearPosition! - linearPos;
+
+        // Speed should be distToStop / timeToStop = 8.33 m/s
+        // Per-frame delta = 8.33 * 0.016 = 0.133m
+        const expectedDelta = (distToStop / (MS_TO_STOP / 1000)) * (FRAME_MS / 1000);
+        expect(delta).toBeCloseTo(expectedDelta, 2);
+        expect(delta).toBeGreaterThan(0);
+
+        // Even with the 500m jump, the vehicle never exceeds schedule speed
+        let pos = result;
+        let prevLinear = pos.renderedLinearPosition!;
+        for (let i = 0; i < 60; i++) {
+            pos = updateSmoothedPosition(pos, target, FRAME_MS, route);
+            const frameDelta = pos.renderedLinearPosition! - prevLinear;
+            const speedMs = frameDelta / (FRAME_MS / 1000);
+            // Speed should stay close to 8.33 m/s, not ramp up to 70 km/h
+            expect(speedMs).toBeLessThan(10); // well below old 70 km/h = 19.4 m/s cap
+            prevLinear = pos.renderedLinearPosition!;
+        }
+    });
+
+    it("schedule speed matches expected per-frame advancement", () => {
+        // Verify that at 30 km/h schedule, per-frame delta is exactly speed * dt
+        const FRAME_MS = 16;
+        const SPEED_MPS = 8.33;
+        const startPos = route.totalLength * 0.2;
+        const distToStop = route.totalLength - startPos;
+        const msToNextStop = (distToStop / SPEED_MPS) * 1000;
+
+        const smoothed = makeSmoothed({
+            status: "in_transit",
+            lon: 10.02, lat: 48.02,
+            renderedLon: 10.02, renderedLat: 48.02,
+            renderedLinearPosition: startPos,
+            currentStop: stopA, nextStop: stopB,
+            prevStopIfopt: stopA.stop_ifopt, nextStopIfopt: stopB.stop_ifopt,
+        });
+
+        const target = makePosition({
+            status: "in_transit",
+            lon: 10.025, lat: 48.025,
+            routeLinearPosition: startPos + 100,
+            currentStop: stopA, nextStop: stopB,
+            nextStopLinearPosition: route.totalLength,
+            msToNextStop,
+        });
+
+        const result = updateSmoothedPosition(smoothed, target, FRAME_MS, route);
+        const delta = result.renderedLinearPosition! - startPos;
+        const expectedDelta = SPEED_MPS * (FRAME_MS / 1000);
+
+        expect(delta).toBeCloseTo(expectedDelta, 2);
+    });
+
+    it("delays stop name update until rendered position crosses segment boundary", () => {
+        // Use a short route (~200m) so positions are within snap threshold
+        const shortGeometry: number[][][] = [[
+            [10.0, 48.0],
+            [10.001, 48.001],
+            [10.002, 48.002],
+        ]];
+        const shortRoute = linearizeRoute(shortGeometry)!;
+
+        // Three stops: A (start) → B (midpoint) → C (end)
+        const sA: VehicleStop = makeStop({
+            lat: 48.0, lon: 10.0, sequence: 1, stop_ifopt: "de:1:1",
+            stop_name: "Moritzplatz",
+        });
+        const sB: VehicleStop = makeStop({
+            lat: 48.001, lon: 10.001, sequence: 2, stop_ifopt: "de:1:2",
+            stop_name: "Hauptbahnhof",
+        });
+        const sC: VehicleStop = makeStop({
+            lat: 48.002, lon: 10.002, sequence: 3, stop_ifopt: "de:1:3",
+            stop_name: "Rosenaustraße",
+        });
+
+        // Vehicle rendered position is at 20% of route — approaching stopB
+        const linearPos = shortRoute.totalLength * 0.2;
+        const posAtLinear = getPositionAtDistance(shortRoute, linearPos);
+        const current = makeSmoothed({
+            status: "in_transit",
+            lon: posAtLinear.lon,
+            lat: posAtLinear.lat,
+            renderedLon: posAtLinear.lon,
+            renderedLat: posAtLinear.lat,
+            renderedLinearPosition: linearPos,
+            currentStop: sA,
+            nextStop: sB,
+            prevStopIfopt: sA.stop_ifopt,
+            nextStopIfopt: sB.stop_ifopt,
+        });
+
+        // Target jumps to B→C segment (simulated time passed B's departure)
+        const targetLinearPos = shortRoute.totalLength * 0.55;
+        const targetPos = getPositionAtDistance(shortRoute, targetLinearPos);
+        const target = makePosition({
+            status: "in_transit",
+            lon: targetPos.lon,
+            lat: targetPos.lat,
+            routeLinearPosition: targetLinearPos,
+            currentStop: sB,   // departed from Hauptbahnhof
+            nextStop: sC,      // heading to Rosenaustraße
+            nextStopLinearPosition: shortRoute.totalLength,
+            msToNextStop: 60000, // 60s to next stop
+        });
+
+        const result = updateSmoothedPosition(current, target, 16, shortRoute);
+
+        // Rendered position is still before Hauptbahnhof, so UI should show old stops
+        expect(result.nextStop?.stop_name).toBe("Hauptbahnhof");
+        expect(result.currentStop?.stop_name).toBe("Moritzplatz");
+        expect(result.status).toBe("in_transit");
+        expect(result.prevStopIfopt).toBe(sA.stop_ifopt);
+        expect(result.nextStopIfopt).toBe(sB.stop_ifopt);
+    });
+
+    it("updates stop names once rendered position passes segment boundary", () => {
+        const shortGeometry: number[][][] = [[
+            [10.0, 48.0],
+            [10.001, 48.001],
+            [10.002, 48.002],
+        ]];
+        const shortRoute = linearizeRoute(shortGeometry)!;
+
+        const sA: VehicleStop = makeStop({
+            lat: 48.0, lon: 10.0, sequence: 1, stop_ifopt: "de:1:1",
+            stop_name: "Moritzplatz",
+        });
+        const sB: VehicleStop = makeStop({
+            lat: 48.001, lon: 10.001, sequence: 2, stop_ifopt: "de:1:2",
+            stop_name: "Hauptbahnhof",
+        });
+        const sC: VehicleStop = makeStop({
+            lat: 48.002, lon: 10.002, sequence: 3, stop_ifopt: "de:1:3",
+            stop_name: "Rosenaustraße",
+        });
+
+        // Vehicle rendered position is PAST stopB (55% of route, stopB is at 50%)
+        const linearPos = shortRoute.totalLength * 0.55;
+        const posAtLinear = getPositionAtDistance(shortRoute, linearPos);
+        const current = makeSmoothed({
+            status: "in_transit",
+            lon: posAtLinear.lon,
+            lat: posAtLinear.lat,
+            renderedLon: posAtLinear.lon,
+            renderedLat: posAtLinear.lat,
+            renderedLinearPosition: linearPos,
+            currentStop: sA,
+            nextStop: sB,
+            prevStopIfopt: sA.stop_ifopt,
+            nextStopIfopt: sB.stop_ifopt,
+        });
+
+        // Target is on B→C segment (schedule info for speed-based advancement)
+        const targetLinearPos = shortRoute.totalLength * 0.6;
+        const targetPos = getPositionAtDistance(shortRoute, targetLinearPos);
+        const target = makePosition({
+            status: "in_transit",
+            lon: targetPos.lon,
+            lat: targetPos.lat,
+            routeLinearPosition: targetLinearPos,
+            currentStop: sB,
+            nextStop: sC,
+            nextStopLinearPosition: shortRoute.totalLength,
+            msToNextStop: 60000,
+        });
+
+        const result = updateSmoothedPosition(current, target, 16, shortRoute);
+
+        // Rendered position is past Hauptbahnhof, so stop names update to new segment
+        expect(result.nextStop?.stop_name).toBe("Rosenaustraße");
+        expect(result.currentStop?.stop_name).toBe("Hauptbahnhof");
     });
 
     it("derives lat/lon from route geometry instead of direct interpolation", () => {

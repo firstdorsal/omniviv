@@ -8,6 +8,7 @@ export interface VehicleRenderContext {
     tripId: string;
     routeId: number;
     linearPosition: number;
+    lineNumber: string;
     smoothedPosition: SmoothedVehiclePosition;
 }
 
