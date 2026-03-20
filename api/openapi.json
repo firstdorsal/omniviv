@@ -1,0 +1,2263 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Omniviv API",
+    "description": "",
+    "license": {
+      "name": ""
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/areas": {
+      "get": {
+        "tags": [
+          "areas"
+        ],
+        "summary": "List all configured areas",
+        "operationId": "list_areas",
+        "responses": {
+          "200": {
+            "description": "List of all areas",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AreaListResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/areas/{id}": {
+      "get": {
+        "tags": [
+          "areas"
+        ],
+        "summary": "Get a specific area by ID",
+        "operationId": "get_area",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Area ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Area details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Area"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Area not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/areas/{id}/stats": {
+      "get": {
+        "tags": [
+          "areas"
+        ],
+        "summary": "Get statistics for an area",
+        "operationId": "get_area_stats",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Area ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Area statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AreaStats"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Area not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/departures": {
+      "get": {
+        "tags": [
+          "departures"
+        ],
+        "summary": "List all departures across all stops",
+        "operationId": "list_departures",
+        "responses": {
+          "200": {
+            "description": "List of all departures",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepartureListResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/departures/by-gtfs-stop": {
+      "post": {
+        "tags": [
+          "departures"
+        ],
+        "summary": "Get departures for a specific GTFS stop by its stop_id, bypassing IFOPT mapping",
+        "operationId": "get_departures_by_gtfs_stop",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GtfsStopDeparturesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Departures for the GTFS stop",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GtfsStopDeparturesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/departures/by-stop": {
+      "post": {
+        "tags": [
+          "departures"
+        ],
+        "summary": "Get departures for a specific stop by IFOPT ID",
+        "operationId": "get_departures_by_stop",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StopDeparturesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Departures for the stop",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopDeparturesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/gtfs-stops": {
+      "get": {
+        "tags": [
+          "gtfs-stops"
+        ],
+        "summary": "List GTFS stops",
+        "description": "Returns GTFS stops with coordinates. By default, only returns leaf stops\n(stops that have actual departures). Use the bounding box parameters to\nfilter by geographic area.",
+        "operationId": "list_gtfs_stops",
+        "parameters": [
+          {
+            "name": "stop_ids",
+            "in": "query",
+            "description": "Comma-separated list of stop IDs to fetch",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Case-insensitive substring search on stop name",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "min_lat",
+            "in": "query",
+            "description": "Minimum latitude for bounding box filter",
+            "required": false,
+            "schema": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            }
+          },
+          {
+            "name": "max_lat",
+            "in": "query",
+            "description": "Maximum latitude for bounding box filter",
+            "required": false,
+            "schema": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            }
+          },
+          {
+            "name": "min_lon",
+            "in": "query",
+            "description": "Minimum longitude for bounding box filter",
+            "required": false,
+            "schema": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            }
+          },
+          {
+            "name": "max_lon",
+            "in": "query",
+            "description": "Maximum longitude for bounding box filter",
+            "required": false,
+            "schema": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            }
+          },
+          {
+            "name": "parent_station",
+            "in": "query",
+            "description": "Filter by parent station ID",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "leaf_only",
+            "in": "query",
+            "description": "Only return leaf stops (stops that have trips visiting them)",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Offset for pagination (default: 0)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of results to return (default: 100, max: 1000)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of GTFS stops",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GtfsStopsListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Health check endpoint",
+        "operationId": "health_check",
+        "responses": {
+          "200": {
+            "description": "Service health status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/issues": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "List all OSM data quality issues",
+        "operationId": "list_issues",
+        "responses": {
+          "200": {
+            "description": "List of OSM data quality issues",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mapping/remove": {
+      "post": {
+        "tags": [
+          "mapping"
+        ],
+        "summary": "Remove a manual IFOPT-to-GTFS stop mapping",
+        "description": "Only removes manual (user-curated) mappings. The IFOPT will be\nre-matched automatically on the next auto-rebuild cycle.",
+        "operationId": "remove_mapping",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveMappingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Mapping removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoveMappingResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/api/mapping/set": {
+      "post": {
+        "tags": [
+          "mapping"
+        ],
+        "summary": "Set a manual IFOPT-to-GTFS stop mapping",
+        "description": "Creates or replaces a mapping for the given IFOPT with a user-curated\nGTFS stop assignment. Manual mappings are preserved across auto-rebuild cycles.",
+        "operationId": "set_mapping",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetMappingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Mapping set successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetMappingResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "404": {
+            "description": "GTFS stop not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/api/mapping/status": {
+      "post": {
+        "tags": [
+          "mapping"
+        ],
+        "summary": "Get mapping status overview with optional candidates",
+        "description": "Returns a summary of IFOPT-to-GTFS mapping statistics and a paginated\nlist of mapping entries. Each entry includes the OSM stop info, current\nmapping status, and optionally nearby GTFS candidate stops.",
+        "operationId": "mapping_status",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MappingStatusRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Mapping status overview",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MappingStatusResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/api/routes": {
+      "get": {
+        "tags": [
+          "routes"
+        ],
+        "summary": "List all routes, optionally filtered by area or type",
+        "operationId": "list_routes",
+        "parameters": [
+          {
+            "name": "area_id",
+            "in": "query",
+            "description": "Filter by area ID",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "route_type",
+            "in": "query",
+            "description": "Filter by route type (e.g., \"tram\", \"bus\")",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of routes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteListResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/routes/{route_id}": {
+      "get": {
+        "tags": [
+          "routes"
+        ],
+        "summary": "Get a single route with its stops",
+        "operationId": "get_route",
+        "parameters": [
+          {
+            "name": "route_id",
+            "in": "path",
+            "description": "Route OSM ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Route details with stops",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/routes/{route_id}/geometry": {
+      "get": {
+        "tags": [
+          "routes"
+        ],
+        "summary": "Get the geometry of a route as line segments",
+        "operationId": "get_route_geometry",
+        "parameters": [
+          {
+            "name": "route_id",
+            "in": "path",
+            "description": "Route OSM ID",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Route geometry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteGeometry"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/stations": {
+      "get": {
+        "tags": [
+          "stations"
+        ],
+        "summary": "List all stations that have platforms linked to them, optionally filtered by area",
+        "operationId": "list_stations",
+        "parameters": [
+          {
+            "name": "area_id",
+            "in": "query",
+            "description": "Filter by area ID",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of stations with their platforms and stop positions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StationListResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/vehicles/by-route": {
+      "post": {
+        "tags": [
+          "vehicles"
+        ],
+        "summary": "Get all vehicles currently on a route with their stop sequences",
+        "operationId": "get_vehicles_by_route",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VehiclesByRouteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "List of vehicles on the route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VehiclesByRouteResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Area": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "south",
+          "west",
+          "north",
+          "east",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "east": {
+            "type": "number",
+            "format": "double"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_synced_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string"
+          },
+          "north": {
+            "type": "number",
+            "format": "double"
+          },
+          "south": {
+            "type": "number",
+            "format": "double"
+          },
+          "west": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "AreaListResponse": {
+        "type": "object",
+        "required": [
+          "areas"
+        ],
+        "properties": {
+          "areas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Area"
+            }
+          }
+        }
+      },
+      "AreaStats": {
+        "type": "object",
+        "required": [
+          "area_id",
+          "area_name",
+          "station_count",
+          "platform_count",
+          "stop_position_count",
+          "route_count"
+        ],
+        "properties": {
+          "area_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "area_name": {
+            "type": "string"
+          },
+          "platform_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "route_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "station_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "stop_position_count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "CandidateStop": {
+        "type": "object",
+        "required": [
+          "stop_id",
+          "lat",
+          "lon",
+          "distance_meters"
+        ],
+        "properties": {
+          "distance_meters": {
+            "type": "number",
+            "format": "double",
+            "description": "Approximate distance in meters from the OSM stop"
+          },
+          "lat": {
+            "type": "number",
+            "format": "double",
+            "description": "Latitude"
+          },
+          "lon": {
+            "type": "number",
+            "format": "double",
+            "description": "Longitude"
+          },
+          "stop_id": {
+            "type": "string",
+            "description": "GTFS stop ID"
+          },
+          "stop_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "GTFS stop name"
+          }
+        }
+      },
+      "Departure": {
+        "type": "object",
+        "description": "A stop event (departure or arrival)",
+        "required": [
+          "stop_ifopt",
+          "event_type",
+          "line_number",
+          "destination",
+          "planned_time"
+        ],
+        "properties": {
+          "cancelled": {
+            "type": "boolean",
+            "description": "Whether this trip has been cancelled (GTFS-RT schedule_relationship = CANCELED).\nCancelled trips should be shown with strikethrough in departure monitors\nbut NOT as active vehicles on the map."
+          },
+          "delay_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "destination": {
+            "type": "string",
+            "description": "For departures: destination; for arrivals: origin"
+          },
+          "destination_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Destination stop ID (for departures) or origin stop ID (for arrivals)"
+          },
+          "estimated_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_type": {
+            "$ref": "#/components/schemas/EventType"
+          },
+          "line_number": {
+            "type": "string"
+          },
+          "planned_time": {
+            "type": "string"
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stop_ifopt": {
+            "type": "string"
+          },
+          "trip_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Unique trip identifier (GTFS trip_id) - consistent across all stops for a journey"
+          }
+        }
+      },
+      "DepartureListResponse": {
+        "type": "object",
+        "required": [
+          "departures"
+        ],
+        "properties": {
+          "departures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Departure"
+            }
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "EventType": {
+        "type": "string",
+        "description": "Type of stop event",
+        "enum": [
+          "departure",
+          "arrival"
+        ]
+      },
+      "GtfsStopDeparturesRequest": {
+        "type": "object",
+        "required": [
+          "gtfs_stop_id"
+        ],
+        "properties": {
+          "gtfs_stop_id": {
+            "type": "string"
+          },
+          "reference_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional reference time (ISO 8601/RFC 3339) for time simulation."
+          }
+        }
+      },
+      "GtfsStopDeparturesResponse": {
+        "type": "object",
+        "required": [
+          "gtfs_stop_id",
+          "departures"
+        ],
+        "properties": {
+          "departures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Departure"
+            }
+          },
+          "gtfs_stop_id": {
+            "type": "string"
+          }
+        }
+      },
+      "GtfsStopResponse": {
+        "type": "object",
+        "required": [
+          "stop_id",
+          "lat",
+          "lon"
+        ],
+        "properties": {
+          "lat": {
+            "type": "number",
+            "format": "double"
+          },
+          "lon": {
+            "type": "number",
+            "format": "double"
+          },
+          "parent_station": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stop_id": {
+            "type": "string"
+          },
+          "stop_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "GtfsStopsListResponse": {
+        "type": "object",
+        "required": [
+          "stops",
+          "total_count",
+          "offset",
+          "limit",
+          "has_more"
+        ],
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether there are more results after this page"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of results returned",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Current offset in the result set",
+            "minimum": 0
+          },
+          "stops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GtfsStopResponse"
+            }
+          },
+          "total_count": {
+            "type": "integer",
+            "description": "Total number of stops matching the filter criteria",
+            "minimum": 0
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "healthy",
+          "gtfs_schedule_loaded",
+          "gtfs_stop_count",
+          "gtfs_route_count",
+          "gtfs_trip_count",
+          "ifopt_mapping_count"
+        ],
+        "properties": {
+          "gtfs_route_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of GTFS routes in the database"
+          },
+          "gtfs_schedule_loaded": {
+            "type": "boolean",
+            "description": "Whether the static GTFS schedule has been loaded into PostgreSQL"
+          },
+          "gtfs_stop_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of GTFS stops in the database"
+          },
+          "gtfs_trip_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of GTFS trips in the database"
+          },
+          "healthy": {
+            "type": "boolean",
+            "description": "Whether the service is running"
+          },
+          "ifopt_mapping_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of IFOPT-to-GTFS stop mappings"
+          }
+        }
+      },
+      "IssueCategory": {
+        "type": "string",
+        "description": "Category of issue for UI organization",
+        "enum": [
+          "osm_data_quality",
+          "gtfs_mapping",
+          "data_processing"
+        ]
+      },
+      "IssueListResponse": {
+        "type": "object",
+        "required": [
+          "issues",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OsmIssue"
+            }
+          }
+        }
+      },
+      "MappingEntry": {
+        "type": "object",
+        "required": [
+          "ifopt",
+          "lat",
+          "lon",
+          "status",
+          "candidates"
+        ],
+        "properties": {
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CandidateStop"
+            },
+            "description": "Nearby GTFS candidate stops (only if include_candidates is true)"
+          },
+          "combined_score": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Combined matching score (if auto-mapped)"
+          },
+          "gtfs_stop_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Current mapped GTFS stop ID (if mapped)"
+          },
+          "gtfs_stop_lat": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Latitude of the mapped GTFS stop (if mapped)"
+          },
+          "gtfs_stop_lon": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Longitude of the mapped GTFS stop (if mapped)"
+          },
+          "gtfs_stop_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Current mapped GTFS stop name (if mapped)"
+          },
+          "ifopt": {
+            "type": "string",
+            "description": "IFOPT identifier"
+          },
+          "lat": {
+            "type": "number",
+            "format": "double",
+            "description": "Latitude of the OSM stop"
+          },
+          "lon": {
+            "type": "number",
+            "format": "double",
+            "description": "Longitude of the OSM stop"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of the OSM stop (from platforms or stop_positions)"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MappingStatus",
+            "description": "Current mapping status"
+          }
+        }
+      },
+      "MappingFilter": {
+        "type": "string",
+        "enum": [
+          "manual",
+          "auto"
+        ]
+      },
+      "MappingStatus": {
+        "type": "string",
+        "enum": [
+          "unmapped",
+          "auto",
+          "manual"
+        ]
+      },
+      "MappingStatusRequest": {
+        "type": "object",
+        "properties": {
+          "filter": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MappingFilter",
+                "description": "Filter by manual-only or auto-only mappings"
+              }
+            ]
+          },
+          "include_candidates": {
+            "type": "boolean",
+            "description": "Include nearby GTFS candidate stops for each entry"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum number of entries to return (default: 50, max: 200)",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Offset for pagination",
+            "minimum": 0
+          },
+          "search": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Case-insensitive search on IFOPT name or identifier"
+          },
+          "unmapped_only": {
+            "type": "boolean",
+            "description": "Only return unmapped IFOPTs"
+          }
+        }
+      },
+      "MappingStatusResponse": {
+        "type": "object",
+        "required": [
+          "total_ifopt_count",
+          "mapped_count",
+          "manual_count",
+          "auto_count",
+          "unmapped_count",
+          "entries",
+          "has_more"
+        ],
+        "properties": {
+          "auto_count": {
+            "type": "integer",
+            "description": "Number of auto-generated mappings",
+            "minimum": 0
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MappingEntry"
+            },
+            "description": "Paginated list of mapping entries"
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether there are more entries after this page"
+          },
+          "manual_count": {
+            "type": "integer",
+            "description": "Number of manually set mappings",
+            "minimum": 0
+          },
+          "mapped_count": {
+            "type": "integer",
+            "description": "Number of IFOPTs that have a mapping (manual or auto)",
+            "minimum": 0
+          },
+          "total_ifopt_count": {
+            "type": "integer",
+            "description": "Total number of OSM stops with IFOPT identifiers",
+            "minimum": 0
+          },
+          "unmapped_count": {
+            "type": "integer",
+            "description": "Number of IFOPTs without any mapping",
+            "minimum": 0
+          }
+        }
+      },
+      "MatchCandidate": {
+        "type": "object",
+        "description": "A candidate GTFS stop match with route-based matching details",
+        "required": [
+          "gtfs_stop_id",
+          "distance_meters",
+          "shared_routes",
+          "is_definitive"
+        ],
+        "properties": {
+          "distance_meters": {
+            "type": "number",
+            "format": "double",
+            "description": "Distance in meters from OSM stop"
+          },
+          "gtfs_stop_id": {
+            "type": "string",
+            "description": "GTFS stop ID"
+          },
+          "gtfs_stop_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "GTFS stop name"
+          },
+          "is_definitive": {
+            "type": "boolean",
+            "description": "Whether this candidate shares at least one route with the OSM stop"
+          },
+          "shared_routes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Human-readable shared route names (e.g. \"Tram 1\", \"Bus 5\")"
+          }
+        }
+      },
+      "OsmIssue": {
+        "type": "object",
+        "description": "An OSM data quality issue detected during sync",
+        "required": [
+          "osm_id",
+          "osm_type",
+          "element_type",
+          "issue_type",
+          "category",
+          "transport_type",
+          "description",
+          "osm_url",
+          "detected_at"
+        ],
+        "properties": {
+          "affected_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Record count affected (for bulk issues like parse errors)",
+            "minimum": 0
+          },
+          "category": {
+            "$ref": "#/components/schemas/IssueCategory",
+            "description": "Category for UI organization (derived from issue_type)"
+          },
+          "description": {
+            "type": "string"
+          },
+          "detected_at": {
+            "type": "string"
+          },
+          "element_type": {
+            "type": "string"
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Error message from underlying operation"
+          },
+          "gtfs_stop_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "GTFS stop ID (for GTFS mapping issues)"
+          },
+          "gtfs_stop_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "GTFS stop name (for GTFS mapping issues)"
+          },
+          "issue_type": {
+            "$ref": "#/components/schemas/OsmIssueType"
+          },
+          "lat": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "lon": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "match_candidates": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/MatchCandidate"
+            },
+            "description": "Candidate matches with scoring details (for GTFS mapping issues)"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "osm_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "osm_type": {
+            "type": "string"
+          },
+          "osm_url": {
+            "type": "string"
+          },
+          "ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The ref tag value (e.g., platform letter \"a\", \"b\")"
+          },
+          "source_file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Source file (for parse errors)"
+          },
+          "suggested_ifopt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Suggested IFOPT (for missing_ifopt issues)"
+          },
+          "suggested_ifopt_distance": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Distance in meters to the suggested stop",
+            "minimum": 0
+          },
+          "suggested_ifopt_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of the stop that was matched"
+          },
+          "transport_type": {
+            "$ref": "#/components/schemas/TransportType"
+          }
+        }
+      },
+      "OsmIssueType": {
+        "type": "string",
+        "description": "Types of OSM data quality issues",
+        "enum": [
+          "missing_ifopt",
+          "missing_coordinates",
+          "orphaned_element",
+          "missing_route_ref",
+          "missing_name",
+          "missing_stop_position",
+          "missing_platform",
+          "no_gtfs_match",
+          "ambiguous_gtfs_match",
+          "low_confidence_match",
+          "unmapped_gtfs_stop",
+          "gtfs_parse_skipped",
+          "gtfs_load_failed",
+          "gtfs_rt_fetch_failed"
+        ]
+      },
+      "RemoveMappingRequest": {
+        "type": "object",
+        "required": [
+          "ifopt"
+        ],
+        "properties": {
+          "ifopt": {
+            "type": "string",
+            "description": "The IFOPT identifier to remove the manual mapping for"
+          }
+        }
+      },
+      "RemoveMappingResponse": {
+        "type": "object",
+        "required": [
+          "removed_count"
+        ],
+        "properties": {
+          "removed_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "Route": {
+        "type": "object",
+        "required": [
+          "osm_id",
+          "osm_type",
+          "route_type"
+        ],
+        "properties": {
+          "area_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "network": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operator": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "osm_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "osm_type": {
+            "type": "string"
+          },
+          "ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "route_type": {
+            "type": "string"
+          }
+        }
+      },
+      "RouteDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Route"
+          },
+          {
+            "type": "object",
+            "required": [
+              "stops"
+            ],
+            "properties": {
+              "stops": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RouteStop"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "RouteGeometry": {
+        "type": "object",
+        "required": [
+          "route_id",
+          "segments"
+        ],
+        "properties": {
+          "route_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "format": "double"
+                }
+              }
+            }
+          }
+        }
+      },
+      "RouteListResponse": {
+        "type": "object",
+        "required": [
+          "routes"
+        ],
+        "properties": {
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Route"
+            }
+          }
+        }
+      },
+      "RouteStop": {
+        "type": "object",
+        "required": [
+          "sequence"
+        ],
+        "properties": {
+          "platform_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sequence": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "station_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "station_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stop_position_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "SetMappingRequest": {
+        "type": "object",
+        "required": [
+          "ifopt",
+          "gtfs_stop_id"
+        ],
+        "properties": {
+          "gtfs_stop_id": {
+            "type": "string",
+            "description": "The GTFS stop ID to map to"
+          },
+          "ifopt": {
+            "type": "string",
+            "description": "The IFOPT identifier of the OSM stop"
+          }
+        }
+      },
+      "SetMappingResponse": {
+        "type": "object",
+        "required": [
+          "success",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Station": {
+        "type": "object",
+        "required": [
+          "osm_id",
+          "osm_type",
+          "lat",
+          "lon",
+          "platforms",
+          "stop_positions"
+        ],
+        "properties": {
+          "area_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "lat": {
+            "type": "number",
+            "format": "double"
+          },
+          "lon": {
+            "type": "number",
+            "format": "double"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "osm_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "osm_type": {
+            "type": "string"
+          },
+          "platforms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StationPlatform"
+            }
+          },
+          "ref_ifopt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stop_positions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StationStopPosition"
+            }
+          }
+        }
+      },
+      "StationListResponse": {
+        "type": "object",
+        "required": [
+          "stations"
+        ],
+        "properties": {
+          "stations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Station"
+            }
+          }
+        }
+      },
+      "StationPlatform": {
+        "type": "object",
+        "description": "Platform info nested in station response",
+        "required": [
+          "osm_id",
+          "lat",
+          "lon",
+          "gtfs_stop_ids"
+        ],
+        "properties": {
+          "gtfs_stop_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "GTFS stop IDs matched to this platform via spatial matching"
+          },
+          "lat": {
+            "type": "number",
+            "format": "double"
+          },
+          "lon": {
+            "type": "number",
+            "format": "double"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "osm_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ref_ifopt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "StationStopPosition": {
+        "type": "object",
+        "description": "Stop position info nested in station response",
+        "required": [
+          "osm_id",
+          "lat",
+          "lon",
+          "gtfs_stop_ids"
+        ],
+        "properties": {
+          "gtfs_stop_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "GTFS stop IDs matched to this stop position via spatial matching"
+          },
+          "lat": {
+            "type": "number",
+            "format": "double"
+          },
+          "lon": {
+            "type": "number",
+            "format": "double"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "osm_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "platform_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ref_ifopt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "StopDeparturesRequest": {
+        "type": "object",
+        "required": [
+          "stop_ifopt"
+        ],
+        "properties": {
+          "reference_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional reference time (ISO 8601/RFC 3339) for time simulation.\nWhen provided, departures are computed from the static GTFS schedule\naround this time instead of using live real-time data."
+          },
+          "stop_ifopt": {
+            "type": "string"
+          }
+        }
+      },
+      "StopDeparturesResponse": {
+        "type": "object",
+        "required": [
+          "stop_ifopt",
+          "departures"
+        ],
+        "properties": {
+          "departures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Departure"
+            }
+          },
+          "stop_ifopt": {
+            "type": "string"
+          }
+        }
+      },
+      "TransportType": {
+        "type": "string",
+        "description": "Transport type for both configuration and runtime detection",
+        "enum": [
+          "tram",
+          "bus",
+          "subway",
+          "train",
+          "ferry",
+          "unknown"
+        ]
+      },
+      "Vehicle": {
+        "type": "object",
+        "required": [
+          "trip_id",
+          "line_number",
+          "destination",
+          "stops"
+        ],
+        "properties": {
+          "destination": {
+            "type": "string",
+            "description": "Final destination of this vehicle"
+          },
+          "line_number": {
+            "type": "string",
+            "description": "Line number (e.g., \"1\", \"2\", \"3\")"
+          },
+          "next_trip_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The trip_id of the next trip this physical vehicle will operate.\nSet when the vehicle loops back (e.g., tram reaching end of line\nand starting the return trip). Used for seamless follow-mode\ntransitions and vehicle reuse rendering."
+          },
+          "origin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Origin of this vehicle's journey"
+          },
+          "stops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VehicleStop"
+            },
+            "description": "All stops this vehicle will visit, in order"
+          },
+          "trip_id": {
+            "type": "string",
+            "description": "Unique trip identifier (GTFS trip_id)"
+          }
+        }
+      },
+      "VehicleStop": {
+        "type": "object",
+        "required": [
+          "stop_ifopt",
+          "sequence",
+          "lat",
+          "lon"
+        ],
+        "properties": {
+          "arrival_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Arrival time at this stop (ISO 8601)"
+          },
+          "arrival_time_estimated": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Estimated arrival time (real-time, if available)"
+          },
+          "delay_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Delay in minutes (positive = late, negative = early)"
+          },
+          "departure_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Departure time from this stop (ISO 8601)"
+          },
+          "departure_time_estimated": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Estimated departure time (real-time, if available)"
+          },
+          "lat": {
+            "type": "number",
+            "format": "double",
+            "description": "Latitude"
+          },
+          "lon": {
+            "type": "number",
+            "format": "double",
+            "description": "Longitude"
+          },
+          "sequence": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Sequence number on the route"
+          },
+          "stop_ifopt": {
+            "type": "string",
+            "description": "Stop IFOPT identifier"
+          },
+          "stop_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stop name (if available)"
+          }
+        }
+      },
+      "VehiclesByRouteRequest": {
+        "type": "object",
+        "required": [
+          "route_id"
+        ],
+        "properties": {
+          "reference_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional reference time (ISO 8601/RFC 3339) for time simulation.\nWhen provided, departures are computed from the static GTFS schedule."
+          },
+          "route_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The OSM route ID to get vehicles for"
+          }
+        }
+      },
+      "VehiclesByRouteResponse": {
+        "type": "object",
+        "required": [
+          "route_id",
+          "vehicles"
+        ],
+        "properties": {
+          "line_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "route_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "vehicles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Vehicle"
+            }
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "areas",
+      "description": "Area management endpoints"
+    },
+    {
+      "name": "routes",
+      "description": "Route endpoints"
+    },
+    {
+      "name": "stations",
+      "description": "Station and platform endpoints"
+    },
+    {
+      "name": "departures",
+      "description": "Real-time departure information"
+    },
+    {
+      "name": "vehicles",
+      "description": "Live vehicle tracking"
+    },
+    {
+      "name": "issues",
+      "description": "OSM data quality issues"
+    },
+    {
+      "name": "health",
+      "description": "Service health check"
+    },
+    {
+      "name": "mapping",
+      "description": "IFOPT-to-GTFS stop mapping management"
+    }
+  ]
+}
