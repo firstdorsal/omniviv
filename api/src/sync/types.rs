@@ -30,17 +30,17 @@ pub struct Departure {
     pub platform: Option<String>,
     /// Unique trip identifier (GTFS trip_id) - consistent across all stops for a journey
     pub trip_id: Option<String>,
+    /// Whether this trip has been cancelled (GTFS-RT schedule_relationship = CANCELED).
+    /// Cancelled trips should be shown with strikethrough in departure monitors
+    /// but NOT as active vehicles on the map.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cancelled: bool,
 }
 
-impl Departure {
-    pub fn planned_departure(&self) -> &str {
-        &self.planned_time
-    }
-
-    pub fn estimated_departure(&self) -> Option<&str> {
-        self.estimated_time.as_deref()
-    }
+fn is_false(v: &bool) -> bool {
+    !v
 }
+
 
 /// In-memory store for departure data
 pub type DepartureStore = Arc<RwLock<HashMap<String, Vec<Departure>>>>;

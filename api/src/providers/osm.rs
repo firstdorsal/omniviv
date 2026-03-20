@@ -1,17 +1,47 @@
 use crate::config::{Area, BoundingBox};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-// Using Kumi Systems mirror - main overpass-api.de is often overloaded
-const OVERPASS_API_URL: &str = "https://overpass.kumi.systems/api/interpreter";
+/// Overpass API endpoints, ordered by preference.
+/// When one fails, we rotate to the next.
+///
+/// - overpass-api.de: Main German instance, most up-to-date, rate limited (2 slots)
+/// - private.coffee: No rate limits but sometimes unresponsive
+const OVERPASS_ENDPOINTS: &[&str] = &[
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+];
 
-// Retry configuration
+/// Retry configuration
 const MAX_RETRIES: u32 = 5;
-const INITIAL_RETRY_DELAY_SECS: u64 = 10;
+const INITIAL_RETRY_DELAY_SECS: u64 = 15;
 
-// Delay between sequential queries to avoid rate limiting
+/// Delay between sequential queries to avoid rate limiting
 const INTER_QUERY_DELAY_SECS: u64 = 5;
+
+/// Maximum seconds to wait for an available slot on an Overpass server
+const MAX_STATUS_WAIT_SECS: u64 = 30;
+
+/// Index into OVERPASS_ENDPOINTS — rotated on transient failure
+static ENDPOINT_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+fn current_endpoint() -> &'static str {
+    OVERPASS_ENDPOINTS[ENDPOINT_INDEX.load(Ordering::Relaxed) % OVERPASS_ENDPOINTS.len()]
+}
+
+fn rotate_endpoint() -> &'static str {
+    let new = ENDPOINT_INDEX.fetch_add(1, Ordering::Relaxed) + 1;
+    let ep = OVERPASS_ENDPOINTS[new % OVERPASS_ENDPOINTS.len()];
+    tracing::info!(endpoint = ep, "Rotating to next Overpass endpoint");
+    ep
+}
+
+/// Derive the /api/status URL from an interpreter URL
+fn status_url(interpreter_url: &str) -> String {
+    interpreter_url.replace("/interpreter", "/status")
+}
 
 #[derive(Debug, Clone)]
 pub struct OsmClient {
@@ -29,6 +59,60 @@ impl OsmClient {
             .map_err(|e| OsmError::NetworkError(format!("Failed to build HTTP client: {}", e)))?;
 
         Ok(Self { client })
+    }
+
+    /// Check the Overpass /api/status endpoint and wait for an available slot.
+    /// Returns Ok(()) when a slot is available, or Err if we give up.
+    async fn wait_for_slot(&self, endpoint: &str) -> Result<(), OsmError> {
+        let url = status_url(endpoint);
+        let start = std::time::Instant::now();
+
+        loop {
+            if start.elapsed().as_secs() > MAX_STATUS_WAIT_SECS {
+                return Err(OsmError::RetryableError(format!(
+                    "No Overpass slot available after {}s on {}",
+                    MAX_STATUS_WAIT_SECS, endpoint
+                )));
+            }
+
+            // Wrap the entire fetch+body read in a timeout to avoid hanging on
+            // unresponsive servers (sends headers but stalls on body, etc.).
+            let fetch_status = async {
+                let resp = self.client.get(&url).send().await?;
+                resp.text().await
+            };
+            let result = tokio::time::timeout(Duration::from_secs(10), fetch_status).await;
+
+            match result {
+                Ok(Ok(body)) => {
+                    // "Rate limit: 0" means no rate limiting — always available
+                    if body.contains("Rate limit: 0") {
+                        return Ok(());
+                    }
+
+                    if body.contains("slots available now") || body.contains("available now") {
+                        return Ok(());
+                    }
+
+                    // Parse "Slot available after: ... seconds" to wait precisely
+                    if let Some(wait) = parse_slot_wait_seconds(&body) {
+                        if wait > 0 && wait < 60 {
+                            tracing::info!(wait_secs = wait, endpoint, "Waiting for Overpass slot");
+                            tokio::time::sleep(Duration::from_secs(wait as u64 + 1)).await;
+                            continue;
+                        }
+                    }
+
+                    // Can't determine slot availability — proceed optimistically
+                    return Ok(());
+                }
+                _ => {
+                    // Status endpoint unreachable or timed out — proceed optimistically
+                    tracing::debug!(endpoint, "Status endpoint unavailable, proceeding");
+                    return Ok(());
+                }
+            }
+        }
     }
 
     /// Fetch all public transport features for an area
@@ -251,26 +335,35 @@ out skel qt;"#,
         Ok(parsed.elements)
     }
 
-    /// Execute HTTP request with retry logic for transient failures
+    /// Execute HTTP request with retry logic, endpoint rotation, and status checking.
     async fn execute_with_retry(&self, query: &str) -> Result<String, OsmError> {
         let mut last_error = None;
 
         for attempt in 0..MAX_RETRIES {
+            let endpoint = current_endpoint();
+
             if attempt > 0 {
-                let delay = INITIAL_RETRY_DELAY_SECS * 2_u64.pow(attempt - 1);
-                tracing::warn!(attempt, delay_secs = delay, "Retrying Overpass request...");
+                let delay = INITIAL_RETRY_DELAY_SECS * 2_u64.pow((attempt - 1).min(2));
+                tracing::warn!(attempt, delay_secs = delay, endpoint, "Retrying Overpass request...");
                 tokio::time::sleep(Duration::from_secs(delay)).await;
             }
 
-            match self.execute_request(query).await {
+            // Check server status before sending the query
+            if let Err(e) = self.wait_for_slot(endpoint).await {
+                tracing::warn!(error = %e, "No slot on current endpoint, rotating");
+                rotate_endpoint();
+                last_error = Some(e);
+                continue;
+            }
+
+            match self.execute_request(query, endpoint).await {
                 Ok(text) => return Ok(text),
                 Err(e) => {
-                    // Only retry on transient errors (network, 5xx, 429)
                     if e.is_retryable() {
-                        tracing::warn!(attempt, error = %e, "Transient error, will retry");
+                        tracing::warn!(attempt, endpoint, error = %e, "Transient error, will rotate endpoint");
+                        rotate_endpoint();
                         last_error = Some(e);
                     } else {
-                        // Non-retryable error, fail immediately
                         return Err(e);
                     }
                 }
@@ -280,18 +373,17 @@ out skel qt;"#,
         Err(last_error.unwrap_or_else(|| OsmError::NetworkError("Max retries exceeded".to_string())))
     }
 
-    /// Execute a single HTTP request
-    async fn execute_request(&self, query: &str) -> Result<String, OsmError> {
-        tracing::debug!("Executing Overpass query");
+    /// Execute a single HTTP request against a specific endpoint.
+    async fn execute_request(&self, query: &str, endpoint: &str) -> Result<String, OsmError> {
+        tracing::debug!(endpoint, "Executing Overpass query");
 
         let response = self
             .client
-            .post(OVERPASS_API_URL)
+            .post(endpoint)
             .form(&[("data", query)])
             .send()
             .await
             .map_err(|e| {
-                // Network errors are retryable
                 OsmError::NetworkError(e.to_string())
             })?;
 
@@ -302,11 +394,10 @@ out skel qt;"#,
             .map_err(|e| OsmError::NetworkError(e.to_string()))?;
 
         if !status.is_success() {
-            tracing::error!(status = %status, body_preview = %text.chars().take(200).collect::<String>(), "Overpass API error");
+            tracing::error!(status = %status, endpoint, body_preview = %text.chars().take(200).collect::<String>(), "Overpass API error");
 
-            // 429 (Too Many Requests) and 5xx errors are retryable
             if status.as_u16() == 429 || status.is_server_error() {
-                return Err(OsmError::RetryableError(format!("HTTP {}", status)));
+                return Err(OsmError::RetryableError(format!("HTTP {} from {}", status, endpoint)));
             }
 
             return Err(OsmError::NetworkError(format!(
@@ -317,15 +408,13 @@ out skel qt;"#,
         }
 
         // Overpass API sometimes returns HTTP 200 with an XML/HTML error page
-        // (e.g. rate limiting, server overload, query timeout).
-        // Detect this by checking if the response starts with XML/HTML instead of JSON.
+        // (e.g. rate limiting, server overload, database rebuild).
         let trimmed = text.trim_start();
         if trimmed.starts_with("<?xml") || trimmed.starts_with("<!DOCTYPE") || trimmed.starts_with("<html") {
-            let preview: String = text.chars().take(1500).collect();
-            tracing::warn!(body_preview = %preview, "Overpass API returned HTML/XML error page with HTTP 200");
-            return Err(OsmError::RetryableError(
-                "Overpass API returned HTML/XML error page (likely rate limited or overloaded)".to_string(),
-            ));
+            tracing::warn!(endpoint, "Overpass API returned HTML/XML error page with HTTP 200");
+            return Err(OsmError::RetryableError(format!(
+                "Overpass server {} returned HTML error (overloaded or database rebuild)", endpoint
+            )));
         }
 
         Ok(text)
@@ -383,14 +472,16 @@ out skel qt;"#,
 
             let mut route_ways = Vec::new();
             let mut route_stops = Vec::new();
+            let mut platform_way_members = Vec::new();
 
             if let Some(ref members) = elem.members {
                 for (seq, member) in members.iter().enumerate() {
                     match member.member_type.as_str() {
                         "way" => {
-                            // Skip platform ways - only include track/rail ways
                             let role = member.role.as_deref().unwrap_or("");
                             if role == "platform" {
+                                // Collect platform way members for direct matching
+                                platform_way_members.push((member.member_ref, seq as i32));
                                 continue;
                             }
 
@@ -441,6 +532,7 @@ out skel qt;"#,
                 tags,
                 ways: route_ways,
                 stops: route_stops,
+                platform_way_members,
             });
         }
 
@@ -520,6 +612,8 @@ pub struct OsmRoute {
     pub tags: HashMap<String, String>,
     pub ways: Vec<RouteWay>,
     pub stops: Vec<RouteStop>,
+    /// Way members with role "platform" — used to override proximity-based platform matching
+    pub platform_way_members: Vec<(i64, i32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -536,6 +630,26 @@ pub struct RouteStop {
     pub osm_type: String,
     pub sequence: i32,
     pub role: String,
+}
+
+/// Parse "Slot available after: N seconds" from Overpass status page.
+fn parse_slot_wait_seconds(status_body: &str) -> Option<i64> {
+    for line in status_body.lines() {
+        let line = line.trim();
+        if line.contains("Slot available after:") {
+            // Try to extract seconds from patterns like
+            // "Slot available after: 2025-06-15T12:00:00Z, in 15 seconds."
+            // or "Slot available after: ... , in 3 seconds."
+            if let Some(pos) = line.rfind("in ") {
+                let rest = &line[pos + 3..];
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(secs) = digits.parse::<i64>() {
+                    return Some(secs);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -1,5 +1,5 @@
 use axum::{extract::State, http::StatusCode, Json};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::collections::{HashMap, HashSet};
@@ -38,6 +38,11 @@ pub struct Vehicle {
     pub origin: Option<String>,
     /// All stops this vehicle will visit, in order
     pub stops: Vec<VehicleStop>,
+    /// The trip_id of the next trip this physical vehicle will operate.
+    /// Set when the vehicle loops back (e.g., tram reaching end of line
+    /// and starting the return trip). Used for seamless follow-mode
+    /// transitions and vehicle reuse rendering.
+    pub next_trip_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -76,6 +81,86 @@ struct RouteStopInfo {
 #[derive(Debug, FromRow)]
 struct RouteInfo {
     line_ref: Option<String>,
+}
+
+/// Maximum time gap (minutes) between a trip's last arrival and the next trip's
+/// first departure for them to be considered the same physical vehicle.
+const TRIP_LINK_MAX_GAP_MINUTES: i64 = 15;
+
+use crate::api::utils::ifopt_station_prefix;
+
+/// Link consecutive trips that represent the same physical vehicle looping back.
+/// Sets `next_trip_id` on a trip when the next trip on the same line starts at
+/// the same station where this trip ends, within a short time window.
+pub fn link_consecutive_trips(vehicles: &mut [Vehicle]) {
+    // Sort by first departure time
+    vehicles.sort_by(|a, b| {
+        let time_a = a.stops.first().and_then(|s| s.departure_time.as_ref());
+        let time_b = b.stops.first().and_then(|s| s.departure_time.as_ref());
+        time_a.cmp(&time_b)
+    });
+
+    // For each vehicle, try to find its successor
+    let n = vehicles.len();
+    // Collect linking info first to avoid borrow issues
+    let mut links: Vec<(usize, String)> = Vec::new();
+
+    for i in 0..n {
+        let last_stop = match vehicles[i].stops.last() {
+            Some(s) => s,
+            None => continue,
+        };
+        let last_arrival = match &last_stop.arrival_time {
+            Some(t) => t.clone(),
+            None => continue,
+        };
+        let last_station = match ifopt_station_prefix(&last_stop.stop_ifopt) {
+            Some(p) => p.to_string(),
+            None => continue,
+        };
+        let line = &vehicles[i].line_number;
+
+        // Search forward for the earliest matching successor
+        for j in (i + 1)..n {
+            if &vehicles[j].line_number != line {
+                continue;
+            }
+            let first_stop = match vehicles[j].stops.first() {
+                Some(s) => s,
+                None => continue,
+            };
+            let first_departure = match &first_stop.departure_time {
+                Some(t) => t,
+                None => continue,
+            };
+            let first_station = match ifopt_station_prefix(&first_stop.stop_ifopt) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Same station?
+            if first_station != last_station {
+                continue;
+            }
+
+            // Time gap check
+            if let (Ok(end_time), Ok(start_time)) = (
+                chrono::DateTime::parse_from_rfc3339(&last_arrival),
+                chrono::DateTime::parse_from_rfc3339(first_departure),
+            ) {
+                let gap = start_time.signed_duration_since(end_time).num_minutes();
+                if gap >= 0 && gap <= TRIP_LINK_MAX_GAP_MINUTES {
+                    links.push((i, vehicles[j].trip_id.clone()));
+                    break;
+                }
+            }
+        }
+    }
+
+    // Apply links
+    for (idx, next_id) in links {
+        vehicles[idx].next_trip_id = Some(next_id);
+    }
 }
 
 /// Get all vehicles currently on a route with their stop sequences
@@ -170,7 +255,7 @@ pub async fn get_vehicles_by_route(
     }
 
     // Determine if we're using simulated time
-    let simulated_time = parse_simulated_time(&request.reference_time);
+    let simulated_time = parse_reference_time(&request.reference_time);
 
     // Get departures either from the store (real-time) or schedule (simulated time)
     let trip_departures: HashMap<String, Vec<Departure>> = if let Some(ref_time) = simulated_time {
@@ -209,7 +294,7 @@ pub async fn get_vehicles_by_route(
             Err(_) => HashMap::new(),
         }
     } else {
-        // Use real-time departure store
+        // Start with real-time departure store (has estimated times and delays)
         let store = state.departure_store.read().await;
         let mut result: HashMap<String, Vec<Departure>> = HashMap::new();
 
@@ -229,6 +314,44 @@ pub async fn get_vehicles_by_route(
                 }
             }
         }
+        drop(store);
+
+        // Only supplement with schedule data when the RT store has NO data for
+        // this route's stops.  When the RT feed is active (even if all trips are
+        // cancelled during a strike), it is the authority — trips absent from the
+        // feed should not appear as vehicles on the map.
+        if result.is_empty() {
+            let stop_ids: HashSet<String> = stop_ifopts.iter().map(|s| s.to_string()).collect();
+            if let Ok(schedule) = static_data::build_schedule_from_db(&state.pool, &stop_ids).await {
+                let ref_time = Utc::now();
+                let time_horizon = Duration::minutes(state.time_horizon_minutes as i64);
+                let all_departures = realtime::compute_schedule_departures(
+                    &schedule,
+                    &stop_ids,
+                    ref_time,
+                    time_horizon,
+                    state.timezone,
+                );
+
+                for ifopt in &stop_ifopts {
+                    if let Some(departures) = all_departures.get(*ifopt) {
+                        for dep in departures {
+                            let trip_id = match &dep.trip_id {
+                                Some(id) => id,
+                                None => continue,
+                            };
+                            if let Some(ref line_ref) = route_info.line_ref {
+                                if &dep.line_number != line_ref {
+                                    continue;
+                                }
+                            }
+                            result.entry(trip_id.clone()).or_default().push(dep.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         result
     };
 
@@ -237,6 +360,12 @@ pub async fn get_vehicles_by_route(
         .into_iter()
         .filter_map(|(trip_id, departures)| {
             if departures.is_empty() {
+                return None;
+            }
+
+            // Skip cancelled trips — they should appear in departure monitors
+            // (with strikethrough) but not as active vehicles on the map.
+            if departures.iter().any(|d| d.cancelled) {
                 return None;
             }
 
@@ -308,9 +437,14 @@ pub async fn get_vehicles_by_route(
                 destination,
                 origin,
                 stops,
+                next_trip_id: None,
             })
         })
         .collect();
+
+    // Link consecutive trips on the same line that represent the same physical
+    // vehicle looping back (e.g., tram at end of line starting the return trip).
+    link_consecutive_trips(&mut vehicles);
 
     // Sort vehicles by their first stop's departure time
     vehicles.sort_by(|a, b| {
@@ -326,16 +460,105 @@ pub async fn get_vehicles_by_route(
     }))
 }
 
-/// Parse a reference_time string and determine if it's a simulated (non-current) time.
-fn parse_simulated_time(reference_time: &Option<String>) -> Option<DateTime<Utc>> {
-    let rt = reference_time.as_ref()?;
-    let parsed = DateTime::parse_from_rfc3339(rt).ok()?;
-    let dt = parsed.with_timezone(&Utc);
+use crate::api::utils::parse_reference_time;
 
-    // If the reference time is within 3 minutes of now, treat it as real-time
-    let diff = (dt - Utc::now()).num_seconds().abs();
-    if diff < 180 {
-        return None;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_vehicle(trip_id: &str, line: &str, first_ifopt: &str, first_dep: &str, last_ifopt: &str, last_arr: &str) -> Vehicle {
+        Vehicle {
+            trip_id: trip_id.to_string(),
+            line_number: line.to_string(),
+            destination: "Test".to_string(),
+            origin: None,
+            next_trip_id: None,
+            stops: vec![
+                VehicleStop {
+                    stop_ifopt: first_ifopt.to_string(),
+                    stop_name: None,
+                    sequence: 1,
+                    lat: 48.37, lon: 10.90,
+                    arrival_time: None,
+                    arrival_time_estimated: None,
+                    departure_time: Some(first_dep.to_string()),
+                    departure_time_estimated: None,
+                    delay_minutes: None,
+                },
+                VehicleStop {
+                    stop_ifopt: last_ifopt.to_string(),
+                    stop_name: None,
+                    sequence: 10,
+                    lat: 48.37, lon: 10.90,
+                    arrival_time: Some(last_arr.to_string()),
+                    arrival_time_estimated: None,
+                    departure_time: None,
+                    departure_time_estimated: None,
+                    delay_minutes: None,
+                },
+            ],
+        }
     }
-    Some(dt)
+
+    #[test]
+    fn links_same_line_same_station_within_gap() {
+        let mut vehicles = vec![
+            make_vehicle("trip1", "4", "de:09761:10:1:A3", "2026-03-20T08:00:00Z", "de:09761:20:1:B1", "2026-03-20T08:30:00Z"),
+            make_vehicle("trip2", "4", "de:09761:20:1:B2", "2026-03-20T08:35:00Z", "de:09761:10:1:A4", "2026-03-20T09:05:00Z"),
+        ];
+        link_consecutive_trips(&mut vehicles);
+        assert_eq!(vehicles[0].next_trip_id.as_deref(), Some("trip2"));
+        assert_eq!(vehicles[1].next_trip_id, None);
+    }
+
+    #[test]
+    fn no_link_different_lines() {
+        let mut vehicles = vec![
+            make_vehicle("trip1", "4", "de:09761:10:1:A3", "2026-03-20T08:00:00Z", "de:09761:20:1:B1", "2026-03-20T08:30:00Z"),
+            make_vehicle("trip2", "6", "de:09761:20:1:B2", "2026-03-20T08:35:00Z", "de:09761:10:1:A4", "2026-03-20T09:05:00Z"),
+        ];
+        link_consecutive_trips(&mut vehicles);
+        assert_eq!(vehicles[0].next_trip_id, None);
+    }
+
+    #[test]
+    fn no_link_different_stations() {
+        let mut vehicles = vec![
+            make_vehicle("trip1", "4", "de:09761:10:1:A3", "2026-03-20T08:00:00Z", "de:09761:20:1:B1", "2026-03-20T08:30:00Z"),
+            make_vehicle("trip2", "4", "de:09761:30:1:C1", "2026-03-20T08:35:00Z", "de:09761:10:1:A4", "2026-03-20T09:05:00Z"),
+        ];
+        link_consecutive_trips(&mut vehicles);
+        assert_eq!(vehicles[0].next_trip_id, None);
+    }
+
+    #[test]
+    fn no_link_gap_too_large() {
+        let mut vehicles = vec![
+            make_vehicle("trip1", "4", "de:09761:10:1:A3", "2026-03-20T08:00:00Z", "de:09761:20:1:B1", "2026-03-20T08:30:00Z"),
+            make_vehicle("trip2", "4", "de:09761:20:1:B2", "2026-03-20T08:50:00Z", "de:09761:10:1:A4", "2026-03-20T09:20:00Z"),
+        ];
+        link_consecutive_trips(&mut vehicles);
+        // 20 min gap > 15 min threshold
+        assert_eq!(vehicles[0].next_trip_id, None);
+    }
+
+    #[test]
+    fn single_vehicle_no_link() {
+        let mut vehicles = vec![
+            make_vehicle("trip1", "4", "de:09761:10:1:A3", "2026-03-20T08:00:00Z", "de:09761:20:1:B1", "2026-03-20T08:30:00Z"),
+        ];
+        link_consecutive_trips(&mut vehicles);
+        assert_eq!(vehicles[0].next_trip_id, None);
+    }
+
+    #[test]
+    fn link_at_exactly_15_min_boundary() {
+        let mut vehicles = vec![
+            make_vehicle("trip1", "4", "de:09761:10:1:A3", "2026-03-20T08:00:00Z", "de:09761:20:1:B1", "2026-03-20T08:30:00Z"),
+            make_vehicle("trip2", "4", "de:09761:20:1:B2", "2026-03-20T08:45:00Z", "de:09761:10:1:A4", "2026-03-20T09:15:00Z"),
+        ];
+        link_consecutive_trips(&mut vehicles);
+        // Exactly 15 min gap — should link (gap <= 15)
+        assert_eq!(vehicles[0].next_trip_id.as_deref(), Some("trip2"));
+    }
 }

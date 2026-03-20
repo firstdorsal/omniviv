@@ -56,5 +56,4 @@ thiserror = "2"
 futures = "0.3.31"
 zip = "2"
 csv = "1"
-strsim = "0.11"
 

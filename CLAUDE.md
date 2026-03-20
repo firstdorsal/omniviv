@@ -11,3 +11,31 @@
 -   NEVER advertise for yourself in git commits
 
 -   Release flow documentation is in docs/releasing.md
+
+-   The vite dev server is always running at http://localhost:5174/
+
+Official Königsplatz assignments (from AVV):
+
+┌──────────┬──────┬────────────────────────────────┐  
+ │ Platform │ Line │ Direction │  
+ ├──────────┼──────┼────────────────────────────────┤  
+ │ A1 │ 1 │ Lechhausen │  
+ ├──────────┼──────┼────────────────────────────────┤  
+ │ A2 │ 1 │ Göggingen │
+├──────────┼──────┼────────────────────────────────┤  
+ │ A3 │ 4 │ Oberhausen Nord P+R │
+├──────────┼──────┼────────────────────────────────┤
+│ A4 │ 4 │ Hauptbahnhof │
+├──────────┼──────┼────────────────────────────────┤
+│ B1 │ 2 │ Haunstetten Nord │
+├──────────┼──────┼────────────────────────────────┤
+│ B2 │ 2 │ Augsburg West P+R │
+├──────────┼──────┼────────────────────────────────┤
+│ C1 │ 6 │ Stadtbergen │
+├──────────┼──────┼────────────────────────────────┤
+│ C2 │ 6 │ Friedberg West P+R │
+├──────────┼──────┼────────────────────────────────┤
+│ C3 │ 3 │ Hauptbahnhof │
+├──────────┼──────┼────────────────────────────────┤
+│ C4 │ 3 │ Inninger Str P+R / Königsbrunn │
+└──────────┴──────┴────────────────────────────────┘

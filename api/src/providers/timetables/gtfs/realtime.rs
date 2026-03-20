@@ -3,15 +3,15 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use prost::Message;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::sync::{Departure, EventType};
 
 use super::error::GtfsError;
 use super::static_data::{extract_platform_from_ifopt, station_level_ifopt, GtfsSchedule};
 
-/// Maximum allowed protobuf response size (50 MB)
-const MAX_PROTOBUF_SIZE: usize = 50 * 1024 * 1024;
+/// Maximum allowed protobuf response size (100 MB)
+const MAX_PROTOBUF_SIZE: usize = 100 * 1024 * 1024;
 
 /// Fetch and decode the GTFS-RT protobuf feed.
 pub async fn fetch_feed(
@@ -48,6 +48,100 @@ pub async fn fetch_feed(
 ///
 /// Only produces departures for stops in `relevant_stop_ids`.
 /// Also generates schedule-only departures for active trips without RT data.
+/// Percentage of a route's trips that must be explicitly cancelled before the
+/// entire route is treated as disrupted (all trips cancelled). GTFS-RT feeds
+/// often only partially mark trips during strikes, so this heuristic extends
+/// partial cancellations to the full route.
+const ROUTE_DISRUPTION_THRESHOLD: f64 = 0.05; // 5%
+
+/// Collect trip IDs that are cancelled via GTFS-RT Service Alerts.
+///
+/// 1. Collects explicitly cancelled trip IDs from alerts with NO_SERVICE or
+///    UNKNOWN_EFFECT (used by DELFI/gtfs.de for per-trip cancellations).
+/// 2. If more than 5% of a route's trips are explicitly cancelled, treats the
+///    entire route as disrupted and cancels ALL its trips (strike heuristic).
+fn collect_cancelled_trips_from_alerts(
+    feed: &gtfs_realtime::FeedMessage,
+    schedule: &GtfsSchedule,
+    now: DateTime<Utc>,
+    tz: Tz,
+) -> HashSet<String> {
+    let mut cancelled = HashSet::new();
+
+    for entity in &feed.entity {
+        let Some(alert) = &entity.alert else {
+            continue;
+        };
+
+        // NO_SERVICE = trip does not operate.
+        // Also match UNKNOWN_EFFECT: some feed providers (e.g., DELFI/gtfs.de)
+        // use UNKNOWN_EFFECT for per-trip cancellation alerts (strikes etc.)
+        // instead of the standard NO_SERVICE value.
+        let effect = alert.effect();
+        if effect != gtfs_realtime::alert::Effect::NoService
+            && effect != gtfs_realtime::alert::Effect::UnknownEffect
+        {
+            continue;
+        }
+
+        for ie in &alert.informed_entity {
+            if let Some(trip) = &ie.trip {
+                if let Some(ref trip_id) = trip.trip_id {
+                    cancelled.insert(trip_id.clone());
+                }
+            }
+        }
+    }
+
+    // Heuristic: if a significant fraction of a route's TODAY-ACTIVE trips are
+    // explicitly cancelled, the entire route is likely disrupted (e.g., strike).
+    // Extend the cancellation to ALL trips on that route.
+    // We filter to today's active services to get an accurate ratio — the
+    // schedule contains trips for all days, but cancellations target today only.
+    let mut cancelled_per_route: HashMap<&str, usize> = HashMap::new();
+    let mut total_per_route: HashMap<&str, usize> = HashMap::new();
+
+    let today = now.with_timezone(&tz).date_naive();
+    for (trip_id, trip) in &schedule.trips {
+        if !schedule.is_service_active(&trip.service_id, today) {
+            continue;
+        }
+        *total_per_route.entry(trip.route_id.as_str()).or_default() += 1;
+        if cancelled.contains(trip_id.as_str()) {
+            *cancelled_per_route.entry(trip.route_id.as_str()).or_default() += 1;
+        }
+    }
+
+    let mut disrupted_routes: HashSet<&str> = HashSet::new();
+    for (route_id, total) in &total_per_route {
+        let canc = cancelled_per_route.get(route_id).copied().unwrap_or(0);
+        let ratio = canc as f64 / *total as f64;
+        if canc > 0 {
+            debug!(route_id, canc, total, ratio = format!("{:.1}%", ratio * 100.0), "Route cancellation ratio (today)");
+        }
+        if total > &0 && ratio >= ROUTE_DISRUPTION_THRESHOLD {
+            disrupted_routes.insert(route_id);
+        }
+    }
+
+    if !disrupted_routes.is_empty() {
+        // Cancel ALL of today's trips on disrupted routes
+        for (trip_id, trip) in &schedule.trips {
+            if disrupted_routes.contains(&trip.route_id.as_str())
+                && schedule.is_service_active(&trip.service_id, today)
+            {
+                cancelled.insert(trip_id.clone());
+            }
+        }
+        info!(
+            disrupted_routes = disrupted_routes.len(),
+            "Extended partial cancellations to full routes (strike heuristic)"
+        );
+    }
+
+    cancelled
+}
+
 pub fn process_trip_updates(
     feed: &gtfs_realtime::FeedMessage,
     schedule: &GtfsSchedule,
@@ -112,8 +206,18 @@ pub fn process_trip_updates(
         matched_trips += 1;
         trips_with_rt.insert(trip_id.clone());
 
-        // Check calendar
-        if !schedule.is_service_active(&trip.service_id, today) {
+        // Check trip-level cancellation (CANCELED=3, DELETED=7)
+        let mut trip_cancelled = matches!(
+            trip_update.trip.schedule_relationship,
+            Some(3) | Some(7)
+        );
+
+        // Check calendar: service must be active today or tomorrow (when horizon crosses midnight)
+        let cutoff_date = cutoff.with_timezone(&tz).date_naive();
+        let tomorrow = today.succ_opt().unwrap_or(today);
+        if !schedule.is_service_active(&trip.service_id, today)
+            && !(cutoff_date > today && schedule.is_service_active(&trip.service_id, tomorrow))
+        {
             continue;
         }
 
@@ -159,6 +263,90 @@ pub fn process_trip_updates(
             .filter_map(|stu| stu.stop_sequence.map(|seq| (seq, stu)))
             .collect();
 
+        // Detect "all stops skipped" as effectively cancelled.
+        // Some feeds mark strike cancellations by setting schedule_relationship=SKIPPED
+        // on every stop instead of using trip-level CANCELED.
+        if !trip_cancelled && !trip_update.stop_time_update.is_empty() {
+            let all_skipped = trip_update
+                .stop_time_update
+                .iter()
+                .all(|stu| stu.schedule_relationship == Some(1));
+            if all_skipped {
+                trip_cancelled = true;
+            }
+        }
+
+        // For cancelled trips (trip-level or all-stops-skipped), emit schedule-based
+        // departures with cancelled=true so the departure monitor can show them
+        // with strikethrough. Skip the normal STU processing loop.
+        if trip_cancelled {
+            for st in stop_times {
+                let relevant_ifopts: Vec<String> = if has_mapping {
+                    if let Some(ifopts) = schedule.gtfs_to_ifopt.get(&st.stop_id) {
+                        ifopts.iter()
+                            .filter(|ifopt| relevant_stop_ids.contains(*ifopt))
+                            .cloned()
+                            .collect()
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    let id = station_level_ifopt(&st.stop_id);
+                    if relevant_stop_ids.contains(&st.stop_id)
+                        || station_prefixes.contains(&id)
+                    {
+                        vec![st.stop_id.clone()]
+                    } else {
+                        vec![]
+                    }
+                };
+                if relevant_ifopts.is_empty() { continue; }
+
+                let primary_secs = st.departure_time.or(st.arrival_time);
+                let Some(primary_secs) = primary_secs else { continue; };
+                let Some(primary_dt) = schedule_time_to_utc(primary_secs, service_date, tz) else { continue; };
+                if primary_dt < now - Duration::minutes(10) || primary_dt > cutoff { continue; }
+
+                for ifopt_id in &relevant_ifopts {
+                    if let Some(dep_secs) = st.departure_time {
+                        if let Some(dep_dt) = schedule_time_to_utc(dep_secs, service_date, tz) {
+                            departures.entry(ifopt_id.clone()).or_default().push(Departure {
+                                stop_ifopt: ifopt_id.clone(),
+                                event_type: EventType::Departure,
+                                line_number: route_short_name.clone(),
+                                destination: headsign.clone(),
+                                destination_id: last_stop.clone(),
+                                planned_time: dep_dt.to_rfc3339(),
+                                estimated_time: None,
+                                delay_minutes: None,
+                                platform: extract_platform_from_ifopt(ifopt_id),
+                                trip_id: Some(trip_id.clone()),
+                                cancelled: true,
+                            });
+                        }
+                    }
+                    if let Some(arr_secs) = st.arrival_time {
+                        if let Some(arr_dt) = schedule_time_to_utc(arr_secs, service_date, tz) {
+                            departures.entry(ifopt_id.clone()).or_default().push(Departure {
+                                stop_ifopt: ifopt_id.clone(),
+                                event_type: EventType::Arrival,
+                                line_number: route_short_name.clone(),
+                                destination: headsign.clone(),
+                                destination_id: last_stop.clone(),
+                                planned_time: arr_dt.to_rfc3339(),
+                                estimated_time: None,
+                                delay_minutes: None,
+                                platform: extract_platform_from_ifopt(ifopt_id),
+                                trip_id: Some(trip_id.clone()),
+                                cancelled: true,
+                            });
+                        }
+                    }
+                }
+            }
+            continue; // Skip normal STU processing for this trip
+        }
+
         // Trip-level delay as fallback
         let trip_delay = trip_update.delay.unwrap_or(0);
         let mut propagated_delay: i32 = trip_delay;
@@ -187,19 +375,22 @@ pub fn process_trip_updates(
                 }
             }
 
-            // Resolve to IFOPT and check relevance
-            let (is_relevant, ifopt_id) = if has_mapping {
-                if let Some(ifopt) = schedule.gtfs_to_ifopt.get(&st.stop_id) {
-                    (relevant_stop_ids.contains(ifopt), ifopt.clone())
+            // Resolve to IFOPTs and check relevance (one GTFS stop can map to multiple platforms)
+            let relevant_ifopts: Vec<String> = if has_mapping {
+                if let Some(ifopts) = schedule.gtfs_to_ifopt.get(&st.stop_id) {
+                    ifopts.iter()
+                        .filter(|ifopt| relevant_stop_ids.contains(*ifopt))
+                        .cloned()
+                        .collect()
                 } else {
-                    (false, st.stop_id.clone())
+                    vec![]
                 }
             } else {
                 let relevant = relevant_stop_ids.contains(&st.stop_id)
                     || station_prefixes.contains(&station_level_ifopt(&st.stop_id));
-                (relevant, st.stop_id.clone())
+                if relevant { vec![st.stop_id.clone()] } else { vec![] }
             };
-            if !is_relevant {
+            if relevant_ifopts.is_empty() {
                 continue;
             }
 
@@ -212,14 +403,17 @@ pub fn process_trip_updates(
                 continue;
             };
 
-            // Skip past events and events beyond horizon
-            if primary_dt < now - Duration::minutes(2) || primary_dt > cutoff {
+            // Skip events too far in the past or beyond the time horizon.
+            // 10-minute past window ensures vehicles near their final stops always
+            // retain at least 2 stops (the departed + arriving stop), preventing
+            // premature vehicle disappearance from the 2-stop minimum filter.
+            if primary_dt < now - Duration::minutes(10) || primary_dt > cutoff {
                 continue;
             }
 
-            // Emit Arrival event if arrival_time is available
-            if let Some(arr_secs) = st.arrival_time {
-                if let Some(arr_planned_dt) = schedule_time_to_utc(arr_secs, service_date, tz) {
+            // Compute arrival/departure times once (shared across all mapped IFOPTs)
+            let arr_event = if let Some(arr_secs) = st.arrival_time {
+                schedule_time_to_utc(arr_secs, service_date, tz).map(|arr_planned_dt| {
                     let (arr_estimated_dt, arr_delay) = if let Some(stu) = stu {
                         compute_estimated_time_for_event(
                             stu.arrival.as_ref().or(stu.departure.as_ref()),
@@ -235,28 +429,14 @@ pub fn process_trip_updates(
                         };
                         (Some(est), delay_min)
                     };
-                    let arrival = Departure {
-                        stop_ifopt: ifopt_id.clone(),
-                        event_type: EventType::Arrival,
-                        line_number: route_short_name.clone(),
-                        destination: headsign.clone(),
-                        destination_id: last_stop.clone(),
-                        planned_time: arr_planned_dt.to_rfc3339(),
-                        estimated_time: arr_estimated_dt.map(|dt| dt.to_rfc3339()),
-                        delay_minutes: arr_delay,
-                        platform: extract_platform_from_ifopt(&ifopt_id),
-                        trip_id: Some(trip_id.clone()),
-                    };
-                    departures
-                        .entry(ifopt_id.clone())
-                        .or_default()
-                        .push(arrival);
-                }
-            }
+                    (arr_planned_dt, arr_estimated_dt, arr_delay)
+                })
+            } else {
+                None
+            };
 
-            // Emit Departure event if departure_time is available
-            if let Some(dep_secs) = st.departure_time {
-                if let Some(dep_planned_dt) = schedule_time_to_utc(dep_secs, service_date, tz) {
+            let dep_event = if let Some(dep_secs) = st.departure_time {
+                schedule_time_to_utc(dep_secs, service_date, tz).map(|dep_planned_dt| {
                     let (dep_estimated_dt, dep_delay) = if let Some(stu) = stu {
                         compute_estimated_time_for_event(
                             stu.departure.as_ref().or(stu.arrival.as_ref()),
@@ -272,6 +452,35 @@ pub fn process_trip_updates(
                         };
                         (Some(est), delay_min)
                     };
+                    (dep_planned_dt, dep_estimated_dt, dep_delay)
+                })
+            } else {
+                None
+            };
+
+            // Emit events for each mapped IFOPT (shared stops produce events for all platforms)
+            for ifopt_id in &relevant_ifopts {
+                if let Some((arr_planned_dt, arr_estimated_dt, arr_delay)) = &arr_event {
+                    let arrival = Departure {
+                        stop_ifopt: ifopt_id.clone(),
+                        event_type: EventType::Arrival,
+                        line_number: route_short_name.clone(),
+                        destination: headsign.clone(),
+                        destination_id: last_stop.clone(),
+                        planned_time: arr_planned_dt.to_rfc3339(),
+                        estimated_time: arr_estimated_dt.map(|dt| dt.to_rfc3339()),
+                        delay_minutes: *arr_delay,
+                        platform: extract_platform_from_ifopt(ifopt_id),
+                        trip_id: Some(trip_id.clone()),
+                        cancelled: trip_cancelled,
+                    };
+                    departures
+                        .entry(ifopt_id.clone())
+                        .or_default()
+                        .push(arrival);
+                }
+
+                if let Some((dep_planned_dt, dep_estimated_dt, dep_delay)) = &dep_event {
                     let departure = Departure {
                         stop_ifopt: ifopt_id.clone(),
                         event_type: EventType::Departure,
@@ -280,12 +489,13 @@ pub fn process_trip_updates(
                         destination_id: last_stop.clone(),
                         planned_time: dep_planned_dt.to_rfc3339(),
                         estimated_time: dep_estimated_dt.map(|dt| dt.to_rfc3339()),
-                        delay_minutes: dep_delay,
-                        platform: extract_platform_from_ifopt(&ifopt_id),
+                        delay_minutes: *dep_delay,
+                        platform: extract_platform_from_ifopt(ifopt_id),
                         trip_id: Some(trip_id.clone()),
+                        cancelled: trip_cancelled,
                     };
                     departures
-                        .entry(ifopt_id)
+                        .entry(ifopt_id.clone())
                         .or_default()
                         .push(departure);
                 }
@@ -299,17 +509,56 @@ pub fn process_trip_updates(
         "Processed GTFS-RT TripUpdates"
     );
 
+    // Collect trip_ids cancelled via Service Alerts (NO_SERVICE or UNKNOWN_EFFECT).
+    // These alerts reference specific trips that should not operate.
+    let cancelled_by_alert = collect_cancelled_trips_from_alerts(feed, schedule, now, tz);
+    if !cancelled_by_alert.is_empty() {
+        info!(
+            cancelled_trips = cancelled_by_alert.len(),
+            "Collected cancelled trips from GTFS-RT Service Alerts"
+        );
+    }
+
+    // Mark any already-emitted departures for alert-cancelled trips
+    for events in departures.values_mut() {
+        for dep in events.iter_mut() {
+            if let Some(ref tid) = dep.trip_id {
+                if cancelled_by_alert.contains(tid.as_str()) {
+                    dep.cancelled = true;
+                }
+            }
+        }
+    }
+
     // Also generate schedule-only departures for active trips without RT data
     add_scheduled_departures(
         &mut departures,
         schedule,
         relevant_stop_ids,
         &trips_with_rt,
+        &cancelled_by_alert,
         today,
         now,
         cutoff,
         tz,
     );
+
+    // If the time horizon crosses into the next day, also query tomorrow's services.
+    let cutoff_date = cutoff.with_timezone(&tz).date_naive();
+    if cutoff_date > today {
+        let tomorrow = today.succ_opt().unwrap_or(today);
+        add_scheduled_departures(
+            &mut departures,
+            schedule,
+            relevant_stop_ids,
+            &trips_with_rt,
+            &cancelled_by_alert,
+            tomorrow,
+            now,
+            cutoff,
+            tz,
+        );
+    }
 
     // Sort each stop's departures by planned time
     for events in departures.values_mut() {
@@ -329,6 +578,7 @@ fn add_scheduled_departures(
     schedule: &GtfsSchedule,
     relevant_stop_ids: &HashSet<String>,
     trips_with_rt: &HashSet<String>,
+    cancelled_by_alert: &HashSet<String>,
     today: NaiveDate,
     now: DateTime<Utc>,
     cutoff: DateTime<Utc>,
@@ -378,6 +628,8 @@ fn add_scheduled_departures(
             continue;
         }
 
+        let is_cancelled = cancelled_by_alert.contains(trip_id);
+
         let Some(stop_times) = schedule.stop_times.get(trip_id) else {
             continue;
         };
@@ -399,24 +651,26 @@ fn add_scheduled_departures(
             .unwrap_or_default();
 
         for st in stop_times {
-            // Check if this stop is relevant using the mapping
-            let (is_relevant, ifopt_id) = if has_mapping {
-                if let Some(ifopt) = schedule.gtfs_to_ifopt.get(&st.stop_id) {
-                    // Check if this IFOPT or its station-level prefix is in our set
-                    let station_prefix = station_level_ifopt(ifopt);
-                    let relevant = relevant_stop_ids.contains(ifopt)
-                        || relevant_stop_ids.contains(&station_prefix);
-                    (relevant, ifopt.clone())
+            // Resolve to IFOPTs and check relevance (one GTFS stop can map to multiple platforms)
+            let relevant_ifopts: Vec<String> = if has_mapping {
+                if let Some(ifopts) = schedule.gtfs_to_ifopt.get(&st.stop_id) {
+                    ifopts.iter()
+                        .filter(|ifopt| {
+                            let station_prefix = station_level_ifopt(ifopt);
+                            relevant_stop_ids.contains(*ifopt)
+                                || relevant_stop_ids.contains(&station_prefix)
+                        })
+                        .cloned()
+                        .collect()
                 } else {
-                    (false, st.stop_id.clone())
+                    vec![]
                 }
             } else {
-                // Fallback: direct matching
                 let relevant = relevant_stop_ids.contains(&st.stop_id);
-                (relevant, st.stop_id.clone())
+                if relevant { vec![st.stop_id.clone()] } else { vec![] }
             };
 
-            if !is_relevant {
+            if relevant_ifopts.is_empty() {
                 continue;
             }
 
@@ -430,13 +684,19 @@ fn add_scheduled_departures(
                 continue;
             };
 
-            if primary_dt < now - Duration::minutes(2) || primary_dt > cutoff {
+            // 10-minute past window (same as process_trip_updates) to ensure
+            // vehicles near their final stops retain enough stop data.
+            if primary_dt < now - Duration::minutes(10) || primary_dt > cutoff {
                 continue;
             }
 
-            // Emit Arrival event if arrival_time is available
-            if let Some(arr_secs) = st.arrival_time {
-                if let Some(arr_dt) = schedule_time_to_utc(arr_secs, today, tz) {
+            // Compute arrival/departure times once
+            let arr_dt = st.arrival_time.and_then(|s| schedule_time_to_utc(s, today, tz));
+            let dep_dt = st.departure_time.and_then(|s| schedule_time_to_utc(s, today, tz));
+
+            // Emit events for each mapped IFOPT
+            for ifopt_id in &relevant_ifopts {
+                if let Some(arr_dt) = arr_dt {
                     let arrival = Departure {
                         stop_ifopt: ifopt_id.clone(),
                         event_type: EventType::Arrival,
@@ -446,19 +706,17 @@ fn add_scheduled_departures(
                         planned_time: arr_dt.to_rfc3339(),
                         estimated_time: None,
                         delay_minutes: None,
-                        platform: extract_platform_from_ifopt(&ifopt_id),
+                        platform: extract_platform_from_ifopt(ifopt_id),
                         trip_id: Some(trip_id.to_string()),
+                        cancelled: is_cancelled,
                     };
                     departures
                         .entry(ifopt_id.clone())
                         .or_default()
                         .push(arrival);
                 }
-            }
 
-            // Emit Departure event if departure_time is available
-            if let Some(dep_secs) = st.departure_time {
-                if let Some(dep_dt) = schedule_time_to_utc(dep_secs, today, tz) {
+                if let Some(dep_dt) = dep_dt {
                     let departure = Departure {
                         stop_ifopt: ifopt_id.clone(),
                         event_type: EventType::Departure,
@@ -468,11 +726,12 @@ fn add_scheduled_departures(
                         planned_time: dep_dt.to_rfc3339(),
                         estimated_time: None,
                         delay_minutes: None,
-                        platform: extract_platform_from_ifopt(&ifopt_id),
+                        platform: extract_platform_from_ifopt(ifopt_id),
                         trip_id: Some(trip_id.to_string()),
+                        cancelled: is_cancelled,
                     };
                     departures
-                        .entry(ifopt_id)
+                        .entry(ifopt_id.clone())
                         .or_default()
                         .push(departure);
                 }
@@ -496,18 +755,39 @@ pub fn compute_schedule_departures(
     let cutoff = reference_time + time_horizon;
 
     let today = reference_time.with_timezone(&tz).date_naive();
+    let cutoff_date = cutoff.with_timezone(&tz).date_naive();
     let trips_with_rt: HashSet<String> = HashSet::new();
+    let no_cancellations: HashSet<String> = HashSet::new();
 
     add_scheduled_departures(
         &mut departures,
         schedule,
         relevant_stop_ids,
         &trips_with_rt,
+        &no_cancellations,
         today,
         reference_time,
         cutoff,
         tz,
     );
+
+    // If the time horizon crosses into the next day, also query tomorrow's services.
+    // Without this, departures from services only active tomorrow would be missed
+    // (e.g., querying at 23:00 with a horizon that extends past midnight).
+    if cutoff_date > today {
+        let tomorrow = today.succ_opt().unwrap_or(today);
+        add_scheduled_departures(
+            &mut departures,
+            schedule,
+            relevant_stop_ids,
+            &trips_with_rt,
+            &no_cancellations,
+            tomorrow,
+            reference_time,
+            cutoff,
+            tz,
+        );
+    }
 
     // Sort each stop's departures by planned time
     for events in departures.values_mut() {

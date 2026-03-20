@@ -20,7 +20,7 @@ pub enum IssueCategory {
     DataProcessing,
 }
 
-/// A candidate GTFS stop match with scoring details
+/// A candidate GTFS stop match with route-based matching details
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MatchCandidate {
     /// GTFS stop ID
@@ -29,12 +29,10 @@ pub struct MatchCandidate {
     pub gtfs_stop_name: Option<String>,
     /// Distance in meters from OSM stop
     pub distance_meters: f64,
-    /// Distance score (0.0-1.0, higher = closer)
-    pub distance_score: f64,
-    /// Name similarity score (0.0-1.0, Jaro-Winkler)
-    pub name_similarity: f64,
-    /// Combined weighted score
-    pub combined_score: f64,
+    /// Human-readable shared route names (e.g. "Tram 1", "Bus 5")
+    pub shared_routes: Vec<String>,
+    /// Whether this candidate shares at least one route with the OSM stop
+    pub is_definitive: bool,
 }
 
 /// Types of OSM data quality issues

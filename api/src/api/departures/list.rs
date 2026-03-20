@@ -10,15 +10,44 @@ use crate::sync::Departure;
 
 use super::DeparturesState;
 
-/// Filter out departures that are in the past relative to the given reference time
+/// How many minutes of past departures to keep so that recent arrivals remain visible.
+const PAST_GRACE_MINUTES: i64 = 5;
+
+/// Per-stop board queries use a longer time horizon than the main departure list
+/// so that events for the rest of the day (and into the next morning) are visible.
+const STOP_BOARD_HORIZON_MINUTES: i64 = 720; // 12 hours
+
+use crate::api::utils::ifopt_station_prefix;
+
+/// Filter out departures whose destination is the same station as the queried stop.
+/// E.g. Line 4 "towards Hauptbahnhof" should not appear at Hauptbahnhof's departure monitor.
+fn filter_same_station_destinations(departures: Vec<Departure>, stop_ifopt: &str) -> Vec<Departure> {
+    let station_prefix = match ifopt_station_prefix(stop_ifopt) {
+        Some(p) => p,
+        None => return departures,
+    };
+    departures
+        .into_iter()
+        .filter(|d| {
+            match &d.destination_id {
+                Some(dest_id) => ifopt_station_prefix(dest_id) != Some(station_prefix),
+                None => true,
+            }
+        })
+        .collect()
+}
+
+/// Filter out departures that are too far in the past relative to the given reference time.
+/// Departures within [`PAST_GRACE_MINUTES`] of the reference time are kept.
 fn filter_past_departures(departures: Vec<Departure>, reference_time: DateTime<Utc>) -> Vec<Departure> {
+    let cutoff = reference_time - Duration::minutes(PAST_GRACE_MINUTES);
     departures
         .into_iter()
         .filter(|d| {
             // Use estimated time if available, otherwise planned time
             let time_str = d.estimated_time.as_ref().unwrap_or(&d.planned_time);
             match chrono::DateTime::parse_from_rfc3339(time_str) {
-                Ok(time) => time > reference_time,
+                Ok(time) => time > cutoff,
                 Err(_) => true, // Keep if we can't parse the time
             }
         })
@@ -58,20 +87,7 @@ pub struct GtfsStopDeparturesResponse {
     pub departures: Vec<Departure>,
 }
 
-/// Parse a reference_time string and determine if it's a simulated (non-current) time.
-/// Returns Some(DateTime) if it's a valid future/past simulated time, None if it's effectively "now".
-fn parse_reference_time(reference_time: &Option<String>) -> Option<DateTime<Utc>> {
-    let rt = reference_time.as_ref()?;
-    let parsed = DateTime::parse_from_rfc3339(rt).ok()?;
-    let dt = parsed.with_timezone(&Utc);
-
-    // If the reference time is within 3 minutes of now, treat it as real-time
-    let diff = (dt - Utc::now()).num_seconds().abs();
-    if diff < 180 {
-        return None;
-    }
-    Some(dt)
-}
+use crate::api::utils::parse_reference_time;
 
 /// List all departures across all stops
 #[utoipa::path(
@@ -109,35 +125,59 @@ pub async fn get_departures_by_stop(
 ) -> Json<StopDeparturesResponse> {
     let simulated_time = parse_reference_time(&request.reference_time);
 
-    let departures = if let Some(ref_time) = simulated_time {
-        // Compute departures from static schedule (loaded from PG) for the simulated time
-        let mut stop_ids = HashSet::new();
-        stop_ids.insert(request.stop_ifopt.clone());
-        match static_data::build_schedule_from_db(&state.pool, &stop_ids).await {
-            Ok(schedule) => {
-                let time_horizon = Duration::minutes(state.time_horizon_minutes as i64);
-                let all_departures = realtime::compute_schedule_departures(
-                    &schedule,
-                    &stop_ids,
-                    ref_time,
-                    time_horizon,
-                    state.timezone,
-                );
-                all_departures.get(&request.stop_ifopt).cloned().unwrap_or_default()
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, stop_ifopt = %request.stop_ifopt, "Failed to build schedule from DB for stop departures");
-                Vec::new()
-            }
-        }
-    } else {
-        // Use real-time departure store
+    let ref_time = simulated_time.unwrap_or_else(Utc::now);
+
+    // Always compute schedule-based departures with the longer stop board horizon
+    // so the popup shows upcoming events even when the real-time feed has no data
+    // (e.g., late at night when trams have stopped running).
+    let mut stop_ids = HashSet::new();
+    stop_ids.insert(request.stop_ifopt.clone());
+
+    let mut departures = if simulated_time.is_none() {
+        // Start with real-time departure store (has estimated times and delays)
         let store = state.departure_store.read().await;
         store.get(&request.stop_ifopt).cloned().unwrap_or_default()
+    } else {
+        Vec::new()
     };
 
-    let reference = simulated_time.unwrap_or_else(Utc::now);
-    let departures = filter_past_departures(departures, reference);
+    // Supplement with schedule-based departures to fill the 12-hour window.
+    // This adds trips that aren't in the real-time store (e.g., next morning).
+    match static_data::build_schedule_from_db(&state.pool, &stop_ids).await {
+        Ok(schedule) => {
+            let time_horizon = Duration::minutes(STOP_BOARD_HORIZON_MINUTES);
+            let schedule_departures = realtime::compute_schedule_departures(
+                &schedule,
+                &stop_ids,
+                ref_time,
+                time_horizon,
+                state.timezone,
+            );
+            let schedule_deps = schedule_departures.get(&request.stop_ifopt).cloned().unwrap_or_default();
+
+            // Collect trip_ids already in real-time data to avoid duplicates
+            let rt_trip_ids: HashSet<String> = departures.iter()
+                .filter_map(|d| d.trip_id.clone())
+                .collect();
+
+            for dep in schedule_deps {
+                if let Some(ref tid) = dep.trip_id {
+                    if !rt_trip_ids.contains(tid) {
+                        departures.push(dep);
+                    }
+                } else {
+                    departures.push(dep);
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, stop_ifopt = %request.stop_ifopt, "Failed to build schedule from DB for stop departures");
+        }
+    }
+
+    departures.sort_by(|a, b| a.planned_time.cmp(&b.planned_time));
+    let departures = filter_past_departures(departures, ref_time);
+    let departures = filter_same_station_destinations(departures, &request.stop_ifopt);
 
     Json(StopDeparturesResponse {
         stop_ifopt: request.stop_ifopt,
@@ -166,10 +206,11 @@ pub async fn get_departures_by_gtfs_stop(
     let mut stop_ids = HashSet::new();
     stop_ids.insert(request.gtfs_stop_id.clone());
 
+    // Always compute schedule-based departures with the longer stop board horizon
     let departures =
         match static_data::build_schedule_from_db_by_gtfs_stop(&state.pool, &stop_ids).await {
             Ok(schedule) => {
-                let time_horizon = Duration::minutes(state.time_horizon_minutes as i64);
+                let time_horizon = Duration::minutes(STOP_BOARD_HORIZON_MINUTES);
                 let all_departures = realtime::compute_schedule_departures(
                     &schedule,
                     &stop_ids,
@@ -214,6 +255,7 @@ mod tests {
             delay_minutes: None,
             platform: None,
             trip_id: Some("trip_1".to_string()),
+            cancelled: false,
         }
     }
 
@@ -297,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_past_departures_exact_reference_time_is_not_kept() {
+    fn test_filter_past_departures_exact_reference_time_is_kept() {
         let reference = DateTime::parse_from_rfc3339("2026-03-10T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -307,8 +349,24 @@ mod tests {
         ];
 
         let result = filter_past_departures(departures, reference);
-        // time == reference_time is NOT > reference_time, so it should be filtered out
-        assert_eq!(result.len(), 0);
+        // time == reference_time is within the 5-minute grace period, so it's kept
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_past_departures_within_grace_period_is_kept() {
+        let reference = DateTime::parse_from_rfc3339("2026-03-10T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let departures = vec![
+            make_departure("2026-03-10T11:57:00Z", None), // 3 minutes ago — within grace
+            make_departure("2026-03-10T11:54:00Z", None), // 6 minutes ago — beyond grace
+        ];
+
+        let result = filter_past_departures(departures, reference);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].planned_time, "2026-03-10T11:57:00Z");
     }
 
     // --- parse_reference_time tests ---
@@ -352,5 +410,53 @@ mod tests {
         assert!(result.is_some());
         let dt = result.unwrap();
         assert_eq!(dt.year(), 2020);
+    }
+
+    // --- ifopt_station_prefix tests ---
+
+    #[test]
+    fn test_ifopt_station_prefix_full() {
+        assert_eq!(ifopt_station_prefix("de:09761:10:1:A1"), Some("de:09761:10"));
+    }
+
+    #[test]
+    fn test_ifopt_station_prefix_station_only() {
+        assert_eq!(ifopt_station_prefix("de:09761:10"), Some("de:09761:10"));
+    }
+
+    #[test]
+    fn test_ifopt_station_prefix_too_short() {
+        assert_eq!(ifopt_station_prefix("de:09761"), None);
+    }
+
+    // --- filter_same_station_destinations tests ---
+
+    #[test]
+    fn test_filter_same_station_removes_loop_destination() {
+        let mut dep = make_departure("2026-03-10T13:00:00Z", None);
+        dep.stop_ifopt = "de:09761:10:1:A3".to_string();
+        dep.destination_id = Some("de:09761:10:1:A4".to_string()); // same station, different platform
+
+        let result = filter_same_station_destinations(vec![dep], "de:09761:10:1:A3");
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_filter_same_station_keeps_different_station() {
+        let mut dep = make_departure("2026-03-10T13:00:00Z", None);
+        dep.stop_ifopt = "de:09761:10:1:A3".to_string();
+        dep.destination_id = Some("de:09761:20:1:B1".to_string()); // different station
+
+        let result = filter_same_station_destinations(vec![dep], "de:09761:10:1:A3");
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_same_station_keeps_no_destination_id() {
+        let dep = make_departure("2026-03-10T13:00:00Z", None);
+        // destination_id is None by default
+
+        let result = filter_same_station_destinations(vec![dep], "de:09761:10:1:A3");
+        assert_eq!(result.len(), 1);
     }
 }

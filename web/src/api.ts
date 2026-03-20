@@ -1,5 +1,6 @@
 /* eslint-disable */
 /* tslint:disable */
+// @ts-nocheck
 /*
  * ---------------------------------------------------------------
  * ## THIS FILE WAS GENERATED VIA SWAGGER-TYPESCRIPT-API        ##
@@ -9,12 +10,66 @@
  * ---------------------------------------------------------------
  */
 
+/** Transport type for both configuration and runtime detection */
+export enum TransportType {
+  Tram = "tram",
+  Bus = "bus",
+  Subway = "subway",
+  Train = "train",
+  Ferry = "ferry",
+  Unknown = "unknown",
+}
+
+/** Types of OSM data quality issues */
+export enum OsmIssueType {
+  MissingIfopt = "missing_ifopt",
+  MissingCoordinates = "missing_coordinates",
+  OrphanedElement = "orphaned_element",
+  MissingRouteRef = "missing_route_ref",
+  MissingName = "missing_name",
+  MissingStopPosition = "missing_stop_position",
+  MissingPlatform = "missing_platform",
+  NoGtfsMatch = "no_gtfs_match",
+  AmbiguousGtfsMatch = "ambiguous_gtfs_match",
+  LowConfidenceMatch = "low_confidence_match",
+  UnmappedGtfsStop = "unmapped_gtfs_stop",
+  GtfsParseSkipped = "gtfs_parse_skipped",
+  GtfsLoadFailed = "gtfs_load_failed",
+  GtfsRtFetchFailed = "gtfs_rt_fetch_failed",
+}
+
+export enum MappingStatus {
+  Unmapped = "unmapped",
+  Auto = "auto",
+  Manual = "manual",
+}
+
+export enum MappingFilter {
+  Manual = "manual",
+  Auto = "auto",
+}
+
+/** Category of issue for UI organization */
+export enum IssueCategory {
+  OsmDataQuality = "osm_data_quality",
+  GtfsMapping = "gtfs_mapping",
+  DataProcessing = "data_processing",
+}
+
+/** Type of stop event */
+export enum EventType {
+  Departure = "departure",
+  Arrival = "arrival",
+}
+
 export interface Area {
+  /** @format date-time */
   created_at: string;
   /** @format double */
   east: number;
   /** @format int64 */
   id: number;
+  /** @format date-time */
   last_synced_at?: string | null;
   name: string;
   /** @format double */
@@ -43,8 +98,36 @@ export interface AreaStats {
   stop_position_count: number;
 }
 
+export interface CandidateStop {
+  /**
+   * Approximate distance in meters from the OSM stop
+   * @format double
+   */
+  distance_meters: number;
+  /**
+   * Latitude
+   * @format double
+   */
+  lat: number;
+  /**
+   * Longitude
+   * @format double
+   */
+  lon: number;
+  /** GTFS stop ID */
+  stop_id: string;
+  /** GTFS stop name */
+  stop_name?: string | null;
+}
+
 /** A stop event (departure or arrival) */
 export interface Departure {
+  /**
+   * Whether this trip has been cancelled (GTFS-RT schedule_relationship = CANCELED).
+   * Cancelled trips should be shown with strikethrough in departure monitors
+   * but NOT as active vehicles on the map.
+   */
+  cancelled?: boolean;
   /** @format int32 */
   delay_minutes?: number | null;
   /** For departures: destination; for arrivals: origin */
@@ -70,10 +153,73 @@ export interface ErrorResponse {
   error: string;
 }
 
-/** Type of stop event */
-export enum EventType {
-  Departure = "departure",
-  Arrival = "arrival",
+export interface GtfsStopDeparturesRequest {
+  gtfs_stop_id: string;
+  /** Optional reference time (ISO 8601/RFC 3339) for time simulation. */
+  reference_time?: string | null;
+}
+
+export interface GtfsStopDeparturesResponse {
+  departures: Departure[];
+  gtfs_stop_id: string;
+}
+
+export interface GtfsStopResponse {
+  /** @format double */
+  lat: number;
+  /** @format double */
+  lon: number;
+  parent_station?: string | null;
+  stop_id: string;
+  stop_name?: string | null;
+}
+
+export interface GtfsStopsListResponse {
+  /** Whether there are more results after this page */
+  has_more: boolean;
+  /**
+   * Maximum number of results returned
+   * @min 0
+   */
+  limit: number;
+  /**
+   * Current offset in the result set
+   * @min 0
+   */
+  offset: number;
+  stops: GtfsStopResponse[];
+  /**
+   * Total number of stops matching the filter criteria
+   * @min 0
+   */
+  total_count: number;
+}
+
+export interface HealthResponse {
+  /**
+   * Number of GTFS routes in the database
+   * @format int64
+   */
+  gtfs_route_count: number;
+  /** Whether the static GTFS schedule has been loaded into PostgreSQL */
+  gtfs_schedule_loaded: boolean;
+  /**
+   * Number of GTFS stops in the database
+   * @format int64
+   */
+  gtfs_stop_count: number;
+  /**
+   * Number of GTFS trips in the database
+   * @format int64
+   */
+  gtfs_trip_count: number;
+  /** Whether the service is running */
+  healthy: boolean;
+  /**
+   * Number of IFOPT-to-GTFS stop mappings
+   * @format int64
+   */
+  ifopt_mapping_count: number;
 }
 
 export interface IssueListResponse {
@@ -82,63 +228,143 @@ export interface IssueListResponse {
   issues: OsmIssue[];
 }
 
-/** An OSM data quality issue detected during sync */
-export interface GtfsStopResponse {
-  stop_id: string;
-  stop_name?: string | null;
-  parent_station?: string | null;
-  /** @format double */
-  lat: number;
-  /** @format double */
-  lon: number;
-}
-
-export interface GtfsStopsListResponse {
-  stops: GtfsStopResponse[];
-  /** @min 0 */
-  total_count: number;
-  /** @min 0 */
-  offset: number;
-  /** @min 0 */
-  limit: number;
-  has_more: boolean;
-}
-
-/** Category of issue for UI organization */
-export enum IssueCategory {
-  OsmDataQuality = "osm_data_quality",
-  GtfsMapping = "gtfs_mapping",
-  DataProcessing = "data_processing",
-}
-
-/** A candidate GTFS stop match with scoring details */
-export interface MatchCandidate {
-  gtfs_stop_id: string;
+export interface MappingEntry {
+  /** Nearby GTFS candidate stops (only if include_candidates is true) */
+  candidates: CandidateStop[];
+  /**
+   * Combined matching score (if auto-mapped)
+   * @format double
+   */
+  combined_score?: number | null;
+  /** Current mapped GTFS stop ID (if mapped) */
+  gtfs_stop_id?: string | null;
+  /**
+   * Latitude of the mapped GTFS stop (if mapped)
+   * @format double
+   */
+  gtfs_stop_lat?: number | null;
+  /**
+   * Longitude of the mapped GTFS stop (if mapped)
+   * @format double
+   */
+  gtfs_stop_lon?: number | null;
+  /** Current mapped GTFS stop name (if mapped) */
   gtfs_stop_name?: string | null;
-  /** @format double */
-  distance_meters: number;
-  /** @format double */
-  distance_score: number;
-  /** @format double */
-  name_similarity: number;
-  /** @format double */
-  combined_score: number;
+  /** IFOPT identifier */
+  ifopt: string;
+  /**
+   * Latitude of the OSM stop
+   * @format double
+   */
+  lat: number;
+  /**
+   * Longitude of the OSM stop
+   * @format double
+   */
+  lon: number;
+  /** Name of the OSM stop (from platforms or stop_positions) */
+  name?: string | null;
+  /** Current mapping status */
+  status: MappingStatus;
 }
 
+export interface MappingStatusRequest {
+  /** Filter by manual-only or auto-only mappings */
+  filter?: null | MappingFilter;
+  /** Include nearby GTFS candidate stops for each entry */
+  include_candidates?: boolean;
+  /**
+   * Maximum number of entries to return (default: 50, max: 200)
+   * @min 0
+   */
+  limit?: number;
+  /**
+   * Offset for pagination
+   * @min 0
+   */
+  offset?: number;
+  /** Case-insensitive search on IFOPT name or identifier */
+  search?: string | null;
+  /** Only return unmapped IFOPTs */
+  unmapped_only?: boolean;
+}
+
+export interface MappingStatusResponse {
+  /**
+   * Number of auto-generated mappings
+   * @min 0
+   */
+  auto_count: number;
+  /** Paginated list of mapping entries */
+  entries: MappingEntry[];
+  /** Whether there are more entries after this page */
+  has_more: boolean;
+  /**
+   * Number of manually set mappings
+   * @min 0
+   */
+  manual_count: number;
+  /**
+   * Number of IFOPTs that have a mapping (manual or auto)
+   * @min 0
+   */
+  mapped_count: number;
+  /**
+   * Total number of OSM stops with IFOPT identifiers
+   * @min 0
+   */
+  total_ifopt_count: number;
+  /**
+   * Number of IFOPTs without any mapping
+   * @min 0
+   */
+  unmapped_count: number;
+}
+
+/** A candidate GTFS stop match with route-based matching details */
+export interface MatchCandidate {
+  /**
+   * Distance in meters from OSM stop
+   * @format double
+   */
+  distance_meters: number;
+  /** GTFS stop ID */
+  gtfs_stop_id: string;
+  /** GTFS stop name */
+  gtfs_stop_name?: string | null;
+  /** Whether this candidate shares at least one route with the OSM stop */
+  is_definitive: boolean;
+  /** Human-readable shared route names (e.g. "Tram 1", "Bus 5") */
+  shared_routes: string[];
+}
+
+/** An OSM data quality issue detected during sync */
 export interface OsmIssue {
-  /** Category of issue for UI organization */
+  /**
+   * Record count affected (for bulk issues like parse errors)
+   * @format int32
+   * @min 0
+   */
+  affected_count?: number | null;
+  /** Category for UI organization (derived from issue_type) */
   category: IssueCategory;
   description: string;
   detected_at: string;
   element_type: string;
+  /** Error message from underlying operation */
+  error_message?: string | null;
+  /** GTFS stop ID (for GTFS mapping issues) */
+  gtfs_stop_id?: string | null;
+  /** GTFS stop name (for GTFS mapping issues) */
+  gtfs_stop_name?: string | null;
   /** Types of OSM data quality issues */
   issue_type: OsmIssueType;
   /** @format double */
   lat?: number | null;
   /** @format double */
   lon?: number | null;
-  /** Match candidates for GTFS mapping issues */
-  match_candidates?: MatchCandidate[] | null;
+  /** Candidate matches with scoring details (for GTFS mapping issues) */
+  match_candidates?: any[] | null;
   name?: string | null;
   /** @format int64 */
   osm_id: number;
@@ -146,6 +372,8 @@ export interface OsmIssue {
   osm_url: string;
   /** The ref tag value (e.g., platform letter "a", "b") */
   ref?: string | null;
+  /** Source file (for parse errors) */
+  source_file?: string | null;
   /** Suggested IFOPT (for missing_ifopt issues) */
   suggested_ifopt?: string | null;
   /**
@@ -160,22 +388,17 @@ export interface OsmIssue {
   transport_type: TransportType;
 }
 
-/** Types of OSM data quality issues */
-export enum OsmIssueType {
-  MissingIfopt = "missing_ifopt",
-  MissingCoordinates = "missing_coordinates",
-  OrphanedElement = "orphaned_element",
-  MissingRouteRef = "missing_route_ref",
-  MissingName = "missing_name",
-  MissingStopPosition = "missing_stop_position",
-  MissingPlatform = "missing_platform",
-  NoGtfsMatch = "no_gtfs_match",
-  AmbiguousGtfsMatch = "ambiguous_gtfs_match",
-  LowConfidenceMatch = "low_confidence_match",
-  UnmappedGtfsStop = "unmapped_gtfs_stop",
-  GtfsParseSkipped = "gtfs_parse_skipped",
-  GtfsLoadFailed = "gtfs_load_failed",
-  GtfsRtFetchFailed = "gtfs_rt_fetch_failed",
+export interface RemoveMappingRequest {
+  /** The IFOPT identifier to remove the manual mapping for */
+  ifopt: string;
+}
+
+export interface RemoveMappingResponse {
+  /**
+   * @format int64
+   * @min 0
+   */
+  removed_count: number;
 }
 
 export interface Route {
@@ -210,13 +433,25 @@ export interface RouteStop {
   /** @format int64 */
   platform_id?: number | null;
   role?: string | null;
-  /** @format int64 */
+  /** @format int32 */
   sequence: number;
   /** @format int64 */
   station_id?: number | null;
   station_name?: string | null;
   /** @format int64 */
   stop_position_id?: number | null;
+}
+
+export interface SetMappingRequest {
+  /** The GTFS stop ID to map to */
+  gtfs_stop_id: string;
+  /** The IFOPT identifier of the OSM stop */
+  ifopt: string;
+}
+
+export interface SetMappingResponse {
+  message: string;
+  success: boolean;
 }
 
 export interface Station {
@@ -241,6 +476,8 @@ export interface StationListResponse {
 
 /** Platform info nested in station response */
 export interface StationPlatform {
+  /** GTFS stop IDs matched to this platform via spatial matching */
+  gtfs_stop_ids: string[];
   /** @format double */
   lat: number;
   /** @format double */
@@ -254,6 +491,8 @@ export interface StationPlatform {
 
 /** Stop position info nested in station response */
 export interface StationStopPosition {
+  /** GTFS stop IDs matched to this stop position via spatial matching */
+  gtfs_stop_ids: string[];
   /** @format double */
   lat: number;
   /** @format double */
@@ -282,32 +521,18 @@ export interface StopDeparturesResponse {
   stop_ifopt: string;
 }
 
-export interface GtfsStopDeparturesRequest {
-  gtfs_stop_id: string;
-  /** Optional reference time (ISO 8601/RFC 3339) for time simulation. */
-  reference_time?: string | null;
-}
-
-export interface GtfsStopDeparturesResponse {
-  gtfs_stop_id: string;
-  departures: Departure[];
-}
-
-/** Transport type for both configuration and runtime detection */
-export enum TransportType {
-  Tram = "tram",
-  Bus = "bus",
-  Subway = "subway",
-  Train = "train",
-  Ferry = "ferry",
-  Unknown = "unknown",
-}
-
 export interface Vehicle {
   /** Final destination of this vehicle */
   destination: string;
   /** Line number (e.g., "1", "2", "3") */
   line_number: string;
+  /**
+   * The trip_id of the next trip this physical vehicle will operate.
+   * Set when the vehicle loops back (e.g., tram reaching end of line
+   * and starting the return trip). Used for seamless follow-mode
+   * transitions and vehicle reuse rendering.
+   */
+  next_trip_id?: string | null;
   /** Origin of this vehicle's journey */
   origin?: string | null;
   /** All stops this vehicle will visit, in order */
@@ -342,7 +567,7 @@ export interface VehicleStop {
   lon: number;
   /**
    * Sequence number on the route
-   * @format int64
+   * @format int32
    */
   sequence: number;
   /** Stop IFOPT identifier */
@@ -371,107 +596,6 @@ export interface VehiclesByRouteResponse {
   vehicles: Vehicle[];
 }
 
-// --- Mapping types (IFOPT-to-GTFS stop mapping management) ---
-
-export interface SetMappingRequest {
-  /** The IFOPT identifier of the OSM stop */
-  ifopt: string;
-  /** The GTFS stop ID to map to */
-  gtfs_stop_id: string;
-}
-
-export interface SetMappingResponse {
-  success: boolean;
-  message: string;
-}
-
-export interface RemoveMappingRequest {
-  /** The IFOPT identifier to remove the manual mapping for */
-  ifopt: string;
-}
-
-export interface RemoveMappingResponse {
-  /** @format uint64 */
-  removed_count: number;
-}
-
-export interface MappingStatusRequest {
-  /** Only return unmapped IFOPTs */
-  unmapped_only?: boolean;
-  /** Include nearby GTFS candidate stops for each entry */
-  include_candidates?: boolean;
-  /** Filter by manual-only or auto-only mappings */
-  filter?: MappingFilter | null;
-  /** Case-insensitive search on IFOPT name or identifier */
-  search?: string | null;
-  /**
-   * Maximum number of entries to return (default: 50, max: 200)
-   * @min 0
-   */
-  limit?: number;
-  /**
-   * Offset for pagination
-   * @min 0
-   */
-  offset?: number;
-}
-
-export enum MappingFilter {
-  Manual = "manual",
-  Auto = "auto",
-}
-
-export interface MappingStatusResponse {
-  /** @min 0 */
-  total_ifopt_count: number;
-  /** @min 0 */
-  mapped_count: number;
-  /** @min 0 */
-  manual_count: number;
-  /** @min 0 */
-  auto_count: number;
-  /** @min 0 */
-  unmapped_count: number;
-  entries: MappingEntry[];
-  has_more: boolean;
-}
-
-export interface MappingEntry {
-  ifopt: string;
-  name?: string | null;
-  /** @format double */
-  lat: number;
-  /** @format double */
-  lon: number;
-  status: MappingStatus;
-  gtfs_stop_id?: string | null;
-  gtfs_stop_name?: string | null;
-  /** @format double */
-  gtfs_stop_lat?: number | null;
-  /** @format double */
-  gtfs_stop_lon?: number | null;
-  /** @format double */
-  combined_score?: number | null;
-  candidates: CandidateStop[];
-}
-
-export enum MappingStatus {
-  Unmapped = "unmapped",
-  Auto = "auto",
-  Manual = "manual",
-}
-
-export interface CandidateStop {
-  stop_id: string;
-  stop_name?: string | null;
-  /** @format double */
-  lat: number;
-  /** @format double */
-  lon: number;
-  /** @format double */
-  distance_meters: number;
-}
-
 export type QueryParamsType = Record<string | number, any>;
 export type ResponseFormat = keyof Omit<Body, "body" | "bodyUsed">;
 
@@ -494,16 +618,22 @@ export interface FullRequestParams extends Omit<RequestInit, "body"> {
   cancelToken?: CancelToken;
 }
 
-export type RequestParams = Omit<FullRequestParams, "body" | "method" | "query" | "path">;
+export type RequestParams = Omit<
+  FullRequestParams,
+  "body" | "method" | "query" | "path"
+>;
 
 export interface ApiConfig<SecurityDataType = unknown> {
   baseUrl?: string;
   baseApiParams?: Omit<RequestParams, "baseUrl" | "cancelToken" | "signal">;
-  securityWorker?: (securityData: SecurityDataType | null) => Promise<RequestParams | void> | RequestParams | void;
+  securityWorker?: (
+    securityData: SecurityDataType | null,
+  ) => Promise<RequestParams | void> | RequestParams | void;
   customFetch?: typeof fetch;
 }
 
-export interface HttpResponse<D extends unknown, E extends unknown = unknown> extends Response {
+export interface HttpResponse<D extends unknown, E extends unknown = unknown>
+  extends Response {
   data: D;
   error: E;
 }
@@ -512,6 +642,7 @@ type CancelToken = Symbol | string | number;
 
 export enum ContentType {
   Json = "application/json",
+  JsonApi = "application/vnd.api+json",
   FormData = "multipart/form-data",
   UrlEncoded = "application/x-www-form-urlencoded",
   Text = "text/plain",
@@ -522,7 +653,8 @@ export class HttpClient<SecurityDataType = unknown> {
   private securityData: SecurityDataType | null = null;
   private securityWorker?: ApiConfig<SecurityDataType>["securityWorker"];
   private abortControllers = new Map<CancelToken, AbortController>();
-  private customFetch = (...fetchParams: Parameters<typeof fetch>) => fetch(...fetchParams);
+  private customFetch = (...fetchParams: Parameters<typeof fetch>) =>
+    fetch(...fetchParams);
 
   private baseApiParams: RequestParams = {
     credentials: "same-origin",
@@ -555,9 +687,15 @@ export class HttpClient<SecurityDataType = unknown> {
 
   protected toQueryString(rawQuery?: QueryParamsType): string {
     const query = rawQuery || {};
-    const keys = Object.keys(query).filter((key) => "undefined" !== typeof query[key]);
+    const keys = Object.keys(query).filter(
+      (key) => "undefined" !== typeof query[key],
+    );
     return keys
-      .map((key) => (Array.isArray(query[key]) ? this.addArrayQueryParam(query, key) : this.addQueryParam(query, key)))
+      .map((key) =>
+        Array.isArray(query[key])
+          ? this.addArrayQueryParam(query, key)
+          : this.addQueryParam(query, key),
+      )
       .join("&");
   }
 
@@ -568,10 +706,23 @@ export class HttpClient<SecurityDataType = unknown> {
 
   private contentFormatters: Record<ContentType, (input: any) => any> = {
     [ContentType.Json]: (input: any) =>
-      input !== null && (typeof input === "object" || typeof input === "string") ? JSON.stringify(input) : input,
-    [ContentType.Text]: (input: any) => (input !== null && typeof input !== "string" ? JSON.stringify(input) : input),
-    [ContentType.FormData]: (input: any) =>
-      Object.keys(input || {}).reduce((formData, key) => {
+      input !== null && (typeof input === "object" || typeof input === "string")
+        ? JSON.stringify(input)
+        : input,
+    [ContentType.JsonApi]: (input: any) =>
+      input !== null && (typeof input === "object" || typeof input === "string")
+        ? JSON.stringify(input)
+        : input,
+    [ContentType.Text]: (input: any) =>
+      input !== null && typeof input !== "string"
+        ? JSON.stringify(input)
+        : input,
+    [ContentType.FormData]: (input: any) => {
+      if (input instanceof FormData) {
+        return input;
+      }
+
+      return Object.keys(input || {}).reduce((formData, key) => {
         const property = input[key];
         formData.append(
           key,
@@ -582,11 +733,15 @@ export class HttpClient<SecurityDataType = unknown> {
               : `${property}`,
         );
         return formData;
-      }, new FormData()),
+      }, new FormData());
+    },
     [ContentType.UrlEncoded]: (input: any) => this.toQueryString(input),
   };
 
-  protected mergeRequestParams(params1: RequestParams, params2?: RequestParams): RequestParams {
+  protected mergeRequestParams(
+    params1: RequestParams,
+    params2?: RequestParams,
+  ): RequestParams {
     return {
       ...this.baseApiParams,
       ...params1,
@@ -599,7 +754,9 @@ export class HttpClient<SecurityDataType = unknown> {
     };
   }
 
-  protected createAbortSignal = (cancelToken: CancelToken): AbortSignal | undefined => {
+  protected createAbortSignal = (
+    cancelToken: CancelToken,
+  ): AbortSignal | undefined => {
     if (this.abortControllers.has(cancelToken)) {
       const abortController = this.abortControllers.get(cancelToken);
       if (abortController) {
@@ -643,22 +800,34 @@ export class HttpClient<SecurityDataType = unknown> {
     const payloadFormatter = this.contentFormatters[type || ContentType.Json];
     const responseFormat = format || requestParams.format;
 
-    return this.customFetch(`${baseUrl || this.baseUrl || ""}${path}${queryString ? `?${queryString}` : ""}`, {
-      ...requestParams,
-      headers: {
-        ...(requestParams.headers || {}),
-        ...(type && type !== ContentType.FormData ? { "Content-Type": type } : {}),
+    return this.customFetch(
+      `${baseUrl || this.baseUrl || ""}${path}${queryString ? `?${queryString}` : ""}`,
+      {
+        ...requestParams,
+        headers: {
+          ...(requestParams.headers || {}),
+          ...(type && type !== ContentType.FormData
+            ? { "Content-Type": type }
+            : {}),
+        },
+        signal:
+          (cancelToken
+            ? this.createAbortSignal(cancelToken)
+            : requestParams.signal) || null,
+        body:
+          typeof body === "undefined" || body === null
+            ? null
+            : payloadFormatter(body),
       },
-      signal: (cancelToken ? this.createAbortSignal(cancelToken) : requestParams.signal) || null,
-      body: typeof body === "undefined" || body === null ? null : payloadFormatter(body),
-    }).then(async (response) => {
-      const r = response.clone() as HttpResponse<T, E>;
+    ).then(async (response) => {
+      const r = response as HttpResponse<T, E>;
       r.data = null as unknown as T;
       r.error = null as unknown as E;
 
+      const responseToParse = responseFormat ? response.clone() : response;
       const data = !responseFormat
         ? r
-        : await response[responseFormat]()
+        : await responseToParse[responseFormat]()
             .then((data) => {
               if (r.ok) {
                 r.data = data;
@@ -683,11 +852,13 @@ export class HttpClient<SecurityDataType = unknown> {
 }
 
 /**
- * @title Live Tram API
+ * @title Omniviv API
  * @version 0.1.0
  * @license
  */
-export class Api<SecurityDataType extends unknown> extends HttpClient<SecurityDataType> {
+export class Api<
+  SecurityDataType extends unknown,
+> extends HttpClient<SecurityDataType> {
   api = {
     /**
      * No description
@@ -757,13 +928,16 @@ export class Api<SecurityDataType extends unknown> extends HttpClient<SecurityDa
      * No description
      *
      * @tags departures
-     * @name GetDeparturesByStop
-     * @summary Get departures for a specific stop by IFOPT ID
-     * @request POST:/api/departures/by-stop
+     * @name GetDeparturesByGtfsStop
+     * @summary Get departures for a specific GTFS stop by its stop_id, bypassing IFOPT mapping
+     * @request POST:/api/departures/by-gtfs-stop
      */
-    getDeparturesByStop: (data: StopDeparturesRequest, params: RequestParams = {}) =>
-      this.request<StopDeparturesResponse, ErrorResponse>({
-        path: `/api/departures/by-stop`,
+    getDeparturesByGtfsStop: (
+      data: GtfsStopDeparturesRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<GtfsStopDeparturesResponse, ErrorResponse>({
+        path: `/api/departures/by-gtfs-stop`,
         method: "POST",
         body: data,
         type: ContentType.Json,
@@ -775,16 +949,94 @@ export class Api<SecurityDataType extends unknown> extends HttpClient<SecurityDa
      * No description
      *
      * @tags departures
-     * @name GetDeparturesByGtfsStop
-     * @summary Get departures for a specific GTFS stop by its stop_id
-     * @request POST:/api/departures/by-gtfs-stop
+     * @name GetDeparturesByStop
+     * @summary Get departures for a specific stop by IFOPT ID
+     * @request POST:/api/departures/by-stop
      */
-    getDeparturesByGtfsStop: (data: GtfsStopDeparturesRequest, params: RequestParams = {}) =>
-      this.request<GtfsStopDeparturesResponse, ErrorResponse>({
-        path: `/api/departures/by-gtfs-stop`,
+    getDeparturesByStop: (
+      data: StopDeparturesRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<StopDeparturesResponse, ErrorResponse>({
+        path: `/api/departures/by-stop`,
         method: "POST",
         body: data,
         type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Returns GTFS stops with coordinates. By default, only returns leaf stops (stops that have actual departures). Use the bounding box parameters to filter by geographic area.
+     *
+     * @tags gtfs-stops
+     * @name ListGtfsStops
+     * @summary List GTFS stops
+     * @request GET:/api/gtfs-stops
+     */
+    listGtfsStops: (
+      query?: {
+        /** Comma-separated list of stop IDs to fetch */
+        stop_ids?: string | null;
+        /** Case-insensitive substring search on stop name */
+        search?: string | null;
+        /**
+         * Minimum latitude for bounding box filter
+         * @format double
+         */
+        min_lat?: number | null;
+        /**
+         * Maximum latitude for bounding box filter
+         * @format double
+         */
+        max_lat?: number | null;
+        /**
+         * Minimum longitude for bounding box filter
+         * @format double
+         */
+        min_lon?: number | null;
+        /**
+         * Maximum longitude for bounding box filter
+         * @format double
+         */
+        max_lon?: number | null;
+        /** Filter by parent station ID */
+        parent_station?: string | null;
+        /** Only return leaf stops (stops that have trips visiting them) */
+        leaf_only?: boolean;
+        /**
+         * Offset for pagination (default: 0)
+         * @min 0
+         */
+        offset?: number;
+        /**
+         * Maximum number of results to return (default: 100, max: 1000)
+         * @min 0
+         */
+        limit?: number;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<GtfsStopsListResponse, any>({
+        path: `/api/gtfs-stops`,
+        method: "GET",
+        query: query,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags health
+     * @name HealthCheck
+     * @summary Health check endpoint
+     * @request GET:/api/health
+     */
+    healthCheck: (params: RequestParams = {}) =>
+      this.request<HealthResponse, any>({
+        path: `/api/health`,
+        method: "GET",
         format: "json",
         ...params,
       }),
@@ -801,6 +1053,60 @@ export class Api<SecurityDataType extends unknown> extends HttpClient<SecurityDa
       this.request<IssueListResponse, any>({
         path: `/api/issues`,
         method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Only removes manual (user-curated) mappings. The IFOPT will be re-matched automatically on the next auto-rebuild cycle.
+     *
+     * @tags mapping
+     * @name RemoveMapping
+     * @summary Remove a manual IFOPT-to-GTFS stop mapping
+     * @request POST:/api/mapping/remove
+     */
+    removeMapping: (data: RemoveMappingRequest, params: RequestParams = {}) =>
+      this.request<RemoveMappingResponse, void>({
+        path: `/api/mapping/remove`,
+        method: "POST",
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Creates or replaces a mapping for the given IFOPT with a user-curated GTFS stop assignment. Manual mappings are preserved across auto-rebuild cycles.
+     *
+     * @tags mapping
+     * @name SetMapping
+     * @summary Set a manual IFOPT-to-GTFS stop mapping
+     * @request POST:/api/mapping/set
+     */
+    setMapping: (data: SetMappingRequest, params: RequestParams = {}) =>
+      this.request<SetMappingResponse, void>({
+        path: `/api/mapping/set`,
+        method: "POST",
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Returns a summary of IFOPT-to-GTFS mapping statistics and a paginated list of mapping entries. Each entry includes the OSM stop info, current mapping status, and optionally nearby GTFS candidate stops.
+     *
+     * @tags mapping
+     * @name MappingStatus
+     * @summary Get mapping status overview with optional candidates
+     * @request POST:/api/mapping/status
+     */
+    mappingStatus: (data: MappingStatusRequest, params: RequestParams = {}) =>
+      this.request<MappingStatusResponse, void>({
+        path: `/api/mapping/status`,
+        method: "POST",
+        body: data,
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -899,63 +1205,12 @@ export class Api<SecurityDataType extends unknown> extends HttpClient<SecurityDa
      * @summary Get all vehicles currently on a route with their stop sequences
      * @request POST:/api/vehicles/by-route
      */
-    getVehiclesByRoute: (data: VehiclesByRouteRequest, params: RequestParams = {}) =>
+    getVehiclesByRoute: (
+      data: VehiclesByRouteRequest,
+      params: RequestParams = {},
+    ) =>
       this.request<VehiclesByRouteResponse, ErrorResponse>({
         path: `/api/vehicles/by-route`,
-        method: "POST",
-        body: data,
-        type: ContentType.Json,
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags mapping
-     * @name SetMapping
-     * @summary Set a manual IFOPT-to-GTFS stop mapping
-     * @request POST:/api/mapping/set
-     */
-    setMapping: (data: SetMappingRequest, params: RequestParams = {}) =>
-      this.request<SetMappingResponse, ErrorResponse>({
-        path: `/api/mapping/set`,
-        method: "POST",
-        body: data,
-        type: ContentType.Json,
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags mapping
-     * @name RemoveMapping
-     * @summary Remove a manual IFOPT-to-GTFS stop mapping
-     * @request POST:/api/mapping/remove
-     */
-    removeMapping: (data: RemoveMappingRequest, params: RequestParams = {}) =>
-      this.request<RemoveMappingResponse, ErrorResponse>({
-        path: `/api/mapping/remove`,
-        method: "POST",
-        body: data,
-        type: ContentType.Json,
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags mapping
-     * @name MappingStatus
-     * @summary Get mapping status overview with optional candidates
-     * @request POST:/api/mapping/status
-     */
-    mappingStatus: (data: MappingStatusRequest, params: RequestParams = {}) =>
-      this.request<MappingStatusResponse, ErrorResponse>({
-        path: `/api/mapping/status`,
         method: "POST",
         body: data,
         type: ContentType.Json,

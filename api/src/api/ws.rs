@@ -35,15 +35,13 @@ impl WsError {
                 tracing::error!(error = %e, context, "WebSocket database error");
             }
         }
-        format!("{}: {}", context, self)
+        context.to_string()
     }
 }
 
 /// Maximum number of routes a single WebSocket client can subscribe to
 const MAX_ROUTE_SUBSCRIPTIONS: usize = 100;
 
-/// Time threshold in seconds - if reference time is within this of now, treat as real-time
-const REALTIME_THRESHOLD_SECONDS: i64 = 180;
 
 #[derive(Clone)]
 pub struct WsState {
@@ -107,6 +105,7 @@ fn compute_vehicle_hash(vehicle: &Vehicle) -> u64 {
     vehicle.trip_id.hash(&mut hasher);
     vehicle.line_number.hash(&mut hasher);
     vehicle.destination.hash(&mut hasher);
+    vehicle.next_trip_id.hash(&mut hasher);
     for stop in &vehicle.stops {
         stop.stop_ifopt.hash(&mut hasher);
         stop.delay_minutes.hash(&mut hasher);
@@ -309,7 +308,10 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(skipped = n, "WebSocket broadcast lagged, skipped updates");
+                            continue;
+                        }
                     }
                 }
             }
@@ -509,6 +511,7 @@ async fn build_vehicle_data(
                 Err(_) => HashMap::new(),
             }
         } else {
+            // Start with real-time departure store
             let store = state.departure_store.read().await;
             let mut result: HashMap<String, Vec<crate::sync::Departure>> = HashMap::new();
 
@@ -530,6 +533,41 @@ async fn build_vehicle_data(
                     }
                 }
             }
+            drop(store);
+
+            // Only supplement with schedule data when RT store is empty for this route.
+            if result.is_empty() {
+                let stop_ids: HashSet<String> = stop_ifopts.iter().map(|s| s.to_string()).collect();
+                if let Ok(schedule) = static_data::build_schedule_from_db(&state.pool, &stop_ids).await {
+                    let ref_time = Utc::now();
+                    let time_horizon = Duration::minutes(state.time_horizon_minutes as i64);
+                    let all_departures = realtime::compute_schedule_departures(
+                        &schedule,
+                        &stop_ids,
+                        ref_time,
+                        time_horizon,
+                        state.timezone,
+                    );
+
+                    for ifopt in &stop_ifopts {
+                        if let Some(departures) = all_departures.get(*ifopt) {
+                            for dep in departures {
+                                let trip_id = match &dep.trip_id {
+                                    Some(id) => id,
+                                    None => continue,
+                                };
+                                if let Some(ref line_ref) = route_info.line_ref {
+                                    if &dep.line_number != line_ref {
+                                        continue;
+                                    }
+                                }
+                                result.entry(trip_id.clone()).or_default().push(dep.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
             result
         };
 
@@ -538,6 +576,11 @@ async fn build_vehicle_data(
             .into_iter()
             .filter_map(|(trip_id, departures)| {
                 if departures.is_empty() {
+                    return None;
+                }
+
+                // Skip cancelled trips
+                if departures.iter().any(|d| d.cancelled) {
                     return None;
                 }
 
@@ -604,9 +647,12 @@ async fn build_vehicle_data(
                     destination,
                     origin,
                     stops,
+                    next_trip_id: None,
                 })
             })
             .collect();
+
+        crate::api::vehicles::link_consecutive_trips(&mut vehicles);
 
         vehicles.sort_by(|a, b| {
             let time_a = a.stops.first().and_then(|s| s.departure_time.as_ref());
@@ -624,17 +670,5 @@ async fn build_vehicle_data(
     Ok(results)
 }
 
-/// Parse a reference_time string from a WebSocket message.
-fn parse_ws_reference_time(reference_time: &Option<String>) -> Option<DateTime<Utc>> {
-    let rt = reference_time.as_ref()?;
-    let parsed = DateTime::parse_from_rfc3339(rt).ok()?;
-    let dt = parsed.with_timezone(&Utc);
-
-    // If the reference time is within threshold of now, treat it as real-time
-    let diff = (dt - Utc::now()).num_seconds().abs();
-    if diff < REALTIME_THRESHOLD_SECONDS {
-        return None;
-    }
-    Some(dt)
-}
+use super::utils::parse_reference_time as parse_ws_reference_time;
 

@@ -4,23 +4,17 @@ use std::path::{Path, PathBuf};
 use chrono::{Datelike, NaiveDate, Weekday};
 use futures::StreamExt;
 use sqlx::PgPool;
-use strsim::jaro_winkler;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
 
 use super::error::GtfsError;
-use crate::sync::MatchCandidate;
+use crate::config::TransportType;
+use crate::sync::{transport_type_from_route, MatchCandidate};
 
 // --- Matching algorithm constants ---
 
-/// Maximum distance in meters for matching OSM stops to GTFS stops
-const MAX_DISTANCE_METERS: f64 = 200.0;
-/// Minimum combined score for a match to be considered valid
-const MIN_COMBINED_SCORE: f64 = 0.5;
-/// Weight for distance score in combined score (0.0-1.0)
-const DISTANCE_WEIGHT: f64 = 0.4;
-/// Weight for name similarity in combined score (0.0-1.0)
-const NAME_WEIGHT: f64 = 0.6;
+/// Maximum distance in meters for proximity pre-filter
+const MAX_DISTANCE_METERS: f64 = 500.0;
 
 /// Maximum allowed download size for GTFS zip (500 MB)
 const MAX_DOWNLOAD_SIZE: u64 = 500 * 1024 * 1024;
@@ -39,6 +33,170 @@ pub struct OsmStopInfo {
     pub lon: f64,
 }
 
+/// A route identifier combining line reference and transport type.
+/// Used for comparing which routes serve a given stop in OSM vs GTFS.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RouteIdentifier {
+    /// Normalized line number (e.g., "1", "3", "N5")
+    pub(crate) line_ref: String,
+    /// Transport type to disambiguate same line number across modes
+    pub(crate) transport_type: TransportType,
+}
+
+/// Check if two route sets form a definitive match.
+/// Returns (is_definitive, shared_routes) where is_definitive is true
+/// when the intersection is non-empty AND one set is a subset of the other.
+fn is_definitive_match(
+    osm: &HashSet<RouteIdentifier>,
+    gtfs: &HashSet<RouteIdentifier>,
+) -> (bool, Vec<RouteIdentifier>) {
+    let intersection: Vec<_> = osm.intersection(gtfs).cloned().collect();
+    if intersection.is_empty() {
+        return (false, vec![]);
+    }
+    // Any non-empty intersection is a match. OSM and GTFS often have
+    // different data quality (seasonal trams, agency-specific bus lines),
+    // so requiring strict subset is too restrictive. The proximity pre-filter
+    // (500m) already limits candidates, and shared routes confirm identity.
+    (true, intersection)
+}
+
+/// Bulk-load OSM route sets from the database.
+/// Returns:
+/// - route_sets: IFOPT → set of RouteIdentifiers (for definitive match testing)
+/// - directional_routes: IFOPT → set of OSM route osm_ids (for direction disambiguation)
+async fn load_osm_route_sets(
+    pool: &PgPool,
+) -> Result<
+    (
+        HashMap<String, HashSet<RouteIdentifier>>,
+        HashMap<String, HashSet<i64>>,
+    ),
+    GtfsError,
+> {
+    let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT
+            COALESCE(p.ref_ifopt, sp.ref_ifopt) AS ifopt,
+            r.ref AS line_ref,
+            r.route_type,
+            r.osm_id
+        FROM route_stops rs
+        JOIN routes r ON r.osm_id = rs.route_id
+        LEFT JOIN platforms p ON p.osm_id = rs.platform_id
+        LEFT JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+        WHERE r.ref IS NOT NULL
+        AND (p.ref_ifopt IS NOT NULL OR sp.ref_ifopt IS NOT NULL)
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+    let mut directional_routes: HashMap<String, HashSet<i64>> = HashMap::new();
+    for (ifopt, line_ref, route_type, osm_id) in rows {
+        let transport_type = transport_type_from_route(&route_type);
+        route_sets
+            .entry(ifopt.clone())
+            .or_default()
+            .insert(RouteIdentifier {
+                line_ref,
+                transport_type,
+            });
+        directional_routes
+            .entry(ifopt)
+            .or_default()
+            .insert(osm_id);
+    }
+
+    info!(
+        ifopts_with_routes = route_sets.len(),
+        "Loaded OSM route sets for matching"
+    );
+    Ok((route_sets, directional_routes))
+}
+
+/// Batch-load GTFS trip sets for given stop IDs.
+/// Returns stop_id → set of trip_ids that visit that stop.
+async fn load_gtfs_trip_sets(
+    pool: &PgPool,
+    stop_ids: &[&str],
+) -> Result<HashMap<String, HashSet<String>>, GtfsError> {
+    if stop_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Batch in chunks to avoid SQL parameter limits
+    let mut result: HashMap<String, HashSet<String>> = HashMap::new();
+    for chunk in stop_ids.chunks(500) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("${i}")).collect();
+        let query = format!(
+            "SELECT stop_id, trip_id FROM gtfs_stop_times WHERE stop_id IN ({})",
+            placeholders.join(", ")
+        );
+
+        let mut q = sqlx::query_as::<_, (String, String)>(&query);
+        for &id in chunk {
+            q = q.bind(id);
+        }
+
+        let rows = q.fetch_all(pool).await?;
+        for (stop_id, trip_id) in rows {
+            result.entry(stop_id).or_default().insert(trip_id);
+        }
+    }
+
+    info!(
+        gtfs_stops_with_trips = result.len(),
+        "Loaded GTFS trip sets for direction matching"
+    );
+    Ok(result)
+}
+
+/// Batch-load GTFS route sets for given stop IDs.
+/// Returns a map from GTFS stop_id to the set of routes serving that stop.
+async fn load_gtfs_route_sets(
+    pool: &PgPool,
+    stop_ids: &[&str],
+) -> Result<HashMap<String, HashSet<RouteIdentifier>>, GtfsError> {
+    let mut result: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+
+    // Process in batches of 5000
+    for batch in stop_ids.chunks(5000) {
+        let batch_vec: Vec<&str> = batch.to_vec();
+        let rows: Vec<(String, String, i32)> = sqlx::query_as(
+            r#"
+            SELECT DISTINCT st.stop_id, gr.route_short_name, gr.route_type
+            FROM gtfs_stop_times st
+            JOIN gtfs_trips gt ON gt.trip_id = st.trip_id
+            JOIN gtfs_routes gr ON gr.route_id = gt.route_id
+            WHERE st.stop_id = ANY($1::text[])
+            AND gr.route_short_name IS NOT NULL
+            "#,
+        )
+        .bind(&batch_vec)
+        .fetch_all(pool)
+        .await?;
+
+        for (stop_id, route_short_name, route_type) in rows {
+            let transport_type = TransportType::from_gtfs_route_type(route_type);
+            result
+                .entry(stop_id)
+                .or_default()
+                .insert(RouteIdentifier {
+                    line_ref: route_short_name,
+                    transport_type,
+                });
+        }
+    }
+
+    info!(
+        gtfs_stops_with_routes = result.len(),
+        "Loaded GTFS route sets for matching"
+    );
+    Ok(result)
+}
+
 /// Statistics from the IFOPT <-> GTFS stop ID mapping operation.
 /// Used for issue reporting and monitoring.
 #[derive(Debug, Clone)]
@@ -54,17 +212,28 @@ pub(crate) struct MappingStats {
     pub(crate) unmatched_gtfs: Vec<UnmatchedGtfsStop>,
 }
 
-/// An OSM stop that wasn't matched to any GTFS stop (or had low confidence)
+/// An OSM stop that wasn't matched to any GTFS stop
 #[derive(Debug, Clone)]
 pub(crate) struct UnmatchedOsmStop {
     pub(crate) ifopt: String,
     pub(crate) name: Option<String>,
     pub(crate) lat: f64,
     pub(crate) lon: f64,
-    /// Candidate matches with scores (may be empty if no candidates within range)
+    /// Candidate matches for diagnostics (may be empty if no candidates within range)
     pub(crate) candidates: Vec<MatchCandidate>,
-    /// Whether this is a no-match (no candidates) or low-confidence match
-    pub(crate) is_low_confidence: bool,
+    /// Reason why no match was made
+    pub(crate) reason: UnmatchedReason,
+}
+
+/// Reason why an OSM stop could not be matched
+#[derive(Debug, Clone)]
+pub enum UnmatchedReason {
+    /// No route data available for this OSM stop
+    NoRouteData,
+    /// No definitive candidate found (0 candidates passed subset test)
+    NoDefinitiveCandidate,
+    /// Multiple definitive candidates found (ambiguous)
+    AmbiguousMatch,
 }
 
 /// A GTFS stop that wasn't matched to any OSM/DB stop
@@ -164,8 +333,8 @@ pub struct GtfsSchedule {
     pub trips_by_stop: HashMap<String, HashSet<String>>,
     /// IFOPT -> list of matching GTFS stop_ids (built after loading via spatial matching)
     pub ifopt_to_gtfs: HashMap<String, Vec<String>>,
-    /// GTFS stop_id -> IFOPT (reverse mapping)
-    pub gtfs_to_ifopt: HashMap<String, String>,
+    /// GTFS stop_id -> IFOPTs (reverse mapping, multiple IFOPTs can share a GTFS stop)
+    pub gtfs_to_ifopt: HashMap<String, Vec<String>>,
     pub loaded_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -211,7 +380,7 @@ impl GtfsSchedule {
         Some(
             self.gtfs_to_ifopt
                 .get(&last_stop.stop_id)
-                .cloned()
+                .and_then(|ifopts| ifopts.first().cloned())
                 .unwrap_or_else(|| last_stop.stop_id.clone()),
         )
     }
@@ -224,15 +393,40 @@ impl GtfsSchedule {
             .and_then(|s| s.stop_name.clone())
     }
 
-    /// Build the IFOPT <-> GTFS stop ID mapping using spatial and name-based matching.
+    /// Build the IFOPT <-> GTFS stop ID mapping using deterministic route-set comparison.
     ///
-    /// For each provided OSM stop (with IFOPT, name, lat/lon), finds matching GTFS stops
-    /// within MAX_DISTANCE_METERS using a combined score of distance and name similarity.
-    /// Only matches leaf stops (those with a parent_station or appearing in stop_times).
+    /// For each OSM stop with route data, finds GTFS stops within MAX_DISTANCE_METERS
+    /// and checks if route sets form a definitive match (one is a subset of the other
+    /// with non-empty intersection). When multiple definitive candidates exist (common
+    /// for stations with multiple platforms serving the same routes), the closest one
+    /// by distance is chosen. Stops without route data are left unmatched.
     ///
     /// Returns statistics about the mapping for issue reporting.
     #[cfg(test)]
-    pub(crate) fn build_ifopt_mapping(&mut self, osm_stops: &[OsmStopInfo]) -> MappingStats {
+    pub(crate) fn build_ifopt_mapping(
+        &mut self,
+        osm_stops: &[OsmStopInfo],
+        osm_route_sets: &HashMap<String, HashSet<RouteIdentifier>>,
+        gtfs_route_sets: &HashMap<String, HashSet<RouteIdentifier>>,
+    ) -> MappingStats {
+        self.build_ifopt_mapping_with_direction(
+            osm_stops,
+            osm_route_sets,
+            gtfs_route_sets,
+            &HashMap::new(),
+        )
+    }
+
+    /// Direction-aware IFOPT mapping for tests that need to verify direction disambiguation.
+    /// Uses trip overlap from `self.trips_by_stop` to determine direction.
+    #[cfg(test)]
+    pub(crate) fn build_ifopt_mapping_with_direction(
+        &mut self,
+        osm_stops: &[OsmStopInfo],
+        osm_route_sets: &HashMap<String, HashSet<RouteIdentifier>>,
+        gtfs_route_sets: &HashMap<String, HashSet<RouteIdentifier>>,
+        osm_directional_routes: &HashMap<String, HashSet<i64>>,
+    ) -> MappingStats {
         self.ifopt_to_gtfs.clear();
         self.gtfs_to_ifopt.clear();
 
@@ -258,21 +452,65 @@ impl GtfsSchedule {
 
         let max_dist_deg = MAX_DISTANCE_METERS / 111_000.0;
         let max_dist_sq = max_dist_deg * max_dist_deg;
+        let empty_route_set = HashSet::new();
+        let empty_osm_id_set: HashSet<i64> = HashSet::new();
 
-        // Pass 1: Compute all candidates per IFOPT
+        // Build reverse index: OSM route osm_id → IFOPTs on that route
+        let mut osm_route_to_ifopts: HashMap<i64, Vec<String>> = HashMap::new();
+        for (ifopt, osm_ids) in osm_directional_routes {
+            for &osm_id in osm_ids {
+                osm_route_to_ifopts
+                    .entry(osm_id)
+                    .or_default()
+                    .push(ifopt.clone());
+            }
+        }
+
         struct IfoptEntry<'a> {
             ifopt: &'a str,
             name: &'a Option<String>,
             lat: f64,
             lon: f64,
             candidates: Vec<MatchCandidate>,
+            reason: UnmatchedReason,
         }
 
-        let mut all_entries: Vec<IfoptEntry> = Vec::new();
-        // (entry_idx, candidate_idx, score)
-        let mut scored_pairs: Vec<(usize, usize, f64)> = Vec::new();
+        // Pass 1: Collect all candidates for each OSM stop
+        struct PendingMatch<'a> {
+            ifopt: &'a str,
+            name: &'a Option<String>,
+            lat: f64,
+            lon: f64,
+            candidates: Vec<MatchCandidate>,
+            /// Distance to closest definitive candidate (for processing order)
+            best_distance: f64,
+        }
+
+        let mut no_route_entries: Vec<IfoptEntry> = Vec::new();
+        let mut pending: Vec<PendingMatch> = Vec::new();
+        let mut seen_ifopts: HashSet<&str> = HashSet::new();
 
         for osm_stop in osm_stops {
+            // Skip duplicate IFOPT entries (same IFOPT may appear from both platforms and stop_positions)
+            if !seen_ifopts.insert(&osm_stop.ifopt) {
+                continue;
+            }
+            let osm_routes = osm_route_sets
+                .get(&osm_stop.ifopt)
+                .unwrap_or(&empty_route_set);
+
+            if osm_routes.is_empty() {
+                no_route_entries.push(IfoptEntry {
+                    ifopt: &osm_stop.ifopt,
+                    name: &osm_stop.name,
+                    lat: osm_stop.lat,
+                    lon: osm_stop.lon,
+                    candidates: vec![],
+                    reason: UnmatchedReason::NoRouteData,
+                });
+                continue;
+            }
+
             let mut candidates: Vec<MatchCandidate> = Vec::new();
 
             for &(gtfs_id, glat, glon, gtfs_name) in &gtfs_leaf_stops {
@@ -282,108 +520,267 @@ impl GtfsSchedule {
 
                 if dist_sq < max_dist_sq {
                     let distance_meters = (dist_sq.sqrt()) * 111_000.0;
-                    let distance_score = 1.0 - (distance_meters / MAX_DISTANCE_METERS).min(1.0);
 
-                    let name_similarity = match (&osm_stop.name, gtfs_name) {
-                        (Some(osm_name), Some(gtfs_name_str)) => {
-                            let osm_normalized = normalize_stop_name(osm_name);
-                            let gtfs_normalized = normalize_stop_name(gtfs_name_str);
-                            jaro_winkler(&osm_normalized, &gtfs_normalized)
-                        }
-                        _ => 0.5,
-                    };
+                    let gtfs_routes = gtfs_route_sets
+                        .get(gtfs_id)
+                        .unwrap_or(&empty_route_set);
+                    let (definitive, shared) = is_definitive_match(osm_routes, gtfs_routes);
 
-                    let combined_score =
-                        DISTANCE_WEIGHT * distance_score + NAME_WEIGHT * name_similarity;
+                    let shared_routes: Vec<String> = shared
+                        .iter()
+                        .map(|r| format!("{:?} {}", r.transport_type, r.line_ref))
+                        .collect();
 
-                    if combined_score >= MIN_COMBINED_SCORE {
-                        candidates.push(MatchCandidate {
-                            gtfs_stop_id: gtfs_id.to_string(),
-                            gtfs_stop_name: gtfs_name.map(String::from),
-                            distance_meters,
-                            distance_score,
-                            name_similarity,
-                            combined_score,
-                        });
-                    }
+                    candidates.push(MatchCandidate {
+                        gtfs_stop_id: gtfs_id.to_string(),
+                        gtfs_stop_name: gtfs_name.map(String::from),
+                        distance_meters,
+                        shared_routes,
+                        is_definitive: definitive,
+                    });
                 }
             }
 
-            candidates.sort_by(|a, b| {
-                b.combined_score
-                    .partial_cmp(&a.combined_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            let best_distance = candidates
+                .iter()
+                .filter(|c| c.is_definitive)
+                .map(|c| c.distance_meters)
+                .fold(f64::MAX, f64::min);
 
-            // Record scored_pairs AFTER sort so indices remain valid
-            let entry_idx = all_entries.len();
-            for (cidx, c) in candidates.iter().enumerate() {
-                scored_pairs.push((entry_idx, cidx, c.combined_score));
-            }
-
-            all_entries.push(IfoptEntry {
+            pending.push(PendingMatch {
                 ifopt: &osm_stop.ifopt,
                 name: &osm_stop.name,
                 lat: osm_stop.lat,
                 lon: osm_stop.lon,
                 candidates,
+                best_distance,
             });
         }
 
-        // Pass 2: Greedy 1:1 assignment — best score wins, with deterministic tiebreaking
-        scored_pairs.sort_by(|a, b| {
-            b.2.partial_cmp(&a.2)
+        // Pass 2: Sort by distance to closest definitive candidate (ascending).
+        // Stops nearest their best GTFS match get first pick, preventing a farther
+        // stop from stealing a closer stop's optimal match.
+        pending.sort_by(|a, b| {
+            a.best_distance
+                .partial_cmp(&b.best_distance)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    // Tiebreak: prefer lower IFOPT, then lower GTFS stop ID
-                    let a_entry = &all_entries[a.0];
-                    let b_entry = &all_entries[b.0];
-                    a_entry.ifopt.cmp(b_entry.ifopt).then_with(|| {
-                        a_entry.candidates[a.1]
-                            .gtfs_stop_id
-                            .cmp(&b_entry.candidates[b.1].gtfs_stop_id)
-                    })
-                })
         });
 
+        let mut all_entries: Vec<IfoptEntry> = Vec::new();
         let mut claimed_ifopts: HashSet<String> = HashSet::new();
         let mut claimed_gtfs: HashSet<String> = HashSet::new();
 
-        for (entry_idx, cand_idx, _) in &scored_pairs {
-            let entry = &all_entries[*entry_idx];
-            let candidate = &entry.candidates[*cand_idx];
+        // Direction-aware matching with cascading peer propagation.
+        // Each iteration picks the platform with the most matched peers, matches it,
+        // then re-sorts. Correct direction signal cascades from cross-line seed stations.
+        let mut to_process: Vec<PendingMatch> = pending;
 
-            if claimed_ifopts.contains(entry.ifopt) || claimed_gtfs.contains(&candidate.gtfs_stop_id) {
-                continue;
+        loop {
+            if to_process.is_empty() {
+                break;
             }
 
-            self.ifopt_to_gtfs
-                .insert(entry.ifopt.to_string(), vec![candidate.gtfs_stop_id.clone()]);
-            self.gtfs_to_ifopt
-                .insert(candidate.gtfs_stop_id.clone(), entry.ifopt.to_string());
+            // Sort: most peers first, then distance
+            to_process.sort_by(|a, b| {
+                let a_peers = osm_directional_routes
+                    .get(a.ifopt)
+                    .unwrap_or(&empty_osm_id_set)
+                    .iter()
+                    .flat_map(|rid| osm_route_to_ifopts.get(rid).into_iter().flatten())
+                    .filter(|pi| self.ifopt_to_gtfs.contains_key(pi.as_str()))
+                    .count();
+                let b_peers = osm_directional_routes
+                    .get(b.ifopt)
+                    .unwrap_or(&empty_osm_id_set)
+                    .iter()
+                    .flat_map(|rid| osm_route_to_ifopts.get(rid).into_iter().flatten())
+                    .filter(|pi| self.ifopt_to_gtfs.contains_key(pi.as_str()))
+                    .count();
+                b_peers.cmp(&a_peers).then_with(|| {
+                    a.best_distance
+                        .partial_cmp(&b.best_distance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            });
 
-            claimed_ifopts.insert(entry.ifopt.to_string());
-            claimed_gtfs.insert(candidate.gtfs_stop_id.clone());
+            let entry = to_process.remove(0);
+
+            let platform_osm_ids = osm_directional_routes
+                .get(entry.ifopt)
+                .unwrap_or(&empty_osm_id_set);
+
+            let mut peer_gtfs_ids: Vec<String> = Vec::new();
+            for &route_id in platform_osm_ids {
+                if let Some(peer_ifopts) = osm_route_to_ifopts.get(&route_id) {
+                    for peer_ifopt in peer_ifopts {
+                        if let Some(gtfs_ids) = self.ifopt_to_gtfs.get(peer_ifopt.as_str()) {
+                            for peer_gtfs_id in gtfs_ids {
+                                peer_gtfs_ids.push(peer_gtfs_id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            peer_gtfs_ids.sort();
+            peer_gtfs_ids.dedup();
+
+            let mut definitive_candidates: Vec<&MatchCandidate> = entry
+                .candidates
+                .iter()
+                .filter(|c| c.is_definitive)
+                .collect();
+
+            if !definitive_candidates.is_empty() {
+                let nearest_distance = definitive_candidates
+                    .iter()
+                    .map(|c| c.distance_meters)
+                    .fold(f64::MAX, f64::min);
+                let max_fallback = (nearest_distance * 3.0).max(100.0).min(200.0);
+
+                // Sort by: trip overlap sum → distance → shared_routes
+                definitive_candidates.sort_by(|a, b| {
+                    let trip_cmp = if peer_gtfs_ids.is_empty() {
+                        std::cmp::Ordering::Equal
+                    } else {
+                        let empty_trips: HashSet<String> = HashSet::new();
+                        let a_overlap: usize = peer_gtfs_ids
+                            .iter()
+                            .map(|peer_id| {
+                                let peer_trips = self
+                                    .trips_by_stop
+                                    .get(peer_id)
+                                    .unwrap_or(&empty_trips);
+                                self.trips_by_stop
+                                    .get(&a.gtfs_stop_id)
+                                    .map(|ct| {
+                                        ct.iter()
+                                            .filter(|t| peer_trips.contains(*t))
+                                            .count()
+                                    })
+                                    .unwrap_or(0)
+                            })
+                            .sum();
+                        let b_overlap: usize = peer_gtfs_ids
+                            .iter()
+                            .map(|peer_id| {
+                                let peer_trips = self
+                                    .trips_by_stop
+                                    .get(peer_id)
+                                    .unwrap_or(&empty_trips);
+                                self.trips_by_stop
+                                    .get(&b.gtfs_stop_id)
+                                    .map(|ct| {
+                                        ct.iter()
+                                            .filter(|t| peer_trips.contains(*t))
+                                            .count()
+                                    })
+                                    .unwrap_or(0)
+                            })
+                            .sum();
+                        b_overlap.cmp(&a_overlap)
+                    };
+                    trip_cmp
+                        .then_with(|| {
+                            a.distance_meters
+                                .partial_cmp(&b.distance_meters)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .then_with(|| b.shared_routes.len().cmp(&a.shared_routes.len()))
+                });
+
+                let mut matched = false;
+                for winner in &definitive_candidates {
+                    if winner.distance_meters > max_fallback {
+                        continue;
+                    }
+                    if !claimed_gtfs.contains(&winner.gtfs_stop_id) {
+                        self.ifopt_to_gtfs.insert(
+                            entry.ifopt.to_string(),
+                            vec![winner.gtfs_stop_id.clone()],
+                        );
+                        self.gtfs_to_ifopt
+                            .entry(winner.gtfs_stop_id.clone())
+                            .or_default()
+                            .push(entry.ifopt.to_string());
+                        claimed_ifopts.insert(entry.ifopt.to_string());
+                        claimed_gtfs.insert(winner.gtfs_stop_id.clone());
+                        matched = true;
+                        break;
+                    }
+                }
+                if matched {
+                    continue; // Re-sort remaining with updated peers
+                }
+            }
+
+            let reason = if definitive_candidates.is_empty() {
+                UnmatchedReason::NoDefinitiveCandidate
+            } else {
+                UnmatchedReason::AmbiguousMatch
+            };
+
+            all_entries.push(IfoptEntry {
+                ifopt: entry.ifopt,
+                name: entry.name,
+                lat: entry.lat,
+                lon: entry.lon,
+                candidates: entry.candidates,
+                reason,
+            });
         }
+
+        // Station-level fallback: when the GTFS feed has a single stop for both
+        // directions at a station, allow unmapped sibling platforms to share it.
+        let mut station_fallback_matched = Vec::new();
+        for entry in &all_entries {
+            let station = station_level_ifopt(entry.ifopt);
+            // Find if a sibling platform at this station is already mapped
+            let sibling_gtfs: Option<String> = claimed_ifopts
+                .iter()
+                .filter(|ci| station_level_ifopt(ci) == station && *ci != entry.ifopt)
+                .find_map(|ci| self.ifopt_to_gtfs.get(ci.as_str()).and_then(|v| v.first().cloned()));
+
+            if let Some(sibling_gtfs_id) = sibling_gtfs {
+                // Only allow if this GTFS stop is a definitive (route-matching) candidate
+                if entry.candidates.iter().any(|c| c.gtfs_stop_id == sibling_gtfs_id && c.is_definitive) {
+                    station_fallback_matched.push((entry.ifopt.to_string(), sibling_gtfs_id));
+                }
+            }
+        }
+        for (ifopt, gtfs_id) in &station_fallback_matched {
+            self.ifopt_to_gtfs
+                .insert(ifopt.clone(), vec![gtfs_id.clone()]);
+            self.gtfs_to_ifopt
+                .entry(gtfs_id.clone())
+                .or_default()
+                .push(ifopt.clone());
+            claimed_ifopts.insert(ifopt.clone());
+        }
+        // Remove matched entries from unmatched list
+        all_entries.retain(|e| !station_fallback_matched.iter().any(|(ifopt, _)| ifopt == e.ifopt));
+        if !station_fallback_matched.is_empty() {
+            info!(
+                count = station_fallback_matched.len(),
+                "Station-level fallback: shared GTFS stops for sibling platforms"
+            );
+        }
+
+        all_entries.extend(no_route_entries);
 
         let matched = claimed_ifopts.len();
 
-        // Build unmatched lists
-        let mut unmatched_osm: Vec<UnmatchedOsmStop> = Vec::new();
-        for entry in &all_entries {
-            if claimed_ifopts.contains(entry.ifopt) {
-                continue;
-            }
-            let is_low_confidence = !entry.candidates.is_empty();
-            unmatched_osm.push(UnmatchedOsmStop {
+        // Build unmatched lists from entries that weren't matched
+        let unmatched_osm: Vec<UnmatchedOsmStop> = all_entries
+            .iter()
+            .map(|entry| UnmatchedOsmStop {
                 ifopt: entry.ifopt.to_string(),
                 name: entry.name.clone(),
                 lat: entry.lat,
                 lon: entry.lon,
                 candidates: entry.candidates.iter().take(5).cloned().collect(),
-                is_low_confidence,
-            });
-        }
+                reason: entry.reason.clone(),
+            })
+            .collect();
 
         let unmatched_gtfs: Vec<UnmatchedGtfsStop> = gtfs_leaf_stops
             .iter()
@@ -402,7 +799,7 @@ impl GtfsSchedule {
             matched,
             unmatched_osm = unmatched_osm.len(),
             unmatched_gtfs = unmatched_gtfs.len(),
-            "Built IFOPT <-> GTFS stop mapping (1:1 greedy)"
+            "Built IFOPT <-> GTFS stop mapping (deterministic route-based)"
         );
 
         MappingStats {
@@ -431,19 +828,27 @@ impl GtfsSchedule {
 
     /// Check if a GTFS stop_id maps to any of the given IFOPTs.
     pub fn is_gtfs_stop_relevant(&self, gtfs_stop_id: &str, ifopt_set: &HashSet<String>) -> bool {
-        if let Some(ifopt) = self.gtfs_to_ifopt.get(gtfs_stop_id) {
-            ifopt_set.contains(ifopt)
+        if let Some(ifopts) = self.gtfs_to_ifopt.get(gtfs_stop_id) {
+            ifopts.iter().any(|ifopt| ifopt_set.contains(ifopt))
         } else {
             false
         }
     }
 
-    /// Get the IFOPT for a GTFS stop_id, falling back to the raw stop_id.
+    /// Get the first IFOPT for a GTFS stop_id, falling back to the raw stop_id.
     pub fn ifopt_for_gtfs_stop(&self, gtfs_stop_id: &str) -> String {
         self.gtfs_to_ifopt
             .get(gtfs_stop_id)
-            .cloned()
+            .and_then(|ifopts| ifopts.first().cloned())
             .unwrap_or_else(|| gtfs_stop_id.to_string())
+    }
+
+    /// Get all IFOPTs for a GTFS stop_id (shared stops map to multiple platforms).
+    pub fn ifopts_for_gtfs_stop(&self, gtfs_stop_id: &str) -> Vec<String> {
+        self.gtfs_to_ifopt
+            .get(gtfs_stop_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -985,8 +1390,12 @@ pub async fn load_schedule_to_db(pool: &PgPool, zip_path: &Path) -> Result<(), G
 
 /// Build the IFOPT <-> GTFS stop ID mapping and store it in PostgreSQL.
 ///
-/// Fetches GTFS leaf stops from the database, runs the spatial + name matching
-/// algorithm against provided OSM stops, and stores results in `ifopt_gtfs_mapping`.
+/// Uses deterministic route-set comparison: matches only when route sets
+/// form a subset relationship with non-empty intersection, and exactly one
+/// such candidate exists. Stops without OSM route data are left unmatched.
+///
+/// Fetches GTFS leaf stops from the database, runs the matching algorithm
+/// against provided OSM stops, and stores results in `ifopt_gtfs_mapping`.
 /// Returns mapping statistics for issue reporting.
 pub(crate) async fn build_ifopt_mapping_to_db(
     pool: &PgPool,
@@ -1035,34 +1444,104 @@ pub(crate) async fn build_ifopt_mapping_to_db(
         info!(manual_count, "Preserving manual IFOPT mappings");
     }
 
-    // Two-pass greedy matching algorithm enforcing 1:1 IFOPT<->GTFS mapping
+    // Load OSM route sets (bulk, all IFOPTs) and directional route IDs
+    let (osm_route_sets, osm_directional_routes) = load_osm_route_sets(pool).await?;
+
     let max_dist_deg = MAX_DISTANCE_METERS / 111_000.0;
     let max_dist_sq = max_dist_deg * max_dist_deg;
+    let empty_route_set: HashSet<RouteIdentifier> = HashSet::new();
+    let empty_osm_id_set: HashSet<i64> = HashSet::new();
+    let empty_trip_set: HashSet<String> = HashSet::new();
 
-    // Pass 1: Compute all (IFOPT, candidates) pairs
-    // Store per-IFOPT candidates for later reporting of unmatched stops
+    // Proximity pre-filter: collect all GTFS stop IDs within range of any OSM stop
+    let mut proximity_gtfs_ids: HashSet<&str> = HashSet::new();
+    for osm_stop in osm_stops {
+        if manual_ifopts.contains(&osm_stop.ifopt) {
+            continue;
+        }
+        for &(gtfs_id, glat, glon, _) in &gtfs_candidates {
+            if manual_gtfs_ids.contains(gtfs_id) {
+                continue;
+            }
+            let dlat = osm_stop.lat - glat;
+            let dlon = (osm_stop.lon - glon) * (osm_stop.lat.to_radians().cos());
+            let dist_sq = dlat * dlat + dlon * dlon;
+            if dist_sq < max_dist_sq {
+                proximity_gtfs_ids.insert(gtfs_id);
+            }
+        }
+    }
+
+    // Load GTFS route sets only for stops that passed proximity pre-filter
+    let proximity_gtfs_vec: Vec<&str> = proximity_gtfs_ids.into_iter().collect();
+    let gtfs_route_sets = load_gtfs_route_sets(pool, &proximity_gtfs_vec).await?;
+
+    // Load GTFS trip sets for direction-aware matching via trip overlap
+    let gtfs_trip_sets = load_gtfs_trip_sets(pool, &proximity_gtfs_vec).await?;
+
+    // Build reverse index: OSM route osm_id → IFOPTs on that route
+    let mut osm_route_to_ifopts: HashMap<i64, Vec<String>> = HashMap::new();
+    for (ifopt, osm_ids) in &osm_directional_routes {
+        for &osm_id in osm_ids {
+            osm_route_to_ifopts
+                .entry(osm_id)
+                .or_default()
+                .push(ifopt.clone());
+        }
+    }
+
+    // Deterministic route-based matching
     struct IfoptCandidates {
         ifopt: String,
         name: Option<String>,
         lat: f64,
         lon: f64,
         candidates: Vec<MatchCandidate>,
+        reason: UnmatchedReason,
     }
 
-    let mut all_ifopt_candidates: Vec<IfoptCandidates> = Vec::new();
-    // Flat list of (ifopt_index, candidate_index, score) for global sorting
-    let mut scored_pairs: Vec<(usize, usize, f64)> = Vec::new();
+    // Pass 1: Collect all candidates for each OSM stop
+    struct PendingDbMatch {
+        ifopt: String,
+        name: Option<String>,
+        lat: f64,
+        lon: f64,
+        candidates: Vec<MatchCandidate>,
+        best_distance: f64,
+    }
+
+    let mut no_route_entries: Vec<IfoptCandidates> = Vec::new();
+    let mut pending: Vec<PendingDbMatch> = Vec::new();
+    let mut seen_ifopts: HashSet<String> = HashSet::new();
 
     for osm_stop in osm_stops {
-        // Skip IFOPTs that have manual mappings
         if manual_ifopts.contains(&osm_stop.ifopt) {
+            continue;
+        }
+        // Skip duplicate IFOPT entries (same IFOPT may appear from both platforms and stop_positions)
+        if !seen_ifopts.insert(osm_stop.ifopt.clone()) {
+            continue;
+        }
+
+        let osm_routes = osm_route_sets
+            .get(&osm_stop.ifopt)
+            .unwrap_or(&empty_route_set);
+
+        if osm_routes.is_empty() {
+            no_route_entries.push(IfoptCandidates {
+                ifopt: osm_stop.ifopt.clone(),
+                name: osm_stop.name.clone(),
+                lat: osm_stop.lat,
+                lon: osm_stop.lon,
+                candidates: vec![],
+                reason: UnmatchedReason::NoRouteData,
+            });
             continue;
         }
 
         let mut candidates: Vec<MatchCandidate> = Vec::new();
 
         for &(gtfs_id, glat, glon, gtfs_name) in &gtfs_candidates {
-            // Skip GTFS stops already claimed by manual mappings
             if manual_gtfs_ids.contains(gtfs_id) {
                 continue;
             }
@@ -1073,110 +1552,248 @@ pub(crate) async fn build_ifopt_mapping_to_db(
 
             if dist_sq < max_dist_sq {
                 let distance_meters = (dist_sq.sqrt()) * 111_000.0;
-                let distance_score = 1.0 - (distance_meters / MAX_DISTANCE_METERS).min(1.0);
 
-                let name_similarity = match (&osm_stop.name, gtfs_name) {
-                    (Some(osm_name), Some(gtfs_name_str)) => {
-                        let osm_normalized = normalize_stop_name(osm_name);
-                        let gtfs_normalized = normalize_stop_name(gtfs_name_str);
-                        jaro_winkler(&osm_normalized, &gtfs_normalized)
-                    }
-                    _ => 0.5,
-                };
+                let gtfs_routes = gtfs_route_sets
+                    .get(gtfs_id)
+                    .unwrap_or(&empty_route_set);
+                let (definitive, shared) = is_definitive_match(osm_routes, gtfs_routes);
 
-                let combined_score =
-                    DISTANCE_WEIGHT * distance_score + NAME_WEIGHT * name_similarity;
+                let shared_routes: Vec<String> = shared
+                    .iter()
+                    .map(|r| format!("{:?} {}", r.transport_type, r.line_ref))
+                    .collect();
 
-                if combined_score >= MIN_COMBINED_SCORE {
-                    candidates.push(MatchCandidate {
-                        gtfs_stop_id: gtfs_id.to_string(),
-                        gtfs_stop_name: gtfs_name.map(String::from),
-                        distance_meters,
-                        distance_score,
-                        name_similarity,
-                        combined_score,
-                    });
-                }
+                candidates.push(MatchCandidate {
+                    gtfs_stop_id: gtfs_id.to_string(),
+                    gtfs_stop_name: gtfs_name.map(String::from),
+                    distance_meters,
+                    shared_routes,
+                    is_definitive: definitive,
+                });
             }
         }
 
-        candidates.sort_by(|a, b| {
-            b.combined_score
-                .partial_cmp(&a.combined_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let best_distance = candidates
+            .iter()
+            .filter(|c| c.is_definitive)
+            .map(|c| c.distance_meters)
+            .fold(f64::MAX, f64::min);
 
-        // Record scored_pairs AFTER sort so indices remain valid
-        let entry_idx = all_ifopt_candidates.len();
-        for (cidx, c) in candidates.iter().enumerate() {
-            scored_pairs.push((entry_idx, cidx, c.combined_score));
-        }
-
-        all_ifopt_candidates.push(IfoptCandidates {
+        pending.push(PendingDbMatch {
             ifopt: osm_stop.ifopt.clone(),
             name: osm_stop.name.clone(),
             lat: osm_stop.lat,
             lon: osm_stop.lon,
             candidates,
+            best_distance,
         });
     }
 
-    // Pass 2: Greedy assignment — sort all pairs by score descending, assign best-first
-    scored_pairs.sort_by(|a, b| {
-        b.2.partial_cmp(&a.2)
+    // Pass 2: Sort by distance to closest definitive candidate (ascending).
+    // Stops nearest their best GTFS match get first pick.
+    pending.sort_by(|a, b| {
+        a.best_distance
+            .partial_cmp(&b.best_distance)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                // Deterministic tiebreak: prefer lower IFOPT, then lower GTFS stop ID
-                let a_entry = &all_ifopt_candidates[a.0];
-                let b_entry = &all_ifopt_candidates[b.0];
-                a_entry.ifopt.cmp(&b_entry.ifopt).then_with(|| {
-                    a_entry.candidates[a.1]
-                        .gtfs_stop_id
-                        .cmp(&b_entry.candidates[b.1].gtfs_stop_id)
-                })
-            })
     });
 
-    // ifopt -> (gtfs_stop_id, combined_score)
-    let mut mapping_results: HashMap<String, (String, f64)> = HashMap::new();
+    let mut mapping_results: HashMap<String, String> = HashMap::new();
     let mut claimed_gtfs: HashSet<String> = HashSet::new();
-    let mut claimed_ifopts: HashSet<String> = HashSet::new();
+    let mut unmatched_entries: Vec<IfoptCandidates> = Vec::new();
 
-    for (ifopt_idx, cand_idx, _score) in &scored_pairs {
-        let entry = &all_ifopt_candidates[*ifopt_idx];
-        let candidate = &entry.candidates[*cand_idx];
+    // Direction-aware matching with cascading peer propagation.
+    // Each iteration picks the platform with the most matched peers, matches it using
+    // per-peer trip overlap voting, then re-sorts. This ensures correct direction signal
+    // propagates outward from cross-line seed stations (e.g., a station on both Line 2
+    // and Line 4 gets matched via Line 2 peers, then its Line 4 neighbors benefit).
+    let mut to_process: Vec<PendingDbMatch> = pending;
 
-        // Skip if either side is already claimed
-        if claimed_ifopts.contains(&entry.ifopt) || claimed_gtfs.contains(&candidate.gtfs_stop_id) {
-            continue;
+    let peer_count_for = |ifopt: &str, results: &HashMap<String, String>| -> usize {
+        osm_directional_routes
+            .get(ifopt)
+            .unwrap_or(&empty_osm_id_set)
+            .iter()
+            .flat_map(|rid| osm_route_to_ifopts.get(rid).into_iter().flatten())
+            .filter(|peer_ifopt| results.contains_key(*peer_ifopt))
+            .count()
+    };
+
+    loop {
+        if to_process.is_empty() {
+            break;
         }
 
-        mapping_results.insert(
-            entry.ifopt.clone(),
-            (candidate.gtfs_stop_id.clone(), candidate.combined_score),
-        );
-        claimed_ifopts.insert(entry.ifopt.clone());
-        claimed_gtfs.insert(candidate.gtfs_stop_id.clone());
+        // Sort: most peers first (direction-seeded platforms go first), then distance
+        to_process.sort_by(|a, b| {
+            let a_peers = peer_count_for(&a.ifopt, &mapping_results);
+            let b_peers = peer_count_for(&b.ifopt, &mapping_results);
+            b_peers.cmp(&a_peers).then_with(|| {
+                a.best_distance
+                    .partial_cmp(&b.best_distance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
+
+        let entry = to_process.remove(0);
+
+        let platform_osm_ids = osm_directional_routes
+            .get(&entry.ifopt)
+            .unwrap_or(&empty_osm_id_set);
+
+        let mut peer_gtfs_ids: Vec<String> = Vec::new();
+        for &route_id in platform_osm_ids {
+            if let Some(peer_ifopts) = osm_route_to_ifopts.get(&route_id) {
+                for peer_ifopt in peer_ifopts {
+                    if let Some(peer_gtfs_id) = mapping_results.get(peer_ifopt) {
+                        peer_gtfs_ids.push(peer_gtfs_id.clone());
+                    }
+                }
+            }
+        }
+        peer_gtfs_ids.sort();
+        peer_gtfs_ids.dedup();
+
+        let mut definitive_candidates: Vec<&MatchCandidate> = entry
+            .candidates
+            .iter()
+            .filter(|c| c.is_definitive)
+            .collect();
+
+        if !definitive_candidates.is_empty() {
+            let nearest_distance = definitive_candidates
+                .iter()
+                .map(|c| c.distance_meters)
+                .fold(f64::MAX, f64::min);
+            let max_fallback = (nearest_distance * 3.0).max(100.0).min(200.0);
+
+            // Sort by: trip overlap sum (primary when peers exist) → distance → shared_routes.
+            definitive_candidates.sort_by(|a, b| {
+                let trip_cmp = if peer_gtfs_ids.is_empty() {
+                    std::cmp::Ordering::Equal
+                } else {
+                    let a_overlap: usize = peer_gtfs_ids
+                        .iter()
+                        .map(|peer_id| {
+                            let peer_trips =
+                                gtfs_trip_sets.get(peer_id).unwrap_or(&empty_trip_set);
+                            gtfs_trip_sets
+                                .get(&a.gtfs_stop_id)
+                                .map(|candidate_trips| {
+                                    candidate_trips
+                                        .iter()
+                                        .filter(|t| peer_trips.contains(*t))
+                                        .count()
+                                })
+                                .unwrap_or(0)
+                        })
+                        .sum();
+                    let b_overlap: usize = peer_gtfs_ids
+                        .iter()
+                        .map(|peer_id| {
+                            let peer_trips =
+                                gtfs_trip_sets.get(peer_id).unwrap_or(&empty_trip_set);
+                            gtfs_trip_sets
+                                .get(&b.gtfs_stop_id)
+                                .map(|candidate_trips| {
+                                    candidate_trips
+                                        .iter()
+                                        .filter(|t| peer_trips.contains(*t))
+                                        .count()
+                                })
+                                .unwrap_or(0)
+                        })
+                        .sum();
+                    b_overlap.cmp(&a_overlap)
+                };
+                trip_cmp
+                    .then_with(|| {
+                        a.distance_meters
+                            .partial_cmp(&b.distance_meters)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| b.shared_routes.len().cmp(&a.shared_routes.len()))
+            });
+
+            let mut matched = false;
+            for winner in &definitive_candidates {
+                if winner.distance_meters > max_fallback {
+                    continue;
+                }
+                if !claimed_gtfs.contains(&winner.gtfs_stop_id) {
+                    mapping_results
+                        .insert(entry.ifopt.clone(), winner.gtfs_stop_id.clone());
+                    claimed_gtfs.insert(winner.gtfs_stop_id.clone());
+                    matched = true;
+                    break;
+                }
+            }
+            if matched {
+                continue; // Re-sort remaining with updated peers
+            }
+        }
+
+        let reason = if definitive_candidates.is_empty() {
+            UnmatchedReason::NoDefinitiveCandidate
+        } else {
+            UnmatchedReason::AmbiguousMatch
+        };
+
+        unmatched_entries.push(IfoptCandidates {
+            ifopt: entry.ifopt,
+            name: entry.name,
+            lat: entry.lat,
+            lon: entry.lon,
+            candidates: entry.candidates,
+            reason,
+        });
     }
+
+    // Station-level fallback: when the GTFS feed has a single stop for both
+    // directions at a station, allow unmapped sibling platforms to share it.
+    let mut station_fallback_matched = Vec::new();
+    for entry in &unmatched_entries {
+        let station = station_level_ifopt(&entry.ifopt);
+        // Find if a sibling platform at this station is already mapped
+        let sibling_gtfs: Option<String> = mapping_results
+            .iter()
+            .find(|(ifopt, _)| station_level_ifopt(ifopt) == station && *ifopt != &entry.ifopt)
+            .map(|(_, gtfs_id)| gtfs_id.clone());
+
+        if let Some(sibling_gtfs_id) = sibling_gtfs {
+            // Only allow if this GTFS stop is a definitive (route-matching) candidate
+            if entry.candidates.iter().any(|c| c.gtfs_stop_id == sibling_gtfs_id && c.is_definitive) {
+                station_fallback_matched.push((entry.ifopt.clone(), sibling_gtfs_id));
+            }
+        }
+    }
+    for (ifopt, gtfs_id) in &station_fallback_matched {
+        mapping_results.insert(ifopt.clone(), gtfs_id.clone());
+    }
+    // Remove matched entries from unmatched list
+    unmatched_entries.retain(|e| !station_fallback_matched.iter().any(|(ifopt, _)| ifopt == &e.ifopt));
+    if !station_fallback_matched.is_empty() {
+        info!(
+            count = station_fallback_matched.len(),
+            "Station-level fallback: shared GTFS stops for sibling platforms"
+        );
+    }
+
+    unmatched_entries.extend(no_route_entries);
 
     let matched = mapping_results.len();
 
     // Build unmatched lists
-    let mut unmatched_osm: Vec<UnmatchedOsmStop> = Vec::new();
-    for entry in &all_ifopt_candidates {
-        if claimed_ifopts.contains(&entry.ifopt) {
-            continue;
-        }
-        let is_low_confidence = !entry.candidates.is_empty();
-        unmatched_osm.push(UnmatchedOsmStop {
+    let unmatched_osm: Vec<UnmatchedOsmStop> = unmatched_entries
+        .iter()
+        .map(|entry| UnmatchedOsmStop {
             ifopt: entry.ifopt.clone(),
             name: entry.name.clone(),
             lat: entry.lat,
             lon: entry.lon,
             candidates: entry.candidates.iter().take(5).cloned().collect(),
-            is_low_confidence,
-        });
-    }
+            reason: entry.reason.clone(),
+        })
+        .collect();
 
     // Find unmatched GTFS stops (not claimed by auto or manual)
     let unmatched_gtfs: Vec<UnmatchedGtfsStop> = gtfs_candidates
@@ -1202,10 +1819,10 @@ pub(crate) async fn build_ifopt_mapping_to_db(
         let mut qb = sqlx::QueryBuilder::new(
             "INSERT INTO ifopt_gtfs_mapping (ifopt, gtfs_stop_id, combined_score, is_manual) ",
         );
-        qb.push_values(batch.iter(), |mut b, (ifopt, (gtfs_stop_id, score))| {
+        qb.push_values(batch.iter(), |mut b, (ifopt, gtfs_stop_id)| {
             b.push_bind(ifopt.as_str())
                 .push_bind(gtfs_stop_id.as_str())
-                .push_bind(*score)
+                .push_bind(1.0_f64) // Deterministic match always gets 1.0
                 .push_bind(false);
         });
         qb.build().execute(pool).await?;
@@ -1225,7 +1842,7 @@ pub(crate) async fn build_ifopt_mapping_to_db(
         manual_preserved = manual_count,
         unmatched_osm = unmatched_osm.len(),
         unmatched_gtfs = unmatched_gtfs.len(),
-        "Built and stored IFOPT <-> GTFS stop mapping in database"
+        "Built and stored IFOPT <-> GTFS stop mapping in database (deterministic route-based)"
     );
 
     Ok(MappingStats {
@@ -1264,7 +1881,7 @@ pub async fn build_schedule_from_db(
     .await?;
 
     let mut ifopt_to_gtfs: HashMap<String, Vec<String>> = HashMap::new();
-    let mut gtfs_to_ifopt: HashMap<String, String> = HashMap::new();
+    let mut gtfs_to_ifopt: HashMap<String, Vec<String>> = HashMap::new();
     for (ifopt, gtfs_id) in &mapping_rows {
         ifopt_to_gtfs
             .entry(ifopt.clone())
@@ -1272,7 +1889,8 @@ pub async fn build_schedule_from_db(
             .push(gtfs_id.clone());
         gtfs_to_ifopt
             .entry(gtfs_id.clone())
-            .or_insert_with(|| ifopt.clone());
+            .or_default()
+            .push(ifopt.clone());
     }
 
     let gtfs_stop_ids: Vec<&str> = gtfs_to_ifopt.keys().map(|s| s.as_str()).collect();
@@ -2139,6 +2757,7 @@ fn parse_calendar_dates(
 
 /// Normalize a stop name for comparison.
 /// Handles common German abbreviations and formatting differences.
+#[cfg(test)]
 fn normalize_stop_name(name: &str) -> String {
     let normalized = name
         .to_lowercase()
@@ -2475,7 +3094,7 @@ mod tests {
         assert_eq!(schedule.last_stop_of_trip("trip1"), Some("stop_B".to_string()));
 
         // With IFOPT mapping, returns IFOPT
-        schedule.gtfs_to_ifopt.insert("stop_B".to_string(), "de:09761:691".to_string());
+        schedule.gtfs_to_ifopt.insert("stop_B".to_string(), vec!["de:09761:691".to_string()]);
         assert_eq!(schedule.last_stop_of_trip("trip1"), Some("de:09761:691".to_string()));
 
         // Unknown trip returns None
@@ -2483,7 +3102,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_ifopt_mapping() {
+    fn test_build_ifopt_mapping_with_routes() {
         let mut schedule = GtfsSchedule {
             stops: HashMap::new(),
             routes: HashMap::new(),
@@ -2497,7 +3116,7 @@ mod tests {
             loaded_at: chrono::Utc::now(),
         };
 
-        // Add GTFS stops with coordinates
+        // Add GTFS stop with coordinates
         schedule.stops.insert(
             "1001".to_string(),
             GtfsStop {
@@ -2509,13 +3128,11 @@ mod tests {
             },
         );
 
-        // Add the stop to trips_by_stop so it counts as a leaf
         schedule.trips_by_stop.insert(
             "1001".to_string(),
             std::iter::once("trip1".to_string()).collect(),
         );
 
-        // OSM stops with IFOPT, name, and coordinates very close to GTFS stop
         let osm_stops = vec![OsmStopInfo {
             ifopt: "de:09761:691:0:1".to_string(),
             name: Some("Test Stop".to_string()),
@@ -2523,13 +3140,71 @@ mod tests {
             lon: 10.8979,
         }];
 
-        schedule.build_ifopt_mapping(&osm_stops);
+        // Both serve Tram 1 → definitive match
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        osm_route_sets.insert(
+            "de:09761:691:0:1".to_string(),
+            [make_route("1", TransportType::Tram)].into_iter().collect(),
+        );
+        let mut gtfs_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        gtfs_route_sets.insert(
+            "1001".to_string(),
+            [make_route("1", TransportType::Tram)].into_iter().collect(),
+        );
+
+        schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
 
         assert!(schedule.ifopt_to_gtfs.contains_key("de:09761:691:0:1"));
         assert_eq!(
             schedule.gtfs_to_ifopt.get("1001"),
-            Some(&"de:09761:691:0:1".to_string())
+            Some(&vec!["de:09761:691:0:1".to_string()])
         );
+    }
+
+    #[test]
+    fn test_no_match_without_route_data() {
+        let mut schedule = GtfsSchedule {
+            stops: HashMap::new(),
+            routes: HashMap::new(),
+            trips: HashMap::new(),
+            stop_times: HashMap::new(),
+            calendars: HashMap::new(),
+            calendar_dates: HashMap::new(),
+            trips_by_stop: HashMap::new(),
+            ifopt_to_gtfs: HashMap::new(),
+            gtfs_to_ifopt: HashMap::new(),
+            loaded_at: chrono::Utc::now(),
+        };
+
+        schedule.stops.insert(
+            "1001".to_string(),
+            GtfsStop {
+                stop_id: "1001".to_string(),
+                stop_name: Some("Test Stop".to_string()),
+                parent_station: Some("100".to_string()),
+                lat: Some(48.3705),
+                lon: Some(10.8978),
+            },
+        );
+
+        schedule.trips_by_stop.insert(
+            "1001".to_string(),
+            std::iter::once("trip1".to_string()).collect(),
+        );
+
+        // OSM stop very close but NO route data → no match
+        let osm_stops = vec![OsmStopInfo {
+            ifopt: "de:09761:691:0:1".to_string(),
+            name: Some("Test Stop".to_string()),
+            lat: 48.3706,
+            lon: 10.8979,
+        }];
+
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &HashMap::new(), &HashMap::new());
+
+        assert!(schedule.ifopt_to_gtfs.is_empty());
+        assert_eq!(stats.matched, 0);
+        assert_eq!(stats.unmatched_osm.len(), 1);
     }
 
     #[test]
@@ -2570,14 +3245,28 @@ mod tests {
             lon: 10.89,
         }];
 
-        schedule.build_ifopt_mapping(&osm_stops);
+        // Even with matching routes, too far away → no match
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        osm_route_sets.insert(
+            "de:09761:691:0:1".to_string(),
+            [make_route("1", TransportType::Tram)].into_iter().collect(),
+        );
+        let mut gtfs_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        gtfs_route_sets.insert(
+            "far_stop".to_string(),
+            [make_route("1", TransportType::Tram)].into_iter().collect(),
+        );
+
+        schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
 
         assert!(schedule.ifopt_to_gtfs.is_empty());
         assert!(schedule.gtfs_to_ifopt.is_empty());
     }
 
     #[test]
-    fn test_build_ifopt_mapping_name_similarity() {
+    fn test_multiple_definitive_picks_closest() {
+        // Two definitive candidates (same routes) → picks the closest by distance
+        // This is the common case: multiple GTFS leaf stops at one station (per platform/direction)
         let mut schedule = GtfsSchedule {
             stops: HashMap::new(),
             routes: HashMap::new(),
@@ -2591,64 +3280,68 @@ mod tests {
             loaded_at: chrono::Utc::now(),
         };
 
-        // Add two GTFS stops at similar distances
+        // Two GTFS stops nearby, both serving the same routes (different platforms)
         schedule.stops.insert(
-            "stop1".to_string(),
+            "gtfs_far".to_string(),
             GtfsStop {
-                stop_id: "stop1".to_string(),
-                stop_name: Some("Hauptbahnhof".to_string()),
+                stop_id: "gtfs_far".to_string(),
+                stop_name: Some("Stop A".to_string()),
                 parent_station: Some("parent".to_string()),
-                lat: Some(48.3705),
-                lon: Some(10.8978),
+                lat: Some(48.3660),
+                lon: Some(10.8941),
             },
         );
         schedule.stops.insert(
-            "stop2".to_string(),
+            "gtfs_close".to_string(),
             GtfsStop {
-                stop_id: "stop2".to_string(),
-                stop_name: Some("Rathaus".to_string()),
+                stop_id: "gtfs_close".to_string(),
+                stop_name: Some("Stop A".to_string()),
                 parent_station: Some("parent".to_string()),
-                lat: Some(48.3706),
-                lon: Some(10.8979),
+                lat: Some(48.3654),
+                lon: Some(10.8941),
             },
         );
+        schedule.trips_by_stop.insert("gtfs_far".to_string(), HashSet::new());
+        schedule.trips_by_stop.insert("gtfs_close".to_string(), HashSet::new());
 
-        schedule.trips_by_stop.insert(
-            "stop1".to_string(),
-            std::iter::once("trip1".to_string()).collect(),
-        );
-        schedule.trips_by_stop.insert(
-            "stop2".to_string(),
-            std::iter::once("trip2".to_string()).collect(),
-        );
-
-        // OSM stop with "Hbf" abbreviation should match "Hauptbahnhof" due to name normalization
         let osm_stops = vec![OsmStopInfo {
-            ifopt: "de:09761:691:0:1".to_string(),
-            name: Some("Hbf".to_string()),
-            lat: 48.3706,
-            lon: 10.8978,
+            ifopt: "de:09761:100".to_string(),
+            name: Some("Stop A".to_string()),
+            lat: 48.3654,
+            lon: 10.8941,
         }];
 
-        schedule.build_ifopt_mapping(&osm_stops);
-
-        // Should match the stop with similar name despite slightly farther
-        assert!(schedule.ifopt_to_gtfs.contains_key("de:09761:691:0:1"));
-        assert_eq!(
-            schedule.ifopt_to_gtfs["de:09761:691:0:1"],
-            vec!["stop1".to_string()],
-            "Should match Hauptbahnhof (stop1) due to name similarity with Hbf"
+        // Both GTFS stops and OSM stop serve the same route
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        osm_route_sets.insert(
+            "de:09761:100".to_string(),
+            [make_route("1", TransportType::Tram)].into_iter().collect(),
         );
+        let mut gtfs_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        gtfs_route_sets.insert(
+            "gtfs_far".to_string(),
+            [make_route("1", TransportType::Tram)].into_iter().collect(),
+        );
+        gtfs_route_sets.insert(
+            "gtfs_close".to_string(),
+            [make_route("1", TransportType::Tram)].into_iter().collect(),
+        );
+
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
+
+        assert_eq!(stats.matched, 1, "Should match to the closest definitive candidate");
         assert_eq!(
-            schedule.gtfs_to_ifopt.get("stop1"),
-            Some(&"de:09761:691:0:1".to_string())
+            schedule.ifopt_to_gtfs.get("de:09761:100"),
+            Some(&vec!["gtfs_close".to_string()]),
+            "Should pick the closest GTFS stop when multiple are definitive"
         );
     }
 
     #[test]
-    fn test_build_ifopt_mapping_duplicate_ifopt_keeps_best() {
-        // Regression test: multiple OSM elements with same IFOPT but different coords
-        // should only keep the best match (highest combined score), not accumulate multiple
+    fn test_closer_osm_stop_gets_priority_over_farther() {
+        // Moritzplatz scenario: Two OSM platforms (A closer, B farther) compete for
+        // two GTFS stops that both serve the same routes. A should get the closest
+        // GTFS stop, B should get the next one.
         let mut schedule = GtfsSchedule {
             stops: HashMap::new(),
             routes: HashMap::new(),
@@ -2656,76 +3349,189 @@ mod tests {
             stop_times: HashMap::new(),
             calendars: HashMap::new(),
             calendar_dates: HashMap::new(),
+            trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
-            trips_by_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
-        // Two GTFS stops at different locations
+        // GTFS stop 1: closer to platform A (7m), farther from B (41m)
         schedule.stops.insert(
-            "gtfs_stop_1".to_string(),
+            "gtfs_1".to_string(),
             GtfsStop {
-                stop_id: "gtfs_stop_1".to_string(),
-                stop_name: Some("Königsplatz".to_string()),
-                lat: Some(48.3655),
-                lon: Some(10.8941),
+                stop_id: "gtfs_1".to_string(),
+                stop_name: Some("Moritzplatz".to_string()),
                 parent_station: Some("parent".to_string()),
+                lat: Some(48.367233),
+                lon: Some(10.898002),
             },
         );
+        // GTFS stop 2: a bit farther from A (12m), even farther from B (49m)
         schedule.stops.insert(
-            "gtfs_stop_2".to_string(),
+            "gtfs_2".to_string(),
             GtfsStop {
-                stop_id: "gtfs_stop_2".to_string(),
-                stop_name: Some("Königsplatz".to_string()),
-                lat: Some(48.3653),
-                lon: Some(10.8940), // ~25m away from stop 1
+                stop_id: "gtfs_2".to_string(),
+                stop_name: Some("Moritzplatz".to_string()),
                 parent_station: Some("parent".to_string()),
+                lat: Some(48.36725),
+                lon: Some(10.898109),
             },
         );
-
         schedule
             .trips_by_stop
-            .insert("gtfs_stop_1".to_string(), HashSet::new());
+            .insert("gtfs_1".to_string(), HashSet::new());
         schedule
             .trips_by_stop
-            .insert("gtfs_stop_2".to_string(), HashSet::new());
+            .insert("gtfs_2".to_string(), HashSet::new());
 
-        // Two OSM elements with the SAME IFOPT but slightly different coordinates
-        // (like a platform and a stop_position for the same physical stop)
+        // Platform A (closer to both GTFS stops)
+        // Platform B (farther from both GTFS stops)
         let osm_stops = vec![
             OsmStopInfo {
-                ifopt: "de:09761:101:31:A2".to_string(),
-                name: Some("Königsplatz A2".to_string()),
-                lat: 48.36552, // Closer to gtfs_stop_1
-                lon: 10.8941,
+                ifopt: "de:09761:617:0:B".to_string(),
+                name: Some("Moritzplatz".to_string()),
+                lat: 48.3670998,
+                lon: 10.8974858,
             },
             OsmStopInfo {
-                ifopt: "de:09761:101:31:A2".to_string(), // SAME IFOPT!
-                name: Some("Königsplatz".to_string()),
-                lat: 48.36528, // Closer to gtfs_stop_2
-                lon: 10.8940,
+                ifopt: "de:09761:617:0:A".to_string(),
+                name: Some("Moritzplatz".to_string()),
+                lat: 48.367171,
+                lon: 10.8979903,
             },
         ];
 
-        schedule.build_ifopt_mapping(&osm_stops);
+        // Both serve the same routes
+        let tram_routes: HashSet<RouteIdentifier> = [
+            make_route("1", TransportType::Tram),
+            make_route("2", TransportType::Tram),
+        ]
+        .into_iter()
+        .collect();
 
-        // Should only have ONE GTFS stop mapped to this IFOPT (the best match)
-        let mapped_stops = schedule
-            .ifopt_to_gtfs
-            .get("de:09761:101:31:A2")
-            .expect("IFOPT should be mapped");
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        osm_route_sets.insert("de:09761:617:0:A".to_string(), tram_routes.clone());
+        osm_route_sets.insert("de:09761:617:0:B".to_string(), tram_routes.clone());
+
+        let mut gtfs_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        gtfs_route_sets.insert("gtfs_1".to_string(), tram_routes.clone());
+        gtfs_route_sets.insert("gtfs_2".to_string(), tram_routes);
+
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
+
+        assert_eq!(stats.matched, 2, "Both platforms should be matched");
         assert_eq!(
-            mapped_stops.len(),
-            1,
-            "Should only have one GTFS stop per IFOPT, got {:?}",
-            mapped_stops
+            schedule.ifopt_to_gtfs.get("de:09761:617:0:A"),
+            Some(&vec!["gtfs_1".to_string()]),
+            "Platform A (closer) should get gtfs_1"
+        );
+        assert_eq!(
+            schedule.ifopt_to_gtfs.get("de:09761:617:0:B"),
+            Some(&vec!["gtfs_2".to_string()]),
+            "Platform B (farther) should get gtfs_2"
+        );
+    }
+
+    #[test]
+    fn test_prefers_closer_distance_over_more_shared_routes() {
+        // With distance-first sorting, a closer stop should be preferred over a farther
+        // stop even if the farther one shares more routes. This prevents cross-station theft.
+        let mut schedule = GtfsSchedule {
+            stops: HashMap::new(),
+            routes: HashMap::new(),
+            trips: HashMap::new(),
+            stop_times: HashMap::new(),
+            calendars: HashMap::new(),
+            calendar_dates: HashMap::new(),
+            trips_by_stop: HashMap::new(),
+            ifopt_to_gtfs: HashMap::new(),
+            gtfs_to_ifopt: HashMap::new(),
+            loaded_at: chrono::Utc::now(),
+        };
+
+        // Close stop shares only 1 route
+        schedule.stops.insert(
+            "gtfs_close".to_string(),
+            GtfsStop {
+                stop_id: "gtfs_close".to_string(),
+                stop_name: Some("Stop A".to_string()),
+                parent_station: Some("parent".to_string()),
+                lat: Some(48.3654),
+                lon: Some(10.8941),
+            },
+        );
+        // Farther stop shares 2 routes
+        schedule.stops.insert(
+            "gtfs_far".to_string(),
+            GtfsStop {
+                stop_id: "gtfs_far".to_string(),
+                stop_name: Some("Stop A".to_string()),
+                parent_station: Some("parent".to_string()),
+                lat: Some(48.3660),
+                lon: Some(10.8941),
+            },
+        );
+        schedule
+            .trips_by_stop
+            .insert("gtfs_close".to_string(), HashSet::new());
+        schedule
+            .trips_by_stop
+            .insert("gtfs_far".to_string(), HashSet::new());
+
+        let osm_stops = vec![OsmStopInfo {
+            ifopt: "de:09761:100".to_string(),
+            name: Some("Stop A".to_string()),
+            lat: 48.3654,
+            lon: 10.8941,
+        }];
+
+        // OSM stop serves Tram 1 and Tram 3
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        osm_route_sets.insert(
+            "de:09761:100".to_string(),
+            [
+                make_route("1", TransportType::Tram),
+                make_route("3", TransportType::Tram),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let mut gtfs_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        // Close GTFS stop shares only Tram 1
+        gtfs_route_sets.insert(
+            "gtfs_close".to_string(),
+            [
+                make_route("1", TransportType::Tram),
+                make_route("99", TransportType::Bus),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        // Far GTFS stop shares both Tram 1 and Tram 3
+        gtfs_route_sets.insert(
+            "gtfs_far".to_string(),
+            [
+                make_route("1", TransportType::Tram),
+                make_route("3", TransportType::Tram),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
+
+        assert_eq!(stats.matched, 1);
+        assert_eq!(
+            schedule.ifopt_to_gtfs.get("de:09761:100"),
+            Some(&vec!["gtfs_close".to_string()]),
+            "Should prefer the closer stop even if the farther one shares more routes"
         );
     }
 
     #[test]
     fn test_build_ifopt_mapping_one_to_one_constraint() {
-        // Two IFOPTs near the same single GTFS stop — only one should be matched
+        // Two IFOPTs near the same single GTFS stop — only the first should be matched
         let mut schedule = GtfsSchedule {
             stops: HashMap::new(),
             routes: HashMap::new(),
@@ -2770,31 +3576,39 @@ mod tests {
             },
         ];
 
-        let stats = schedule.build_ifopt_mapping(&osm_stops);
-
-        // Exactly one IFOPT should be matched (1:1 constraint)
-        assert_eq!(stats.matched, 1, "Only one IFOPT should claim the GTFS stop");
-
-        // The GTFS stop should appear in exactly one forward mapping
-        let mapped_ifopts: Vec<_> = schedule
-            .ifopt_to_gtfs
-            .iter()
-            .filter(|(_, stops)| stops.contains(&"gtfs_only".to_string()))
-            .map(|(ifopt, _)| ifopt.clone())
-            .collect();
-        assert_eq!(
-            mapped_ifopts.len(),
-            1,
-            "GTFS stop should be claimed by exactly one IFOPT, got {:?}",
-            mapped_ifopts
+        // Both OSM stops and the GTFS stop serve the same route
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        osm_route_sets.insert(
+            "de:09761:101:31:A1".to_string(),
+            [make_route("1", TransportType::Tram)].into_iter().collect(),
+        );
+        osm_route_sets.insert(
+            "de:09761:101:31:A2".to_string(),
+            [make_route("1", TransportType::Tram)].into_iter().collect(),
+        );
+        let mut gtfs_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        gtfs_route_sets.insert(
+            "gtfs_only".to_string(),
+            [make_route("1", TransportType::Tram)].into_iter().collect(),
         );
 
-        // Reverse mapping should have exactly one entry
-        assert_eq!(schedule.gtfs_to_ifopt.len(), 1);
-        assert!(schedule.gtfs_to_ifopt.contains_key("gtfs_only"));
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
 
-        // The other IFOPT should be in unmatched
-        assert_eq!(stats.unmatched_osm.len(), 1);
+        // Both platforms at the same station share the single GTFS stop
+        // (station-level fallback allows sibling platforms to reuse a GTFS stop)
+        assert_eq!(stats.matched, 2, "Both sibling platforms should share the GTFS stop");
+
+        // Both IFOPTs should map to the same GTFS stop
+        assert_eq!(
+            schedule.ifopt_to_gtfs.get("de:09761:101:31:A1"),
+            Some(&vec!["gtfs_only".to_string()])
+        );
+        assert_eq!(
+            schedule.ifopt_to_gtfs.get("de:09761:101:31:A2"),
+            Some(&vec!["gtfs_only".to_string()])
+        );
+
+        assert_eq!(stats.unmatched_osm.len(), 0);
     }
 
     #[test]
@@ -2905,6 +3719,45 @@ mod tests {
         assert_eq!(times[2].stop_sequence, 2);
     }
 
+    /// Helper to create route sets for the two-stop schedule used in mapping tests.
+    /// Königsplatz serves Tram 1 and Tram 3, Moritzplatz serves Bus 5.
+    fn make_route_sets_for_mapping() -> (
+        HashMap<String, HashSet<RouteIdentifier>>,
+        HashMap<String, HashSet<RouteIdentifier>>,
+    ) {
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        osm_route_sets.insert(
+            "de:09761:100".to_string(),
+            [
+                make_route("1", TransportType::Tram),
+                make_route("3", TransportType::Tram),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        osm_route_sets.insert(
+            "de:09761:200".to_string(),
+            [make_route("5", TransportType::Bus)].into_iter().collect(),
+        );
+
+        let mut gtfs_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        gtfs_route_sets.insert(
+            "gtfs_kp".to_string(),
+            [
+                make_route("1", TransportType::Tram),
+                make_route("3", TransportType::Tram),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        gtfs_route_sets.insert(
+            "gtfs_mp".to_string(),
+            [make_route("5", TransportType::Bus)].into_iter().collect(),
+        );
+
+        (osm_route_sets, gtfs_route_sets)
+    }
+
     /// Helper to create a minimal schedule with GTFS stops for mapping tests.
     fn make_schedule_for_mapping() -> GtfsSchedule {
         let mut stops = HashMap::new();
@@ -2959,6 +3812,7 @@ mod tests {
     #[test]
     fn test_build_ifopt_mapping_basic_match() {
         let mut schedule = make_schedule_for_mapping();
+        let (osm_route_sets, gtfs_route_sets) = make_route_sets_for_mapping();
 
         let osm_stops = vec![OsmStopInfo {
             ifopt: "de:09761:100".to_string(),
@@ -2967,7 +3821,7 @@ mod tests {
             lon: 10.8981,
         }];
 
-        let stats = schedule.build_ifopt_mapping(&osm_stops);
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
         assert_eq!(stats.matched, 1);
         assert_eq!(stats.manual_count, 0);
         assert!(schedule.ifopt_to_gtfs.contains_key("de:09761:100"));
@@ -2981,7 +3835,7 @@ mod tests {
     fn test_build_ifopt_mapping_no_match_when_too_far() {
         let mut schedule = make_schedule_for_mapping();
 
-        // Stop far from any GTFS stop (>200m away)
+        // Stop far from any GTFS stop (>500m away), with route data
         let osm_stops = vec![OsmStopInfo {
             ifopt: "de:09761:999".to_string(),
             name: Some("Far Away".to_string()),
@@ -2989,17 +3843,24 @@ mod tests {
             lon: 10.950,
         }];
 
-        let stats = schedule.build_ifopt_mapping(&osm_stops);
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        osm_route_sets.insert(
+            "de:09761:999".to_string(),
+            [make_route("1", TransportType::Tram)].into_iter().collect(),
+        );
+
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &HashMap::new());
         assert_eq!(stats.matched, 0);
         assert_eq!(stats.unmatched_osm.len(), 1);
         assert_eq!(stats.manual_count, 0);
     }
 
     #[test]
-    fn test_build_ifopt_mapping_picks_best_candidate() {
+    fn test_build_ifopt_mapping_picks_correct_by_routes() {
         let mut schedule = make_schedule_for_mapping();
+        let (osm_route_sets, gtfs_route_sets) = make_route_sets_for_mapping();
 
-        // OSM stop closer to Königsplatz than Moritzplatz, with matching name
+        // OSM stop with Königsplatz routes — should match gtfs_kp, not gtfs_mp
         let osm_stops = vec![OsmStopInfo {
             ifopt: "de:09761:100".to_string(),
             name: Some("Königsplatz".to_string()),
@@ -3007,9 +3868,8 @@ mod tests {
             lon: 10.8981,
         }];
 
-        let stats = schedule.build_ifopt_mapping(&osm_stops);
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
         assert_eq!(stats.matched, 1);
-        // Should match Königsplatz, not Moritzplatz
         assert_eq!(
             schedule.ifopt_to_gtfs["de:09761:100"],
             vec!["gtfs_kp".to_string()]
@@ -3019,6 +3879,7 @@ mod tests {
     #[test]
     fn test_build_ifopt_mapping_multiple_osm_stops() {
         let mut schedule = make_schedule_for_mapping();
+        let (osm_route_sets, gtfs_route_sets) = make_route_sets_for_mapping();
 
         let osm_stops = vec![
             OsmStopInfo {
@@ -3035,7 +3896,7 @@ mod tests {
             },
         ];
 
-        let stats = schedule.build_ifopt_mapping(&osm_stops);
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
         assert_eq!(stats.matched, 2);
         assert_eq!(stats.manual_count, 0);
         assert!(schedule.ifopt_to_gtfs.contains_key("de:09761:100"));
@@ -3045,6 +3906,7 @@ mod tests {
     #[test]
     fn test_mapping_stats_manual_count_zero_for_in_memory() {
         let mut schedule = make_schedule_for_mapping();
+        let (osm_route_sets, gtfs_route_sets) = make_route_sets_for_mapping();
 
         let osm_stops = vec![OsmStopInfo {
             ifopt: "de:09761:100".to_string(),
@@ -3053,8 +3915,756 @@ mod tests {
             lon: 10.8981,
         }];
 
-        let stats = schedule.build_ifopt_mapping(&osm_stops);
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
         // In-memory matching always returns 0 manual mappings
         assert_eq!(stats.manual_count, 0);
+    }
+
+    // --- Route overlap scoring tests ---
+
+    fn make_route(line: &str, tt: TransportType) -> RouteIdentifier {
+        RouteIdentifier {
+            line_ref: line.to_string(),
+            transport_type: tt,
+        }
+    }
+
+    #[test]
+    fn test_definitive_match_identical() {
+        let a: HashSet<RouteIdentifier> = [
+            make_route("1", TransportType::Tram),
+            make_route("3", TransportType::Tram),
+        ]
+        .into_iter()
+        .collect();
+        let b = a.clone();
+        let (definitive, shared) = is_definitive_match(&a, &b);
+        assert!(definitive);
+        assert_eq!(shared.len(), 2);
+    }
+
+    #[test]
+    fn test_definitive_match_subset() {
+        // OSM has {Tram 1, Tram 3}, GTFS has {Tram 1, Tram 3, Bus N5}
+        // OSM ⊆ GTFS → definitive
+        let osm: HashSet<RouteIdentifier> = [
+            make_route("1", TransportType::Tram),
+            make_route("3", TransportType::Tram),
+        ]
+        .into_iter()
+        .collect();
+        let gtfs: HashSet<RouteIdentifier> = [
+            make_route("1", TransportType::Tram),
+            make_route("3", TransportType::Tram),
+            make_route("N5", TransportType::Bus),
+        ]
+        .into_iter()
+        .collect();
+        let (definitive, shared) = is_definitive_match(&osm, &gtfs);
+        assert!(definitive);
+        assert_eq!(shared.len(), 2);
+    }
+
+    #[test]
+    fn test_definitive_match_disjoint() {
+        let a: HashSet<RouteIdentifier> = [
+            make_route("1", TransportType::Tram),
+        ]
+        .into_iter()
+        .collect();
+        let b: HashSet<RouteIdentifier> = [
+            make_route("5", TransportType::Bus),
+        ]
+        .into_iter()
+        .collect();
+        let (definitive, shared) = is_definitive_match(&a, &b);
+        assert!(!definitive);
+        assert!(shared.is_empty());
+    }
+
+    #[test]
+    fn test_definitive_match_partial_overlap() {
+        // Neither is a subset of the other, but they share Tram 1 → match
+        // This handles data quality differences (e.g., seasonal trams in OSM,
+        // agency-specific bus routes in GTFS)
+        let a: HashSet<RouteIdentifier> = [
+            make_route("1", TransportType::Tram),
+            make_route("3", TransportType::Tram),
+            make_route("5", TransportType::Bus),
+        ]
+        .into_iter()
+        .collect();
+        let b: HashSet<RouteIdentifier> = [
+            make_route("1", TransportType::Tram),
+            make_route("7", TransportType::Bus),
+        ]
+        .into_iter()
+        .collect();
+        let (definitive, shared) = is_definitive_match(&a, &b);
+        assert!(definitive, "Partial overlap with shared routes should match");
+        assert_eq!(shared.len(), 1);
+    }
+
+    #[test]
+    fn test_definitive_match_asymmetric_data_quality() {
+        // Real-world case: Platform C4 Königsplatz
+        // OSM has {Tram 3, Tram 9}, GTFS has {Tram 3, Bus 43}
+        // Tram 9 is a seasonal extra tram only in OSM, Bus 43 is only in GTFS
+        // They share Tram 3 → should match
+        let osm: HashSet<RouteIdentifier> = [
+            make_route("3", TransportType::Tram),
+            make_route("9", TransportType::Tram),
+        ]
+        .into_iter()
+        .collect();
+        let gtfs: HashSet<RouteIdentifier> = [
+            make_route("3", TransportType::Tram),
+            make_route("43", TransportType::Bus),
+        ]
+        .into_iter()
+        .collect();
+        let (definitive, shared) = is_definitive_match(&osm, &gtfs);
+        assert!(
+            definitive,
+            "Stops sharing Tram 3 should match despite other routes differing"
+        );
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].line_ref, "3");
+    }
+
+    #[test]
+    fn test_definitive_match_empty() {
+        let a: HashSet<RouteIdentifier> = HashSet::new();
+        let b: HashSet<RouteIdentifier> = HashSet::new();
+        let (definitive, shared) = is_definitive_match(&a, &b);
+        assert!(!definitive);
+        assert!(shared.is_empty());
+    }
+
+    #[test]
+    fn test_route_identifier_type_disambiguation() {
+        // Bus "1" and Tram "1" should be different route identifiers
+        let bus_1 = make_route("1", TransportType::Bus);
+        let tram_1 = make_route("1", TransportType::Tram);
+        assert_ne!(bus_1, tram_1);
+
+        let a: HashSet<RouteIdentifier> = [bus_1].into_iter().collect();
+        let b: HashSet<RouteIdentifier> = [tram_1].into_iter().collect();
+        let (definitive, shared) = is_definitive_match(&a, &b);
+        assert!(!definitive);
+        assert!(shared.is_empty());
+    }
+
+    #[test]
+    fn test_from_gtfs_route_type() {
+        assert_eq!(TransportType::from_gtfs_route_type(0), TransportType::Tram);
+        assert_eq!(TransportType::from_gtfs_route_type(900), TransportType::Tram);
+        assert_eq!(TransportType::from_gtfs_route_type(1), TransportType::Subway);
+        assert_eq!(TransportType::from_gtfs_route_type(400), TransportType::Subway);
+        assert_eq!(TransportType::from_gtfs_route_type(2), TransportType::Train);
+        assert_eq!(TransportType::from_gtfs_route_type(100), TransportType::Train);
+        assert_eq!(TransportType::from_gtfs_route_type(3), TransportType::Bus);
+        assert_eq!(TransportType::from_gtfs_route_type(700), TransportType::Bus);
+        assert_eq!(TransportType::from_gtfs_route_type(800), TransportType::Bus);
+        assert_eq!(TransportType::from_gtfs_route_type(4), TransportType::Ferry);
+        assert_eq!(TransportType::from_gtfs_route_type(999), TransportType::Unknown);
+    }
+
+    #[test]
+    fn test_route_overlap_matching_prefers_correct_stop() {
+        // Scenario: Two GTFS stops near one OSM stop, but only one shares routes
+        let mut schedule = GtfsSchedule {
+            stops: HashMap::new(),
+            routes: HashMap::new(),
+            trips: HashMap::new(),
+            stop_times: HashMap::new(),
+            calendars: HashMap::new(),
+            calendar_dates: HashMap::new(),
+            trips_by_stop: HashMap::new(),
+            ifopt_to_gtfs: HashMap::new(),
+            gtfs_to_ifopt: HashMap::new(),
+            loaded_at: chrono::Utc::now(),
+        };
+
+        // Two GTFS stops at similar distances
+        schedule.stops.insert(
+            "gtfs_correct".to_string(),
+            GtfsStop {
+                stop_id: "gtfs_correct".to_string(),
+                stop_name: Some("Stop A".to_string()),
+                parent_station: Some("parent".to_string()),
+                lat: Some(48.3660),
+                lon: Some(10.8970),
+            },
+        );
+        schedule.stops.insert(
+            "gtfs_wrong".to_string(),
+            GtfsStop {
+                stop_id: "gtfs_wrong".to_string(),
+                stop_name: Some("Stop A".to_string()), // Same name!
+                parent_station: Some("parent".to_string()),
+                lat: Some(48.3658), // Slightly closer
+                lon: Some(10.8972),
+            },
+        );
+
+        let osm_stops = vec![OsmStopInfo {
+            ifopt: "de:09761:100".to_string(),
+            name: Some("Stop A".to_string()),
+            lat: 48.3659,
+            lon: 10.8971,
+        }];
+
+        // Route sets: OSM stop serves Tram 1 and Tram 3
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        osm_route_sets.insert(
+            "de:09761:100".to_string(),
+            [
+                make_route("1", TransportType::Tram),
+                make_route("3", TransportType::Tram),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        // gtfs_correct also serves Tram 1 and Tram 3 (perfect match)
+        // gtfs_wrong serves Bus 5 (no overlap)
+        let mut gtfs_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        gtfs_route_sets.insert(
+            "gtfs_correct".to_string(),
+            [
+                make_route("1", TransportType::Tram),
+                make_route("3", TransportType::Tram),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        gtfs_route_sets.insert(
+            "gtfs_wrong".to_string(),
+            [make_route("5", TransportType::Bus)].into_iter().collect(),
+        );
+
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
+
+        assert_eq!(stats.matched, 1);
+        // Should match to gtfs_correct despite gtfs_wrong being slightly closer
+        assert_eq!(
+            schedule.ifopt_to_gtfs.get("de:09761:100"),
+            Some(&vec!["gtfs_correct".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_high_match_rate_with_multi_platform_stations() {
+        // Simulates a realistic transit network where each station has multiple GTFS
+        // leaf stops (one per platform/direction) all serving the same routes.
+        // The matcher must achieve at least 90% match rate on OSM stops that have route data.
+        let mut schedule = GtfsSchedule {
+            stops: HashMap::new(),
+            routes: HashMap::new(),
+            trips: HashMap::new(),
+            stop_times: HashMap::new(),
+            calendars: HashMap::new(),
+            calendar_dates: HashMap::new(),
+            trips_by_stop: HashMap::new(),
+            ifopt_to_gtfs: HashMap::new(),
+            gtfs_to_ifopt: HashMap::new(),
+            loaded_at: chrono::Utc::now(),
+        };
+
+        let num_stations = 20;
+        let mut osm_stops = Vec::new();
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        let mut gtfs_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+
+        for i in 0..num_stations {
+            let base_lat = 48.36 + (i as f64) * 0.002;
+            let base_lon = 10.89 + (i as f64) * 0.001;
+
+            // Each station has a unique route set (simulating different lines)
+            let route_set: HashSet<RouteIdentifier> = [
+                make_route(&format!("{}", i * 2 + 1), TransportType::Tram),
+                make_route(&format!("{}", i * 2 + 2), TransportType::Bus),
+            ]
+            .into_iter()
+            .collect();
+
+            // OSM stop (one per station)
+            let ifopt = format!("de:09761:{}:0:1", 100 + i);
+            osm_stops.push(OsmStopInfo {
+                ifopt: ifopt.clone(),
+                name: Some(format!("Station {}", i)),
+                lat: base_lat,
+                lon: base_lon,
+            });
+            osm_route_sets.insert(ifopt, route_set.clone());
+
+            // GTFS: 3 leaf stops per station (e.g., platform A, B, C)
+            // All serve the same routes — this is the common real-world pattern
+            for platform in 0..3 {
+                let gtfs_id = format!("gtfs_{}_{}", i, platform);
+                let offset = (platform as f64) * 0.00005; // ~5m apart
+                schedule.stops.insert(
+                    gtfs_id.clone(),
+                    GtfsStop {
+                        stop_id: gtfs_id.clone(),
+                        stop_name: Some(format!("Station {} Platform {}", i, platform)),
+                        parent_station: Some(format!("parent_{}", i)),
+                        lat: Some(base_lat + offset),
+                        lon: Some(base_lon + offset),
+                    },
+                );
+                schedule
+                    .trips_by_stop
+                    .insert(gtfs_id.clone(), HashSet::new());
+                gtfs_route_sets.insert(gtfs_id, route_set.clone());
+            }
+        }
+
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
+
+        let match_rate = stats.matched as f64 / num_stations as f64;
+        assert!(
+            match_rate >= 0.9,
+            "Match rate {:.1}% ({}/{}) is below 90% threshold",
+            match_rate * 100.0,
+            stats.matched,
+            num_stations
+        );
+    }
+
+    #[test]
+    fn test_duplicate_ifopt_entries_do_not_overwrite_correct_match() {
+        // Same IFOPT appearing multiple times with different coordinates (from platforms + stop_positions).
+        // The first occurrence (closest) should win and not be overwritten by later duplicates.
+        let mut schedule = GtfsSchedule {
+            stops: HashMap::new(),
+            routes: HashMap::new(),
+            trips: HashMap::new(),
+            stop_times: HashMap::new(),
+            calendars: HashMap::new(),
+            calendar_dates: HashMap::new(),
+            trips_by_stop: HashMap::new(),
+            ifopt_to_gtfs: HashMap::new(),
+            gtfs_to_ifopt: HashMap::new(),
+            loaded_at: chrono::Utc::now(),
+        };
+
+        // Correct GTFS stop (2m away from first OSM entry)
+        schedule.stops.insert(
+            "gtfs_correct".to_string(),
+            GtfsStop {
+                stop_id: "gtfs_correct".to_string(),
+                stop_name: Some("Barfüßerbrücke".to_string()),
+                parent_station: Some("parent".to_string()),
+                lat: Some(48.3654),
+                lon: Some(10.8941),
+            },
+        );
+        // Wrong GTFS stop (farther away, at a different station)
+        schedule.stops.insert(
+            "gtfs_wrong".to_string(),
+            GtfsStop {
+                stop_id: "gtfs_wrong".to_string(),
+                stop_name: Some("Pilgerhausstraße".to_string()),
+                parent_station: Some("parent2".to_string()),
+                lat: Some(48.3670),
+                lon: Some(10.8941),
+            },
+        );
+        schedule
+            .trips_by_stop
+            .insert("gtfs_correct".to_string(), HashSet::new());
+        schedule
+            .trips_by_stop
+            .insert("gtfs_wrong".to_string(), HashSet::new());
+
+        // Same IFOPT appears 3 times with slightly different coordinates
+        let osm_stops = vec![
+            OsmStopInfo {
+                ifopt: "de:09761:131:0:a".to_string(),
+                name: Some("Barfüßerbrücke".to_string()),
+                lat: 48.3654,
+                lon: 10.89412, // closest to gtfs_correct
+            },
+            OsmStopInfo {
+                ifopt: "de:09761:131:0:a".to_string(),
+                name: Some("Barfüßerbrücke".to_string()),
+                lat: 48.3658,
+                lon: 10.8941, // slightly different coords
+            },
+            OsmStopInfo {
+                ifopt: "de:09761:131:0:a".to_string(),
+                name: Some("Barfüßerbrücke".to_string()),
+                lat: 48.3662,
+                lon: 10.8941, // even farther
+            },
+        ];
+
+        let tram_routes: HashSet<RouteIdentifier> =
+            [make_route("1", TransportType::Tram)].into_iter().collect();
+
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        osm_route_sets.insert("de:09761:131:0:a".to_string(), tram_routes.clone());
+
+        let mut gtfs_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        gtfs_route_sets.insert("gtfs_correct".to_string(), tram_routes.clone());
+        gtfs_route_sets.insert("gtfs_wrong".to_string(), tram_routes);
+
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
+
+        // Only one match (duplicates are skipped)
+        assert_eq!(stats.matched, 1);
+        assert_eq!(
+            schedule.ifopt_to_gtfs.get("de:09761:131:0:a"),
+            Some(&vec!["gtfs_correct".to_string()]),
+            "First IFOPT entry (closest to gtfs_correct) should be matched, duplicates skipped"
+        );
+    }
+
+    // --- Cross-station theft and direction disambiguation tests ---
+
+    #[test]
+    fn test_cross_station_theft_prevented_by_fallback_distance_limit() {
+        // Maria-Alber scenario: Station A has 5 OSM platforms (2 with Line 6 routes).
+        // Station B (Rudolf-Diesel-Gymnasium, ~400m away) has 1 GTFS stop also serving Line 6.
+        // Bug: without fallback distance limit, station A's 2nd platform would "steal" station B's
+        // GTFS stop because its nearest candidate was claimed and it fell back to ANY unclaimed one.
+        let mut schedule = GtfsSchedule {
+            stops: HashMap::new(),
+            routes: HashMap::new(),
+            trips: HashMap::new(),
+            stop_times: HashMap::new(),
+            calendars: HashMap::new(),
+            calendar_dates: HashMap::new(),
+            trips_by_stop: HashMap::new(),
+            ifopt_to_gtfs: HashMap::new(),
+            gtfs_to_ifopt: HashMap::new(),
+            loaded_at: chrono::Utc::now(),
+        };
+
+        // Station A (Maria-Alber) center: 48.3565, 10.9850
+        // GTFS stop at station A serving Line 6
+        schedule.stops.insert(
+            "gtfs_a_line6".to_string(),
+            GtfsStop {
+                stop_id: "gtfs_a_line6".to_string(),
+                stop_name: Some("Friedberg Maria-Alber".to_string()),
+                parent_station: Some("parent_a".to_string()),
+                lat: Some(48.3565),
+                lon: Some(10.9850),
+            },
+        );
+        schedule
+            .trips_by_stop
+            .insert("gtfs_a_line6".to_string(), HashSet::from(["trip_a".to_string()]));
+
+        // Station B (Rudolf-Diesel-Gymnasium) ~400m away: 48.3600, 10.9850
+        // GTFS stop at station B also serving Line 6
+        schedule.stops.insert(
+            "gtfs_b_line6".to_string(),
+            GtfsStop {
+                stop_id: "gtfs_b_line6".to_string(),
+                stop_name: Some("Rudolf-Diesel-Gymnasium".to_string()),
+                parent_station: Some("parent_b".to_string()),
+                lat: Some(48.3600),
+                lon: Some(10.9850),
+            },
+        );
+        schedule
+            .trips_by_stop
+            .insert("gtfs_b_line6".to_string(), HashSet::from(["trip_b".to_string()]));
+
+        // Station A has 5 OSM platforms; 2 have Line 6 routes
+        // Platform A is closest to gtfs_a_line6 (~5m)
+        let osm_stops = vec![
+            OsmStopInfo {
+                ifopt: "de:maria:1:0:A".to_string(),
+                name: Some("Maria-Alber A".to_string()),
+                lat: 48.35654,
+                lon: 10.98504,
+            },
+            OsmStopInfo {
+                ifopt: "de:maria:1:0:B".to_string(),
+                name: Some("Maria-Alber B".to_string()),
+                lat: 48.3568,
+                lon: 10.9853,
+            },
+            OsmStopInfo {
+                ifopt: "de:maria:1:0:C".to_string(),
+                name: Some("Maria-Alber C".to_string()),
+                lat: 48.3563,
+                lon: 10.9848,
+            },
+            OsmStopInfo {
+                ifopt: "de:maria:1:0:D".to_string(),
+                name: Some("Maria-Alber D".to_string()),
+                lat: 48.3567,
+                lon: 10.9852,
+            },
+            OsmStopInfo {
+                ifopt: "de:maria:1:0:E".to_string(),
+                name: Some("Maria-Alber E".to_string()),
+                lat: 48.3565,
+                lon: 10.9853,
+            },
+        ];
+
+        // Only platforms A and B have Line 6 routes
+        let line6_routes: HashSet<RouteIdentifier> =
+            [make_route("6", TransportType::Bus)].into_iter().collect();
+        let other_routes: HashSet<RouteIdentifier> =
+            [make_route("3", TransportType::Bus)].into_iter().collect();
+
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        osm_route_sets.insert("de:maria:1:0:A".to_string(), line6_routes.clone());
+        osm_route_sets.insert("de:maria:1:0:B".to_string(), line6_routes.clone());
+        osm_route_sets.insert("de:maria:1:0:C".to_string(), other_routes.clone());
+        osm_route_sets.insert("de:maria:1:0:D".to_string(), other_routes.clone());
+        osm_route_sets.insert("de:maria:1:0:E".to_string(), other_routes);
+
+        let mut gtfs_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        gtfs_route_sets.insert("gtfs_a_line6".to_string(), line6_routes.clone());
+        gtfs_route_sets.insert("gtfs_b_line6".to_string(), line6_routes);
+
+        let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
+
+        // Platform A (closest to gtfs_a_line6) should claim it
+        assert_eq!(
+            schedule.ifopt_to_gtfs.get("de:maria:1:0:A"),
+            Some(&vec!["gtfs_a_line6".to_string()]),
+            "Closest Line 6 platform should claim station A's GTFS stop"
+        );
+
+        // Station B's GTFS stop (400m away) should NOT be claimed by any station A platform.
+        // The fallback distance limit (max 200m) prevents this.
+        assert!(
+            !schedule.gtfs_to_ifopt.contains_key("gtfs_b_line6")
+                || schedule.gtfs_to_ifopt.get("gtfs_b_line6")
+                    .map(|ifopts| !ifopts.iter().any(|ifopt| ifopt.starts_with("de:maria:")))
+                    .unwrap_or(true),
+            "Station B's GTFS stop must NOT be stolen by any station A platform"
+        );
+
+        // Platform B shares gtfs_a_line6 via station-level fallback (same station sibling)
+        assert_eq!(
+            schedule.ifopt_to_gtfs.get("de:maria:1:0:B"),
+            Some(&vec!["gtfs_a_line6".to_string()]),
+            "Platform B should share station A's GTFS stop via station fallback"
+        );
+
+        // 2 matches at station A (platform A claims, platform B shares via fallback)
+        assert_eq!(stats.matched, 2, "Two matches at station A via station fallback");
+    }
+
+    #[test]
+    fn test_direction_disambiguation_via_trip_overlap() {
+        // Two platforms at same station serve Line 6 in different directions.
+        // Two GTFS stops at that station, each visited by different trips.
+        // A third station ("anchor") on the same routes is already unambiguously matched,
+        // establishing which trips belong to which directional route.
+        // The anchor's trip overlap tells us which GTFS stop at the target station
+        // serves the same direction as each platform.
+        let mut schedule = GtfsSchedule {
+            stops: HashMap::new(),
+            routes: HashMap::new(),
+            trips: HashMap::new(),
+            stop_times: HashMap::new(),
+            calendars: HashMap::new(),
+            calendar_dates: HashMap::new(),
+            trips_by_stop: HashMap::new(),
+            ifopt_to_gtfs: HashMap::new(),
+            gtfs_to_ifopt: HashMap::new(),
+            loaded_at: chrono::Utc::now(),
+        };
+
+        // Anchor GTFS stop at a different station, unambiguously close to one platform.
+        // This stop's trips establish the direction fingerprint for osm_route 1001.
+        schedule.stops.insert(
+            "gtfs_anchor".to_string(),
+            GtfsStop {
+                stop_id: "gtfs_anchor".to_string(),
+                stop_name: Some("Anchor Station".to_string()),
+                parent_station: Some("parent_anchor".to_string()),
+                lat: Some(48.360),
+                lon: Some(10.985),
+            },
+        );
+        // Trips T1,T2,T3 go through anchor and gtfs_north (same direction: osm_route 1001)
+        // Trips T4,T5,T6 go through gtfs_south only (opposite direction: osm_route 1002)
+        schedule.trips_by_stop.insert(
+            "gtfs_anchor".to_string(),
+            HashSet::from(["T1".to_string(), "T2".to_string(), "T3".to_string()]),
+        );
+
+        // Two GTFS stops at target station (equidistant from both platforms)
+        schedule.stops.insert(
+            "gtfs_north".to_string(),
+            GtfsStop {
+                stop_id: "gtfs_north".to_string(),
+                stop_name: Some("Maria-Alber".to_string()),
+                parent_station: Some("parent".to_string()),
+                lat: Some(48.3565),
+                lon: Some(10.9850),
+            },
+        );
+        schedule.stops.insert(
+            "gtfs_south".to_string(),
+            GtfsStop {
+                stop_id: "gtfs_south".to_string(),
+                stop_name: Some("Maria-Alber".to_string()),
+                parent_station: Some("parent".to_string()),
+                lat: Some(48.3565),
+                lon: Some(10.9850), // same position — only trips differ
+            },
+        );
+        // gtfs_north shares trips with anchor (same direction)
+        schedule.trips_by_stop.insert(
+            "gtfs_north".to_string(),
+            HashSet::from(["T1".to_string(), "T2".to_string(), "T3".to_string()]),
+        );
+        // gtfs_south has completely different trips (opposite direction)
+        schedule.trips_by_stop.insert(
+            "gtfs_south".to_string(),
+            HashSet::from(["T4".to_string(), "T5".to_string(), "T6".to_string()]),
+        );
+
+        // Anchor platform: unambiguously on osm_route 1001, close to gtfs_anchor
+        let osm_stops = vec![
+            OsmStopInfo {
+                ifopt: "de:anchor:1:0:X".to_string(),
+                name: Some("Anchor".to_string()),
+                lat: 48.360,
+                lon: 10.985,
+            },
+            // Platform A: on osm_route 1001 (same as anchor)
+            OsmStopInfo {
+                ifopt: "de:maria:1:0:A".to_string(),
+                name: Some("Maria-Alber A".to_string()),
+                lat: 48.3565,
+                lon: 10.9850,
+            },
+            // Platform B: on osm_route 1002 (opposite direction)
+            OsmStopInfo {
+                ifopt: "de:maria:1:0:B".to_string(),
+                name: Some("Maria-Alber B".to_string()),
+                lat: 48.3565,
+                lon: 10.9850, // same position — only route differs
+            },
+        ];
+
+        let line6_routes: HashSet<RouteIdentifier> =
+            [make_route("6", TransportType::Bus)].into_iter().collect();
+
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        osm_route_sets.insert("de:anchor:1:0:X".to_string(), line6_routes.clone());
+        osm_route_sets.insert("de:maria:1:0:A".to_string(), line6_routes.clone());
+        osm_route_sets.insert("de:maria:1:0:B".to_string(), line6_routes.clone());
+
+        let mut gtfs_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        gtfs_route_sets.insert("gtfs_anchor".to_string(), line6_routes.clone());
+        gtfs_route_sets.insert("gtfs_north".to_string(), line6_routes.clone());
+        gtfs_route_sets.insert("gtfs_south".to_string(), line6_routes);
+
+        // Directional routes: anchor + platform A on route 1001, platform B on route 1002
+        let mut osm_directional_routes: HashMap<String, HashSet<i64>> = HashMap::new();
+        osm_directional_routes
+            .insert("de:anchor:1:0:X".to_string(), HashSet::from([1001]));
+        osm_directional_routes
+            .insert("de:maria:1:0:A".to_string(), HashSet::from([1001]));
+        osm_directional_routes
+            .insert("de:maria:1:0:B".to_string(), HashSet::from([1002]));
+
+        let stats = schedule.build_ifopt_mapping_with_direction(
+            &osm_stops,
+            &osm_route_sets,
+            &gtfs_route_sets,
+            &osm_directional_routes,
+        );
+
+        assert_eq!(stats.matched, 3, "All three platforms should be matched");
+
+        // Anchor gets gtfs_anchor (closest geographically)
+        assert_eq!(
+            schedule.ifopt_to_gtfs.get("de:anchor:1:0:X"),
+            Some(&vec!["gtfs_anchor".to_string()]),
+        );
+
+        // Platform A (osm_route 1001, same as anchor) should get gtfs_north
+        // because gtfs_north shares trips T1,T2,T3 with the anchor's gtfs_anchor
+        assert_eq!(
+            schedule.ifopt_to_gtfs.get("de:maria:1:0:A"),
+            Some(&vec!["gtfs_north".to_string()]),
+            "Platform A should match gtfs_north via trip overlap with anchor"
+        );
+
+        // Platform B (osm_route 1002) should get gtfs_south
+        assert_eq!(
+            schedule.ifopt_to_gtfs.get("de:maria:1:0:B"),
+            Some(&vec!["gtfs_south".to_string()]),
+            "Platform B should match gtfs_south (the remaining stop)"
+        );
+    }
+
+    #[test]
+    fn test_direction_fallback_without_trip_data() {
+        // When no directional route data is available, matching should still work
+        // using distance-first sorting (graceful degradation).
+        let mut schedule = GtfsSchedule {
+            stops: HashMap::new(),
+            routes: HashMap::new(),
+            trips: HashMap::new(),
+            stop_times: HashMap::new(),
+            calendars: HashMap::new(),
+            calendar_dates: HashMap::new(),
+            trips_by_stop: HashMap::new(),
+            ifopt_to_gtfs: HashMap::new(),
+            gtfs_to_ifopt: HashMap::new(),
+            loaded_at: chrono::Utc::now(),
+        };
+
+        schedule.stops.insert(
+            "gtfs_1".to_string(),
+            GtfsStop {
+                stop_id: "gtfs_1".to_string(),
+                stop_name: Some("Stop".to_string()),
+                parent_station: Some("parent".to_string()),
+                lat: Some(48.3565),
+                lon: Some(10.9850),
+            },
+        );
+        schedule
+            .trips_by_stop
+            .insert("gtfs_1".to_string(), HashSet::from(["trip1".to_string()]));
+
+        let osm_stops = vec![OsmStopInfo {
+            ifopt: "de:test:1:0:A".to_string(),
+            name: Some("Stop A".to_string()),
+            lat: 48.3566,
+            lon: 10.9851,
+        }];
+
+        let line6: HashSet<RouteIdentifier> =
+            [make_route("6", TransportType::Bus)].into_iter().collect();
+
+        let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        osm_route_sets.insert("de:test:1:0:A".to_string(), line6.clone());
+
+        let mut gtfs_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
+        gtfs_route_sets.insert("gtfs_1".to_string(), line6);
+
+        // No directional route data available
+        let stats = schedule.build_ifopt_mapping_with_direction(
+            &osm_stops,
+            &osm_route_sets,
+            &gtfs_route_sets,
+            &HashMap::new(),
+        );
+
+        assert_eq!(stats.matched, 1, "Should still match without direction data");
+        assert_eq!(
+            schedule.ifopt_to_gtfs.get("de:test:1:0:A"),
+            Some(&vec!["gtfs_1".to_string()]),
+        );
     }
 }

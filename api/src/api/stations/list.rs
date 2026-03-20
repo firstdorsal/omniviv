@@ -139,15 +139,17 @@ pub async fn list_stations(
         map
     };
 
-    // Only return stations that have at least one platform linked to them
-    // This filters out bus-only stop_areas when we only have tram platforms
+    // Only return stations that have at least one platform or stop_position linked to them.
+    // This filters out empty stop_areas (e.g. bus-only when only tram data is imported)
+    // while still including stations that have stop_positions but no platform elements in OSM.
     let station_rows: Vec<StationRow> = if let Some(area_id) = query.area_id {
         sqlx::query_as(
             r#"
             SELECT DISTINCT s.osm_id, s.osm_type, s.name, s.ref_ifopt, s.lat, s.lon, s.area_id
             FROM stations s
-            INNER JOIN platforms p ON p.station_id = s.osm_id
             WHERE s.area_id = $1
+              AND (EXISTS (SELECT 1 FROM platforms WHERE station_id = s.osm_id)
+                OR EXISTS (SELECT 1 FROM stop_positions WHERE station_id = s.osm_id))
             ORDER BY s.name
             "#,
         )
@@ -159,7 +161,8 @@ pub async fn list_stations(
             r#"
             SELECT DISTINCT s.osm_id, s.osm_type, s.name, s.ref_ifopt, s.lat, s.lon, s.area_id
             FROM stations s
-            INNER JOIN platforms p ON p.station_id = s.osm_id
+            WHERE EXISTS (SELECT 1 FROM platforms WHERE station_id = s.osm_id)
+               OR EXISTS (SELECT 1 FROM stop_positions WHERE station_id = s.osm_id)
             ORDER BY s.name
             "#,
         )
