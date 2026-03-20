@@ -1,0 +1,280 @@
+import { useMemo, useState } from "react";
+import { EventType, type Departure } from "../api";
+import { LiveTime } from "./LiveTime";
+
+export interface TripEvent {
+    tripId: string;
+    lineNumber: string;
+    destination: string;
+    arrivalTime: string | null;
+    arrivalIsLive: boolean;
+    departureTime: string | null;
+    departureIsLive: boolean;
+    delayMinutes: number | null;
+    /** Trip has been cancelled (strike, disruption, etc.) */
+    cancelled: boolean;
+}
+
+type TimeColumn = "departure" | "arrival" | "relative";
+
+interface DepartureTableProps {
+    events: Departure[];
+    routeColors: globalThis.Map<string, string>;
+    referenceTime?: Date;
+    maxTrips?: number;
+}
+
+/** Build TripEvent[] from raw Departure events, grouping by trip_id. */
+export function buildTripEvents(events: Departure[]): TripEvent[] {
+    const tripMap = new Map<string, TripEvent>();
+
+    for (const event of events) {
+        if (!event.trip_id) continue;
+        const existing = tripMap.get(event.trip_id);
+        const time = event.estimated_time || event.planned_time;
+        const isLive = event.estimated_time != null;
+
+        if (existing) {
+            if (event.event_type === EventType.Arrival) {
+                existing.arrivalTime = time;
+                existing.arrivalIsLive = isLive;
+            } else {
+                existing.departureTime = time;
+                existing.departureIsLive = isLive;
+            }
+            if (event.delay_minutes !== null) {
+                existing.delayMinutes = event.delay_minutes;
+            }
+            if (event.cancelled) {
+                existing.cancelled = true;
+            }
+        } else {
+            tripMap.set(event.trip_id, {
+                tripId: event.trip_id,
+                lineNumber: event.line_number,
+                destination: event.destination,
+                arrivalTime: event.event_type === EventType.Arrival ? time : null,
+                arrivalIsLive: event.event_type === EventType.Arrival && isLive,
+                departureTime: event.event_type === EventType.Departure ? time : null,
+                departureIsLive: event.event_type === EventType.Departure && isLive,
+                delayMinutes: event.delay_minutes ?? null,
+                cancelled: event.cancelled === true,
+            });
+        }
+    }
+
+    return Array.from(tripMap.values()).sort((a, b) => {
+        const timeA = a.arrivalTime || a.departureTime || "";
+        const timeB = b.arrivalTime || b.departureTime || "";
+        return timeA.localeCompare(timeB);
+    });
+}
+
+function formatRelativeTime(isoTime: string, referenceTime?: Date): string {
+    const now = referenceTime ?? new Date();
+    const target = new Date(isoTime);
+    const diffMs = target.getTime() - now.getTime();
+    const diffMin = Math.round(diffMs / 60000);
+
+    if (diffMin <= 0) return "jetzt";
+    if (diffMin > 59) {
+        return target.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+    return `${diffMin} Min`;
+}
+
+function RelativeTime({ time, isLive, delayMinutes, referenceTime }: {
+    time: string;
+    isLive: boolean;
+    delayMinutes: number | null;
+    referenceTime?: Date;
+}) {
+    const relative = formatRelativeTime(time, referenceTime);
+    const delay = delayMinutes ?? 0;
+
+    if (!isLive) {
+        return (
+            <span className="text-muted-foreground tabular-nums">
+                {relative}
+            </span>
+        );
+    }
+
+    let colorClass: string;
+    let dotClass: string;
+    if (delay > 0) {
+        colorClass = "text-destructive";
+        dotClass = "bg-destructive";
+    } else if (delay < 0) {
+        colorClass = "text-green-600 dark:text-green-500";
+        dotClass = "bg-green-600 dark:bg-green-500";
+    } else {
+        colorClass = "text-foreground";
+        dotClass = "bg-foreground";
+    }
+
+    return (
+        <span className={`${colorClass} tabular-nums inline-flex items-center gap-1`}>
+            <span className="relative flex h-1.5 w-1.5 shrink-0">
+                <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-50 ${dotClass}`} />
+                <span className={`relative inline-flex h-1.5 w-1.5 rounded-full ${dotClass}`} />
+            </span>
+            {relative}
+        </span>
+    );
+}
+
+export function DepartureTable({ events, routeColors, referenceTime, maxTrips = 8 }: DepartureTableProps) {
+    const [visibleColumns, setVisibleColumns] = useState<TimeColumn[]>(["relative"]);
+    const [hiddenLines, setHiddenLines] = useState<Set<string>>(new Set());
+
+    const allTripEvents = useMemo(() => buildTripEvents(events), [events]);
+
+    const availableLines = useMemo(() => {
+        const lines = new Set<string>();
+        for (const trip of allTripEvents) {
+            lines.add(trip.lineNumber);
+        }
+        return Array.from(lines).sort((a, b) => {
+            const numA = parseInt(a, 10);
+            const numB = parseInt(b, 10);
+            if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+            return a.localeCompare(b);
+        });
+    }, [allTripEvents]);
+
+    const filteredTrips = useMemo(() => {
+        if (hiddenLines.size === 0) return allTripEvents;
+        return allTripEvents.filter((trip) => !hiddenLines.has(trip.lineNumber));
+    }, [allTripEvents, hiddenLines]);
+
+    const toggleLine = (line: string) => {
+        setHiddenLines((prev) => {
+            const next = new Set(prev);
+            if (next.has(line)) {
+                next.delete(line);
+            } else {
+                next.add(line);
+            }
+            return next;
+        });
+    };
+
+    if (allTripEvents.length === 0) {
+        return <div className="text-xs text-muted-foreground">Keine bevorstehenden Abfahrten</div>;
+    }
+
+    const showArr = visibleColumns.includes("arrival");
+    const showDep = visibleColumns.includes("departure");
+    const showRel = visibleColumns.includes("relative");
+
+    return (
+        <div className="flex flex-col gap-2">
+            {/* Line filter */}
+            {availableLines.length > 1 && (
+                <div className="flex flex-wrap gap-1">
+                    {availableLines.map((line) => {
+                        const color = routeColors.get(line) || "#6b7280";
+                        const isHidden = hiddenLines.has(line);
+                        return (
+                            <button
+                                key={line}
+                                className="inline-flex items-center rounded-md text-xs font-mono font-semibold px-1.5 py-0.5 border cursor-pointer select-none transition-all"
+                                style={isHidden ? {
+                                    borderColor: "var(--border)",
+                                    color: "var(--muted-foreground)",
+                                    backgroundColor: "transparent",
+                                    textDecoration: "line-through",
+                                    opacity: 0.5,
+                                } : {
+                                    borderColor: color,
+                                    backgroundColor: color,
+                                    color: "#fff",
+                                }}
+                                onClick={() => toggleLine(line)}
+                            >
+                                {line}
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
+
+            {/* Time column toggles — multi-select */}
+            <div className="flex gap-1">
+                {([["departure", "Abfahrt"], ["arrival", "Ankunft"], ["relative", "Abfahrt in"]] as const).map(([col, label]) => {
+                    const active = visibleColumns.includes(col);
+                    return (
+                        <button
+                            key={col}
+                            className={`text-xs px-2 py-0.5 rounded-md border cursor-pointer select-none transition-colors ${
+                                active
+                                    ? "bg-foreground text-background border-foreground"
+                                    : "bg-transparent text-muted-foreground border-border hover:border-muted-foreground"
+                            }`}
+                            onClick={() => {
+                                setVisibleColumns((prev) => {
+                                    if (active && prev.length <= 1) return prev;
+                                    return active ? prev.filter((c) => c !== col) : [...prev, col];
+                                });
+                            }}
+                        >
+                            {label}
+                        </button>
+                    );
+                })}
+            </div>
+
+            {/* Departures table */}
+            <table className="text-sm">
+                <thead>
+                    <tr className="text-xs text-muted-foreground">
+                        <th className="text-left font-medium pr-2">Linie</th>
+                        <th className="text-left font-medium pr-3">Ziel</th>
+                        {showArr && <th className="text-left font-medium pr-2">Ankunft</th>}
+                        {showDep && <th className="text-left font-medium pr-2">Abfahrt</th>}
+                        {showRel && <th className="text-left font-medium pr-2">Abfahrt in</th>}
+                    </tr>
+                </thead>
+                <tbody>
+                    {filteredTrips.slice(0, maxTrips).map((trip) => {
+                        const color = routeColors.get(trip.lineNumber) || "#6b7280";
+                        // For the relative column, prefer departure time, fall back to arrival
+                        const relTimeStr = trip.departureTime ?? trip.arrivalTime;
+                        const relIsLive = trip.departureTime ? trip.departureIsLive : trip.arrivalIsLive;
+
+                        return (
+                            <tr key={trip.tripId} className={`whitespace-nowrap${trip.cancelled ? " line-through opacity-50" : ""}`}>
+                                <td className="font-mono font-semibold pr-2" style={{ color }}>
+                                    {trip.lineNumber}
+                                </td>
+                                <td className="pr-3">{trip.destination}</td>
+                                {showArr && (
+                                    <td className="pr-2">
+                                        {trip.arrivalTime
+                                            ? <LiveTime time={trip.arrivalTime} isLive={trip.arrivalIsLive} delayMinutes={trip.delayMinutes} />
+                                            : <span className="text-muted-foreground">—</span>}
+                                    </td>
+                                )}
+                                {showDep && (
+                                    <td className="pr-2">
+                                        {trip.departureTime
+                                            ? <LiveTime time={trip.departureTime} isLive={trip.departureIsLive} delayMinutes={trip.delayMinutes} />
+                                            : <span className="text-muted-foreground">—</span>}
+                                    </td>
+                                )}
+                                {showRel && (
+                                    <td className="pr-2">
+                                        {relTimeStr
+                                            ? <RelativeTime time={relTimeStr} isLive={relIsLive} delayMinutes={trip.delayMinutes} referenceTime={referenceTime} />
+                                            : <span className="text-muted-foreground">—</span>}
+                                    </td>
+                                )}
+                            </tr>
+                        );
+                    })}
+                </tbody>
+            </table>
+        </div>
+    );
+}
