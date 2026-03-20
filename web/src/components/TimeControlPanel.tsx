@@ -43,13 +43,13 @@ export function TimeControlPanel({ timeSimulation }: TimeControlPanelProps) {
     };
 
     const getSpeedLabel = (s: number) => {
-        if (s === 0) return "Paused";
+        if (s === 0) return "Pausiert";
         return `${s}x`;
     };
 
     return (
         <div className="p-4">
-            <h2 className="font-semibold mb-4">Time Control</h2>
+            <h2 className="font-semibold mb-4">Zeitsteuerung</h2>
 
             {/* Current time display */}
             <div className="mb-4 p-3 bg-muted rounded-lg">
@@ -61,7 +61,7 @@ export function TimeControlPanel({ timeSimulation }: TimeControlPanelProps) {
                 </div>
                 <div className="text-xs text-center mt-2 text-orange-500 font-medium h-4">
                     {!isRealTime && (
-                        <>Simulation Mode {speed > 0 ? `(${speed}x)` : "(Paused)"}</>
+                        <>Simulationsmodus {speed > 0 ? `(${speed}x)` : "(Pausiert)"}</>
                     )}
                 </div>
                 <Button
@@ -72,13 +72,13 @@ export function TimeControlPanel({ timeSimulation }: TimeControlPanelProps) {
                     className="w-full mt-2"
                 >
                     <RotateCcw className="h-4 w-4 mr-2" />
-                    Reset to Real-time
+                    Zurück zur Echtzeit
                 </Button>
             </div>
 
             {/* Simulated time controls */}
             <div className="space-y-3">
-                <h3 className="text-sm font-semibold text-muted-foreground">Simulated Time</h3>
+                <h3 className="text-sm font-semibold text-muted-foreground">Simulierte Zeit</h3>
                 <div>
                     <DateTimePicker value={currentTime} onChange={setTime} />
                     {/* Quick time adjustments */}
@@ -100,7 +100,7 @@ export function TimeControlPanel({ timeSimulation }: TimeControlPanelProps) {
                 {/* Speed control */}
                 <div>
                     <div className="flex justify-between items-center mb-2">
-                        <label className="text-sm font-medium">Speed</label>
+                        <label className="text-sm font-medium">Geschwindigkeit</label>
                         <span className="text-sm font-mono tabular-nums bg-muted px-2 py-0.5 rounded">
                             {getSpeedLabel(speed)}
                         </span>
@@ -140,7 +140,7 @@ export function TimeControlPanel({ timeSimulation }: TimeControlPanelProps) {
                             className="w-full"
                         >
                             <Play className="h-4 w-4 mr-2" />
-                            Resume
+                            Fortsetzen
                         </Button>
                     ) : (
                         <Button
@@ -150,7 +150,7 @@ export function TimeControlPanel({ timeSimulation }: TimeControlPanelProps) {
                             className="w-full"
                         >
                             <Pause className="h-4 w-4 mr-2" />
-                            Pause
+                            Pausieren
                         </Button>
                     )}
                 </div>

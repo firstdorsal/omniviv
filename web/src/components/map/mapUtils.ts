@@ -31,3 +31,27 @@ export function formatTime(isoString: string): string {
     const date = new Date(isoString);
     return getTimeFormatter().format(date);
 }
+
+/** Split a formatted time into the main part (HH:MM + AM/PM) and the seconds part (:SS).
+ *  Works with both 24h (14:30:45) and 12h (03:30:45 PM) locales. */
+export function formatTimeParts(isoString: string): { main: string; seconds: string } {
+    const parts = getTimeFormatter().formatToParts(new Date(isoString));
+    // Find the index of the "second" part and its preceding separator
+    const secondIdx = parts.findIndex(p => p.type === "second");
+    if (secondIdx < 0) {
+        return { main: getTimeFormatter().format(new Date(isoString)), seconds: "" };
+    }
+    // The literal immediately before "second" is the separator (e.g., ":")
+    const sepIdx = secondIdx > 0 && parts[secondIdx - 1].type === "literal" ? secondIdx - 1 : -1;
+
+    let main = "";
+    let seconds = "";
+    for (let i = 0; i < parts.length; i++) {
+        if (i === sepIdx || i === secondIdx) {
+            seconds += parts[i].value;
+        } else {
+            main += parts[i].value;
+        }
+    }
+    return { main, seconds };
+}

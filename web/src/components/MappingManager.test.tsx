@@ -135,11 +135,11 @@ describe("MappingManager", () => {
         render(<MappingManager onMapDataChange={onMapDataChange} />);
 
         await waitFor(() => {
-            expect(screen.getByText("120 / 200 mapped")).toBeInTheDocument();
+            expect(screen.getByText("120 / 200 zugeordnet")).toBeInTheDocument();
         });
 
-        expect(screen.getByText("20 manual, 100 auto")).toBeInTheDocument();
-        expect(screen.getByText("80 unmapped")).toBeInTheDocument();
+        expect(screen.getByText("20 manuell, 100 automatisch")).toBeInTheDocument();
+        expect(screen.getByText("80 nicht zugeordnet")).toBeInTheDocument();
     });
 
     it("renders filter tabs with correct counts", async () => {
@@ -160,12 +160,12 @@ describe("MappingManager", () => {
         render(<MappingManager onMapDataChange={onMapDataChange} />);
 
         await waitFor(() => {
-            expect(screen.getByText("All (200)")).toBeInTheDocument();
+            expect(screen.getByText("Alle (200)")).toBeInTheDocument();
         });
 
-        expect(screen.getByText("Unmapped (80)")).toBeInTheDocument();
-        expect(screen.getByText("Manual (20)")).toBeInTheDocument();
-        expect(screen.getByText("Auto (100)")).toBeInTheDocument();
+        expect(screen.getByText("Offen (80)")).toBeInTheDocument();
+        expect(screen.getByText("Manuell (20)")).toBeInTheDocument();
+        expect(screen.getByText("Automatisch (100)")).toBeInTheDocument();
     });
 
     it("renders entries from the response", async () => {
@@ -206,7 +206,7 @@ describe("MappingManager", () => {
 
         render(<MappingManager onMapDataChange={onMapDataChange} />);
 
-        expect(screen.getByText("Loading mappings...")).toBeInTheDocument();
+        expect(screen.getByText("Zuordnungen werden geladen...")).toBeInTheDocument();
     });
 
     it("Use button triggers the set mapping API call", async () => {
@@ -247,14 +247,14 @@ describe("MappingManager", () => {
         });
 
         // Expand the candidates section
-        const expandButton = screen.getByText("1 nearby GTFS stop");
+        const expandButton = screen.getByText("1 GTFS-Halt in der Nähe");
         await user.click(expandButton);
 
         await waitFor(() => {
             expect(screen.getByText("Hauptbahnhof GTFS")).toBeInTheDocument();
         });
 
-        const useButton = screen.getByRole("button", { name: "Use" });
+        const useButton = screen.getByRole("button", { name: "Zuordnen" });
         await user.click(useButton);
 
         await waitFor(() => {
@@ -306,7 +306,7 @@ describe("MappingManager", () => {
             expect(screen.getByText("Hauptbahnhof")).toBeInTheDocument();
         });
 
-        const removeButton = screen.getByRole("button", { name: /Remove/ });
+        const removeButton = screen.getByRole("button", { name: /Entfernen/ });
         await user.click(removeButton);
 
         await waitFor(() => {
@@ -343,7 +343,7 @@ describe("MappingManager", () => {
             expect(screen.getByText("Hauptbahnhof")).toBeInTheDocument();
         });
 
-        expect(screen.queryByRole("button", { name: /Remove/ })).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: /Entfernen/ })).not.toBeInTheDocument();
     });
 
     it("GTFS search triggers the correct API endpoint", async () => {
@@ -387,11 +387,11 @@ describe("MappingManager", () => {
         });
 
         // Expand the candidates section
-        const expandButton = screen.getByText("Search for GTFS stops");
+        const expandButton = screen.getByText("Nach GTFS-Halten suchen");
         await user.click(expandButton);
 
         // Type into the GTFS search input
-        const gtfsSearchInput = screen.getByPlaceholderText("Search GTFS stops...");
+        const gtfsSearchInput = screen.getByPlaceholderText("GTFS-Halte suchen...");
         await user.type(gtfsSearchInput, "Hauptbahnhof");
 
         // Press Enter to trigger search
@@ -443,11 +443,11 @@ describe("MappingManager", () => {
         });
 
         // Expand the candidates section
-        const expandButton = screen.getByText("Search for GTFS stops");
+        const expandButton = screen.getByText("Nach GTFS-Halten suchen");
         await user.click(expandButton);
 
         // Type search term
-        const gtfsSearchInput = screen.getByPlaceholderText("Search GTFS stops...");
+        const gtfsSearchInput = screen.getByPlaceholderText("GTFS-Halte suchen...");
         await user.type(gtfsSearchInput, "Bahnhof");
 
         // Click the search button (adjacent to the input)
@@ -471,11 +471,11 @@ describe("MappingManager", () => {
 
             // Wait for initial load to complete
             await waitFor(() => {
-                expect(screen.getByText("All (100)")).toBeInTheDocument();
+                expect(screen.getByText("Alle (100)")).toBeInTheDocument();
             });
 
             // Click Unmapped first to change state
-            const unmappedButton = screen.getByText(/^Unmapped \(/);
+            const unmappedButton = screen.getByText(/^Offen \(/);
             await user.click(unmappedButton);
 
             await waitFor(() => {
@@ -494,7 +494,7 @@ describe("MappingManager", () => {
             fetchCalls = [];
 
             // Now click All
-            const allButton = screen.getByText(/^All \(/);
+            const allButton = screen.getByText(/^Alle \(/);
             await user.click(allButton);
 
             await waitFor(() => {
@@ -521,12 +521,12 @@ describe("MappingManager", () => {
             render(<MappingManager onMapDataChange={onMapDataChange} />);
 
             await waitFor(() => {
-                expect(screen.getByText("All (100)")).toBeInTheDocument();
+                expect(screen.getByText("Alle (100)")).toBeInTheDocument();
             });
 
             fetchCalls = [];
 
-            const unmappedButton = screen.getByText(/^Unmapped \(/);
+            const unmappedButton = screen.getByText(/^Offen \(/);
             await user.click(unmappedButton);
 
             await waitFor(() => {
@@ -552,12 +552,12 @@ describe("MappingManager", () => {
             render(<MappingManager onMapDataChange={onMapDataChange} />);
 
             await waitFor(() => {
-                expect(screen.getByText("All (100)")).toBeInTheDocument();
+                expect(screen.getByText("Alle (100)")).toBeInTheDocument();
             });
 
             fetchCalls = [];
 
-            const manualButton = screen.getByText(/^Manual \(/);
+            const manualButton = screen.getByText(/^Manuell \(/);
             await user.click(manualButton);
 
             await waitFor(() => {
@@ -583,12 +583,12 @@ describe("MappingManager", () => {
             render(<MappingManager onMapDataChange={onMapDataChange} />);
 
             await waitFor(() => {
-                expect(screen.getByText("All (100)")).toBeInTheDocument();
+                expect(screen.getByText("Alle (100)")).toBeInTheDocument();
             });
 
             fetchCalls = [];
 
-            const autoButton = screen.getByText(/^Auto \(/);
+            const autoButton = screen.getByText(/^Automatisch \(/);
             await user.click(autoButton);
 
             await waitFor(() => {
@@ -618,12 +618,12 @@ describe("MappingManager", () => {
         render(<MappingManager onMapDataChange={onMapDataChange} />);
 
         await waitFor(() => {
-            expect(screen.getByText("All (100)")).toBeInTheDocument();
+            expect(screen.getByText("Alle (100)")).toBeInTheDocument();
         });
 
         fetchCalls = [];
 
-        const searchInput = screen.getByPlaceholderText("Search by name or IFOPT...");
+        const searchInput = screen.getByPlaceholderText("Nach Name oder IFOPT suchen...");
         await user.type(searchInput, "Marienplatz");
 
         // Advance timers past the debounce threshold (300ms)
@@ -718,7 +718,7 @@ describe("MappingManager", () => {
 
         await waitFor(() => {
             expect(
-                screen.getByText("No entries match the current filter")
+                screen.getByText("Keine Einträge für den aktuellen Filter")
             ).toBeInTheDocument();
         });
     });
@@ -738,7 +738,7 @@ describe("MappingManager", () => {
         render(<MappingManager onMapDataChange={onMapDataChange} />);
 
         await waitFor(() => {
-            expect(screen.getByText("Page 1")).toBeInTheDocument();
+            expect(screen.getByText("Seite 1")).toBeInTheDocument();
         });
     });
 
@@ -760,7 +760,7 @@ describe("MappingManager", () => {
             expect(screen.getByText("Hauptbahnhof")).toBeInTheDocument();
         });
 
-        expect(screen.queryByText("Page 1")).not.toBeInTheDocument();
+        expect(screen.queryByText("Seite 1")).not.toBeInTheDocument();
     });
 
     it("displays badge for unmapped entries", async () => {
@@ -777,15 +777,15 @@ describe("MappingManager", () => {
 
         render(<MappingManager onMapDataChange={onMapDataChange} />);
 
-        // Wait for entry to render - "Unmapped" badge text exists alongside "Unmapped (40)" tab
+        // Wait for entry to render - "Offen" badge text exists alongside "Offen (40)" tab
         await waitFor(() => {
             expect(screen.getByText("Hauptbahnhof")).toBeInTheDocument();
         });
 
-        // The badge shows "Unmapped" but the tab shows "Unmapped (40)"
+        // The badge shows "Offen" but the tab shows "Offen (40)"
         // We can find the badge by its exact text
-        const badges = screen.getAllByText("Unmapped");
-        // At least one "Unmapped" badge should exist (from the entry, not the tab button which says "Unmapped (40)")
+        const badges = screen.getAllByText("Offen");
+        // At least one "Offen" badge should exist (from the entry, not the tab button which says "Offen (40)")
         expect(badges.length).toBeGreaterThanOrEqual(1);
     });
 
@@ -807,7 +807,7 @@ describe("MappingManager", () => {
         render(<MappingManager onMapDataChange={onMapDataChange} />);
 
         await waitFor(() => {
-            expect(screen.getByText("Auto 87%")).toBeInTheDocument();
+            expect(screen.getByText("Automatisch 87%")).toBeInTheDocument();
         });
     });
 
@@ -827,13 +827,13 @@ describe("MappingManager", () => {
 
         render(<MappingManager onMapDataChange={onMapDataChange} />);
 
-        // Wait for the entry to load; "Manual" badge text exists alongside "Manual (10)" tab
+        // Wait for the entry to load; "Manuell" badge text exists alongside "Manuell (10)" tab
         await waitFor(() => {
             expect(screen.getByText("Hauptbahnhof")).toBeInTheDocument();
         });
 
-        // The badge shows "Manual" (exact) while the tab shows "Manual (10)"
-        const manualTexts = screen.getAllByText("Manual");
+        // The badge shows "Manuell" (exact) while the tab shows "Manuell (10)"
+        const manualTexts = screen.getAllByText("Manuell");
         expect(manualTexts.length).toBeGreaterThanOrEqual(1);
     });
 
@@ -853,13 +853,13 @@ describe("MappingManager", () => {
         render(<MappingManager onMapDataChange={onMapDataChange} />);
 
         await waitFor(() => {
-            expect(screen.getByText("Page 1")).toBeInTheDocument();
+            expect(screen.getByText("Seite 1")).toBeInTheDocument();
         });
 
         fetchCalls = [];
 
         // Find the forward pagination button. It's the second button in the pagination container.
-        const pageLabel = screen.getByText("Page 1");
+        const pageLabel = screen.getByText("Seite 1");
         const paginationContainer = pageLabel.parentElement!;
         const buttons = paginationContainer.querySelectorAll("button");
         // buttons[0] = previous (disabled), buttons[1] = next
@@ -918,14 +918,14 @@ describe("MappingManager", () => {
         ).length;
 
         // Expand candidates and click Use
-        const expandButton = screen.getByText("1 nearby GTFS stop");
+        const expandButton = screen.getByText("1 GTFS-Halt in der Nähe");
         await user.click(expandButton);
 
         await waitFor(() => {
             expect(screen.getByText("Hauptbahnhof GTFS")).toBeInTheDocument();
         });
 
-        const useButton = screen.getByRole("button", { name: "Use" });
+        const useButton = screen.getByRole("button", { name: "Zuordnen" });
         await user.click(useButton);
 
         await waitFor(() => {

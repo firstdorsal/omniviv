@@ -1,8 +1,9 @@
-import { Terminal } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { EventType, type Departure, type StationPlatform, type StationStopPosition } from "../api";
+import { Pin, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { type Departure, type StationPlatform, type StationStopPosition } from "../api";
 import { getApiClient } from "../apiClient";
-import { formatTime, getPlatformDisplayName } from "./map/mapUtils";
+import { DepartureTable } from "./DepartureTable";
+import { getPlatformDisplayName } from "./map/mapUtils";
 
 interface PlatformPopupProps {
     platform: StationPlatform | StationStopPosition;
@@ -10,59 +11,16 @@ interface PlatformPopupProps {
     routeColors: globalThis.Map<string, string>;
     /** When set, requests schedule-based departures for this simulated time */
     referenceTime?: Date;
+    /** Callback to pin this platform to the sidebar departures panel */
+    onPin?: (stopIfopt: string, displayName: string, stationName?: string) => void;
+    /** Callback to close the popup */
+    onClose?: () => void;
 }
 
-interface TripEvent {
-    tripId: string;
-    lineNumber: string;
-    destination: string;
-    arrivalTime: string | null;
-    departureTime: string | null;
-    delayMinutes: number | null;
-}
-
-export function PlatformPopup({ platform, stationName, routeColors, referenceTime }: PlatformPopupProps) {
+export function PlatformPopup({ platform, stationName, routeColors, referenceTime, onPin, onClose }: PlatformPopupProps) {
     const [events, setEvents] = useState<Departure[]>([]);
     const [loading, setLoading] = useState(true);
     const displayName = getPlatformDisplayName(platform);
-
-    // Group arrivals and departures by trip
-    const tripEvents = useMemo(() => {
-        const tripMap = new Map<string, TripEvent>();
-
-        for (const event of events) {
-            const existing = tripMap.get(event.trip_id);
-            const time = event.estimated_time || event.planned_time;
-
-            if (existing) {
-                if (event.event_type === EventType.Arrival) {
-                    existing.arrivalTime = time;
-                } else {
-                    existing.departureTime = time;
-                }
-                // Use the most recent delay info
-                if (event.delay_minutes !== null) {
-                    existing.delayMinutes = event.delay_minutes;
-                }
-            } else {
-                tripMap.set(event.trip_id, {
-                    tripId: event.trip_id,
-                    lineNumber: event.line_number,
-                    destination: event.destination,
-                    arrivalTime: event.event_type === EventType.Arrival ? time : null,
-                    departureTime: event.event_type === EventType.Departure ? time : null,
-                    delayMinutes: event.delay_minutes ?? null,
-                });
-            }
-        }
-
-        // Sort by earliest time (arrival or departure)
-        return Array.from(tripMap.values()).sort((a, b) => {
-            const timeA = a.arrivalTime || a.departureTime || "";
-            const timeB = b.arrivalTime || b.departureTime || "";
-            return timeA.localeCompare(timeB);
-        });
-    }, [events]);
 
     useEffect(() => {
         if (!platform.ref_ifopt) {
@@ -88,63 +46,45 @@ export function PlatformPopup({ platform, stationName, routeColors, referenceTim
     }, [platform.ref_ifopt, referenceTime]);
 
     return (
-        <div className="p-4 pr-8 bg-popover text-popover-foreground rounded-lg">
-            <div className="font-semibold">Platform {displayName}</div>
-            {stationName && <div className="text-sm text-muted-foreground">{stationName}</div>}
-
-            {/* Events table */}
-            <div className="mt-3 border-t border-border pt-2">
-                {loading ? (
-                    <div className="text-xs text-muted-foreground">Loading...</div>
-                ) : tripEvents.length === 0 ? (
-                    <div className="text-xs text-muted-foreground">No upcoming events</div>
-                ) : (
-                    <table className="text-sm">
-                        <thead>
-                            <tr className="text-xs text-muted-foreground">
-                                <th className="text-left font-medium pr-2">Line</th>
-                                <th className="text-left font-medium pr-3">Destination</th>
-                                <th className="text-left font-medium pr-2">Arrival</th>
-                                <th className="text-left font-medium pr-2">Departure</th>
-                                <th className="text-left font-medium"></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {tripEvents.slice(0, 8).map((trip) => {
-                                const color = routeColors.get(trip.lineNumber) || "#6b7280";
-                                const delayMinutes = trip.delayMinutes ?? 0;
-                                return (
-                                    <tr key={trip.tripId} className="whitespace-nowrap">
-                                        <td className="font-mono font-semibold pr-2" style={{ color }}>
-                                            {trip.lineNumber}
-                                        </td>
-                                        <td className="pr-3">{trip.destination}</td>
-                                        <td className="text-muted-foreground tabular-nums pr-2">
-                                            {trip.arrivalTime ? formatTime(trip.arrivalTime) : "—"}
-                                        </td>
-                                        <td className="text-muted-foreground tabular-nums pr-2">
-                                            {trip.departureTime ? formatTime(trip.departureTime) : "—"}
-                                        </td>
-                                        <td>
-                                            {delayMinutes > 0 && (
-                                                <span className="text-destructive text-xs font-medium">+{delayMinutes}</span>
-                                            )}
-                                        </td>
-                                    </tr>
-                                );
-                            })}
-                        </tbody>
-                    </table>
-                )}
+        <div className="p-4 bg-popover text-popover-foreground rounded-lg">
+            <div className="flex items-start gap-2">
+                <div className="flex-1 min-w-0">
+                    <div className="font-semibold">Steig {displayName}</div>
+                    {stationName && <div className="text-sm text-muted-foreground">{stationName}</div>}
+                </div>
+                <div className="flex shrink-0 items-center gap-0.5">
+                    {onPin && platform.ref_ifopt && (
+                        <button
+                            onClick={() => onPin(platform.ref_ifopt!, `Steig ${displayName}`, stationName)}
+                            className="p-1 text-muted-foreground hover:text-foreground hover:bg-secondary rounded"
+                            title="An Seitenleiste anheften"
+                        >
+                            <Pin className="w-4 h-4" />
+                        </button>
+                    )}
+                    {onClose && (
+                        <button
+                            onClick={onClose}
+                            className="p-1 text-muted-foreground hover:text-foreground hover:bg-secondary rounded"
+                            title="Schließen"
+                        >
+                            <X className="w-4 h-4" />
+                        </button>
+                    )}
+                </div>
             </div>
 
-            <button
-                onClick={() => console.log("Platform:", platform, "Events:", tripEvents)}
-                className="mt-2 p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded"
-                title="Log to console"
-            >
-                <Terminal className="w-4 h-4" />
-            </button>
+            <div className="mt-3 border-t border-border pt-2">
+                {loading ? (
+                    <div className="text-xs text-muted-foreground">Laden...</div>
+                ) : (
+                    <DepartureTable
+                        events={events}
+                        routeColors={routeColors}
+                        referenceTime={referenceTime}
+                    />
+                )}
+            </div>
         </div>
     );
 }

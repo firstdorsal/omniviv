@@ -34,11 +34,11 @@ export function FeaturesPanel({
 
     return (
         <div className="p-4">
-            <h2 className="font-semibold mb-4">Settings</h2>
+            <h2 className="font-semibold mb-4">Einstellungen</h2>
 
             {/* Style Settings */}
             <div className="mb-6">
-                <h3 className="text-sm font-medium text-muted-foreground mb-3">Style</h3>
+                <h3 className="text-sm font-medium text-muted-foreground mb-3">Darstellung</h3>
                 <div className="space-y-4">
                     <div className="flex items-center gap-3">
                         <Switch
@@ -53,7 +53,7 @@ export function FeaturesPanel({
                                 <Sun className="h-4 w-4" />
                             )}
                             <Label htmlFor="dark-mode" className="font-medium cursor-pointer">
-                                {isDark ? "Dark mode" : "Light mode"}
+                                {isDark ? "Dunkelmodus" : "Hellmodus"}
                             </Label>
                         </div>
                     </div>
@@ -63,6 +63,7 @@ export function FeaturesPanel({
             {/* Simulation Settings */}
             <div>
                 <h3 className="text-sm font-medium text-muted-foreground mb-3">Simulation</h3>
+
                 <div className="space-y-4">
                     {/* Königsplatz Rendezvous */}
                     <div className="flex items-start gap-3">
@@ -76,7 +77,7 @@ export function FeaturesPanel({
                                 Königsplatz Rendezvous
                             </Label>
                             <p className="text-sm text-muted-foreground">
-                                Building lights up when trams meet (20:30-00:00)
+                                Gebäude leuchtet wenn Straßenbahnen sich treffen (20:30-00:00)
                             </p>
                             {rendezvousEnabled && rendezvousState && (
                                 <div className="mt-2 p-2 rounded bg-muted text-xs">
@@ -88,15 +89,15 @@ export function FeaturesPanel({
                                         />
                                         <span>
                                             {rendezvousState.isRendezvous
-                                                ? `Rendezvous! ${rendezvousState.tramCount} trams`
-                                                : `Waiting (${rendezvousState.tramCount} tram${rendezvousState.tramCount !== 1 ? "s" : ""})`}
+                                                ? `Rendezvous! ${rendezvousState.tramCount} Straßenbahnen`
+                                                : `Warten (${rendezvousState.tramCount} Straßenbahn${rendezvousState.tramCount !== 1 ? "en" : ""})`}
                                         </span>
                                     </div>
                                 </div>
                             )}
                             {rendezvousEnabled && !rendezvousState && (
                                 <div className="mt-2 p-2 rounded bg-muted text-xs text-muted-foreground">
-                                    Inactive (outside 20:30-00:00 or not dark)
+                                    Inaktiv (außerhalb 20:30-00:00 oder nicht dunkel)
                                 </div>
                             )}
                         </div>
@@ -125,7 +126,7 @@ export function FeaturesPanel({
 
             {/* Tools */}
             <div className="mt-6 pt-4 border-t">
-                <h3 className="text-sm font-medium text-muted-foreground mb-3">Tools</h3>
+                <h3 className="text-sm font-medium text-muted-foreground mb-3">Werkzeuge</h3>
                 <Button
                     variant="outline"
                     className="w-full gap-2"

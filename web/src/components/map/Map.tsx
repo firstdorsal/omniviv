@@ -84,6 +84,7 @@ interface MapProps {
     onHighlightBuilding?: (building: HighlightedBuilding | null) => void;
     mappingLines?: MappingLine[];
     mappingGtfsStops?: MappingGtfsStop[];
+    onPinStop?: (stopIfopt: string, displayName: string, stationName?: string) => void;
 }
 
 interface ContextMenuState {
@@ -365,6 +366,15 @@ export default class Map extends React.Component<MapProps, MapState> {
         this.map?.resetNorth();
     };
 
+    private handlePinStop = (stopIfopt: string, displayName: string, stationName?: string) => {
+        this.props.onPinStop?.(stopIfopt, displayName, stationName);
+        // Close the popup after pinning
+        if (this.popup) {
+            this.popup.remove();
+            this.popup = null;
+        }
+    };
+
     private showPopup = (coordinates: [number, number], content: React.ReactNode) => {
         if (!this.map) return;
 
@@ -381,7 +391,7 @@ export default class Map extends React.Component<MapProps, MapState> {
         this.popupRoot = createRoot(container);
         this.popupRoot.render(content);
 
-        this.popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: "none" })
+        this.popup = new maplibregl.Popup({ closeButton: false, closeOnClick: true, maxWidth: "none" })
             .setLngLat(coordinates)
             .setDOMContent(container)
             .addTo(this.map);
@@ -457,10 +467,12 @@ export default class Map extends React.Component<MapProps, MapState> {
         // Update bearing, zoom, scale, and URL hash on map move
         this.map.on("move", () => {
             if (!this.map) return;
+            const zoom = this.map.getZoom();
             this.setState({
                 bearing: this.map.getBearing(),
-                zoom: this.map.getZoom(),
+                zoom,
             });
+            this.vehicleRenderer?.setZoom(zoom);
             this.updateScale();
             this.syncHashDebounced();
         });
@@ -495,8 +507,13 @@ export default class Map extends React.Component<MapProps, MapState> {
             this.layerManager.setupLayers();
 
             this.vehicleRenderer = new VehicleRenderer(this.layerManager, this.routeColors, this.routeGeometries);
+            this.vehicleRenderer.setZoom(this.map.getZoom());
             this.vehicleRenderer.setOnTrackedVehicleLost(() => {
                 this.setState({ trackedTripId: null });
+            });
+            this.vehicleRenderer.setOnTrackedTripChanged((newTripId) => {
+                // Seamless loop transition: update tracked trip without stopping tracking
+                this.setState({ trackedTripId: newTripId });
             });
 
             this.vehicleTracker = new VehicleTracker(this.map, {
@@ -549,9 +566,9 @@ export default class Map extends React.Component<MapProps, MapState> {
             if (station) {
                 const handlePlatformClick = (platform: StationPlatform | StationStopPosition) => {
                     const platformCoords: [number, number] = [platform.lon, platform.lat];
-                    this.showPopup(platformCoords, <PlatformPopup platform={platform} stationName={station.name ?? undefined} routeColors={this.routeColors} referenceTime={this.props.simulatedTime} />);
+                    this.showPopup(platformCoords, <PlatformPopup platform={platform} stationName={station.name ?? undefined} routeColors={this.routeColors} referenceTime={this.props.simulatedTime} onPin={this.handlePinStop} onClose={() => this.popup?.remove()} />);
                 };
-                this.showPopup(coordinates, <StationPopup station={station} onPlatformClick={handlePlatformClick} />);
+                this.showPopup(coordinates, <StationPopup station={station} onPlatformClick={handlePlatformClick} onClose={() => this.popup?.remove()} />);
             }
         });
 
@@ -565,12 +582,12 @@ export default class Map extends React.Component<MapProps, MapState> {
             for (const station of this.props.stations) {
                 const platform = station.platforms.find((p) => p.osm_id === osmId);
                 if (platform) {
-                    this.showPopup(coordinates, <PlatformPopup platform={platform} stationName={stationName} routeColors={this.routeColors} referenceTime={this.props.simulatedTime} />);
+                    this.showPopup(coordinates, <PlatformPopup platform={platform} stationName={stationName} routeColors={this.routeColors} referenceTime={this.props.simulatedTime} onPin={this.handlePinStop} onClose={() => this.popup?.remove()} />);
                     return;
                 }
                 const stopPosition = station.stop_positions.find((s) => s.osm_id === osmId);
                 if (stopPosition) {
-                    this.showPopup(coordinates, <PlatformPopup platform={stopPosition} stationName={stationName} routeColors={this.routeColors} referenceTime={this.props.simulatedTime} />);
+                    this.showPopup(coordinates, <PlatformPopup platform={stopPosition} stationName={stationName} routeColors={this.routeColors} referenceTime={this.props.simulatedTime} onPin={this.handlePinStop} onClose={() => this.popup?.remove()} />);
                     return;
                 }
             }
@@ -585,7 +602,7 @@ export default class Map extends React.Component<MapProps, MapState> {
             const stopName = feature.properties?.name ?? stopId;
             const ifopt = feature.properties?.ifopt || null;
             const isAssigned = feature.properties?.isAssigned === true || feature.properties?.isAssigned === "true";
-            this.showPopup(coordinates, <GtfsStopPopup stopId={stopId} stopName={stopName} ifopt={ifopt} isAssigned={isAssigned} routeColors={this.routeColors} referenceTime={this.props.simulatedTime} />);
+            this.showPopup(coordinates, <GtfsStopPopup stopId={stopId} stopName={stopName} ifopt={ifopt} isAssigned={isAssigned} routeColors={this.routeColors} referenceTime={this.props.simulatedTime} onClose={() => this.popup?.remove()} />);
         });
 
         // Vehicle click - toggle tracking

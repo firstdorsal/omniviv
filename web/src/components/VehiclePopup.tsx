@@ -24,15 +24,15 @@ export function VehiclePopup({
     const getStatusText = () => {
         switch (status) {
             case "waiting":
-                return currentStopName ? `Waiting at ${currentStopName}` : "Waiting to depart";
+                return currentStopName ? `Wartet an ${currentStopName}` : "Wartet auf Abfahrt";
             case "at_stop":
-                return currentStopName ? `At ${currentStopName}` : "At stop";
+                return currentStopName ? `An ${currentStopName}` : "An Haltestelle";
             case "in_transit":
-                return nextStopName ? `En route to ${nextStopName}` : "In transit";
+                return nextStopName ? `Unterwegs nach ${nextStopName}` : "Unterwegs";
             case "approaching":
-                return nextStopName ? `Approaching ${nextStopName}` : "Approaching stop";
+                return nextStopName ? `Nähert sich ${nextStopName}` : "Nähert sich Haltestelle";
             case "completed":
-                return "Journey complete";
+                return "Fahrt beendet";
             default:
                 return status;
         }
@@ -41,16 +41,16 @@ export function VehiclePopup({
     const getDelayDisplay = () => {
         // Handle null, undefined, string "null", or 0
         if (delayMinutes == null || delayMinutes === 0) {
-            return <span className="text-green-600 font-medium">On time</span>;
+            return <span className="text-green-600 font-medium">Pünktlich</span>;
         }
         const delay = Number(delayMinutes);
         if (isNaN(delay)) {
-            return <span className="text-green-600 font-medium">On time</span>;
+            return <span className="text-green-600 font-medium">Pünktlich</span>;
         }
         if (delay > 0) {
-            return <span className="text-red-600 font-medium">+{delay} min late</span>;
+            return <span className="text-red-600 font-medium">+{delay} Min Verspätung</span>;
         }
-        return <span className="text-blue-600 font-medium">{delay} min early</span>;
+        return <span className="text-blue-600 font-medium">{Math.abs(delay)} Min zu früh</span>;
     };
 
     return (
@@ -65,7 +65,7 @@ export function VehiclePopup({
                 </div>
                 <div>
                     <div className="font-semibold text-gray-900">{destination}</div>
-                    <div className="text-sm text-gray-500">Line {lineNumber}</div>
+                    <div className="text-sm text-gray-500">Linie {lineNumber}</div>
                 </div>
             </div>
 
@@ -76,11 +76,11 @@ export function VehiclePopup({
                     <span className="text-gray-900 text-right">{getStatusText()}</span>
                 </div>
                 <div className="flex justify-between gap-4">
-                    <span className="text-gray-600">Delay:</span>
+                    <span className="text-gray-600">Verspätung:</span>
                     {getDelayDisplay()}
                 </div>
                 <div className="flex justify-between gap-4">
-                    <span className="text-gray-600">Trip ID:</span>
+                    <span className="text-gray-600">Fahrt-ID:</span>
                     <span className="text-gray-500 font-mono text-xs">{tripId}</span>
                 </div>
             </div>

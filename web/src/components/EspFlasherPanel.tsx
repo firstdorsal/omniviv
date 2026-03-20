@@ -214,11 +214,11 @@ function DepartureBoardTab({
         if (!canFlash) return;
 
         setDownloading(true);
-        addLog("Downloading firmware...");
+        addLog("Firmware wird heruntergeladen...");
 
         try {
             // Fetch manifest
-            setDownloadProgress("Fetching manifest...");
+            setDownloadProgress("Manifest wird geladen...");
             const manifestResponse = await fetch("/firmware/manifest.json");
             if (!manifestResponse.ok) {
                 throw new Error(`Failed to fetch manifest: ${manifestResponse.status}`);
@@ -229,8 +229,8 @@ function DepartureBoardTab({
             // Fetch firmware binaries
             const flashFiles: FlashFile[] = [];
             for (const file of manifest.files) {
-                setDownloadProgress(`Downloading ${file.name}...`);
-                addLog(`Downloading ${file.name}...`);
+                setDownloadProgress(`Herunterladen: ${file.name}...`);
+                addLog(`Herunterladen: ${file.name}...`);
                 const binResponse = await fetch(`/firmware/${file.name}`);
                 if (!binResponse.ok) {
                     throw new Error(`Failed to fetch ${file.name}: ${binResponse.status}`);
@@ -245,8 +245,8 @@ function DepartureBoardTab({
             }
 
             // Build config binary
-            setDownloadProgress("Building config...");
-            addLog("Building config partition...");
+            setDownloadProgress("Konfiguration wird erstellt...");
+            addLog("Konfigurationspartition wird erstellt...");
             const configData = buildConfigBin({
                 wifi_ssid: wifiSsid,
                 wifi_password: wifiPassword,
@@ -263,11 +263,11 @@ function DepartureBoardTab({
             setDownloadProgress("");
 
             // Flash all files
-            addLog(`Flashing ${flashFiles.length} files...`);
+            addLog(`Flashen: ${flashFiles.length} Dateien...`);
             await flash(flashFiles, { eraseAll: false, compress: true });
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
-            addLog(`Error: ${message}`);
+            addLog(`Fehler: ${message}`);
             setDownloading(false);
             setDownloadProgress("");
         }
@@ -283,14 +283,14 @@ function DepartureBoardTab({
                         <Label htmlFor="wifi-ssid" className="text-xs">
                             SSID
                         </Label>
-                        <Input id="wifi-ssid" placeholder="Network name" value={wifiSsid} onChange={(e) => setWifiSsid(e.target.value)} disabled={isBusy || downloading} />
+                        <Input id="wifi-ssid" placeholder="Netzwerkname" value={wifiSsid} onChange={(e) => setWifiSsid(e.target.value)} disabled={isBusy || downloading} />
                     </div>
                     <div>
                         <Label htmlFor="wifi-password" className="text-xs">
-                            Password
+                            Passwort
                         </Label>
                         <div className="relative">
-                            <Input id="wifi-password" type={showPassword ? "text" : "password"} placeholder="Network password" value={wifiPassword} onChange={(e) => setWifiPassword(e.target.value)} disabled={isBusy || downloading} className="pr-9" />
+                            <Input id="wifi-password" type={showPassword ? "text" : "password"} placeholder="Netzwerkpasswort" value={wifiPassword} onChange={(e) => setWifiPassword(e.target.value)} disabled={isBusy || downloading} className="pr-9" />
                             <Button type="button" variant="ghost" size="icon" className="absolute right-0 top-0 h-9 w-9" onClick={() => setShowPassword((v) => !v)} tabIndex={-1}>
                                 {showPassword ? <EyeOff className="h-4 w-4 text-muted-foreground" /> : <Eye className="h-4 w-4 text-muted-foreground" />}
                             </Button>
@@ -312,12 +312,12 @@ function DepartureBoardTab({
 
             {/* Stop */}
             <div className="space-y-2">
-                <h3 className="text-sm font-medium text-muted-foreground">Stop</h3>
+                <h3 className="text-sm font-medium text-muted-foreground">Haltestelle</h3>
                 <div className="relative" ref={stopResultsRef}>
                     <div className="relative">
                         <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
                         <Input
-                            placeholder="Stop ID or search..."
+                            placeholder="Haltestellen-ID oder Suche..."
                             value={stopSearch}
                             onChange={(e) => {
                                 handleStopSearchChange(e.target.value);
@@ -358,7 +358,7 @@ function DepartureBoardTab({
             {/* Flash button */}
             <Button onClick={handleFlashDepartureBoard} disabled={!canFlash} className="w-full gap-2">
                 <Zap className="h-4 w-4" />
-                Flash Departure Board
+                Abfahrtsanzeige flashen
             </Button>
         </div>
     );
@@ -440,7 +440,7 @@ function CustomFirmwareTab({
         <div className="space-y-4">
             {/* Files */}
             <div className="space-y-2">
-                <h3 className="text-sm font-medium text-muted-foreground">Firmware Files</h3>
+                <h3 className="text-sm font-medium text-muted-foreground">Firmware-Dateien</h3>
 
                 {files.length > 0 && (
                     <div className="space-y-2">
@@ -471,20 +471,20 @@ function CustomFirmwareTab({
                 <input ref={fileInputRef} type="file" accept=".bin,.img,.elf" multiple onChange={handleFileSelect} className="hidden" />
                 <Button variant="outline" onClick={() => fileInputRef.current?.click()} disabled={isBusy} className="w-full gap-2">
                     <Upload className="h-4 w-4" />
-                    Add Files
+                    Dateien hinzufügen
                 </Button>
             </div>
 
             {/* Flash Options */}
             <div className="space-y-2">
-                <h3 className="text-sm font-medium text-muted-foreground">Options</h3>
+                <h3 className="text-sm font-medium text-muted-foreground">Optionen</h3>
                 <label className="flex cursor-pointer items-center gap-3">
                     <Checkbox checked={compress} onCheckedChange={(checked) => setCompress(checked === true)} disabled={isBusy} />
-                    <Label className="cursor-pointer text-sm">Compress data</Label>
+                    <Label className="cursor-pointer text-sm">Daten komprimieren</Label>
                 </label>
                 <label className="flex cursor-pointer items-center gap-3">
                     <Checkbox checked={eraseAll} onCheckedChange={(checked) => setEraseAll(checked === true)} disabled={isBusy} />
-                    <Label className="cursor-pointer text-sm">Erase all before flash</Label>
+                    <Label className="cursor-pointer text-sm">Vor dem Flashen alles löschen</Label>
                 </label>
             </div>
 
@@ -493,7 +493,7 @@ function CustomFirmwareTab({
                 <div className="space-y-1">
                     <div className="flex justify-between text-xs text-muted-foreground">
                         <span>
-                            File {flashProgress.fileIndex + 1}/{files.length}
+                            Datei {flashProgress.fileIndex + 1}/{files.length}
                         </span>
                         <span>{flashProgress.percentage}%</span>
                     </div>
@@ -504,7 +504,7 @@ function CustomFirmwareTab({
             {/* Actions */}
             <Button onClick={handleFlash} disabled={!isConnected || files.length === 0 || isBusy} className="w-full gap-2">
                 <Zap className="h-4 w-4" />
-                Flash
+                Flashen
             </Button>
         </div>
     );
@@ -523,22 +523,22 @@ export function EspFlasherPanel() {
             {!isWebSerialSupported && (
                 <div className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-                    <p className="text-sm text-destructive">Web Serial API is not supported. Use Chrome or Edge.</p>
+                    <p className="text-sm text-destructive">Web Serial API wird nicht unterstützt. Verwende Chrome oder Edge.</p>
                 </div>
             )}
 
             {/* Connection */}
             <div className="space-y-2">
-                <h3 className="text-sm font-medium text-muted-foreground">Connection</h3>
+                <h3 className="text-sm font-medium text-muted-foreground">Verbindung</h3>
                 {state === "disconnected" ? (
                     <Button onClick={connect} disabled={!isWebSerialSupported} className="w-full gap-2">
                         <Plug className="h-4 w-4" />
-                        Connect
+                        Verbinden
                     </Button>
                 ) : (
                     <Button onClick={disconnect} variant="outline" disabled={isBusy} className="w-full gap-2">
                         <PlugZap className="h-4 w-4" />
-                        {state === "connecting" ? "Connecting..." : "Disconnect"}
+                        {state === "connecting" ? "Verbinden..." : "Trennen"}
                     </Button>
                 )}
             </div>
@@ -550,7 +550,7 @@ export function EspFlasherPanel() {
                         <Cpu className="h-4 w-4 text-muted-foreground" />
                         <span className="text-sm font-medium">{chipInfo.chipName}</span>
                     </div>
-                    <p className="mt-1 text-xs text-muted-foreground">Flash: {chipInfo.flashSize >= 1024 * 1024 ? `${chipInfo.flashSize / (1024 * 1024)}MB` : `${chipInfo.flashSize / 1024}KB`}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">Flash-Speicher: {chipInfo.flashSize >= 1024 * 1024 ? `${chipInfo.flashSize / (1024 * 1024)}MB` : `${chipInfo.flashSize / 1024}KB`}</p>
                 </div>
             )}
 
@@ -558,10 +558,10 @@ export function EspFlasherPanel() {
             <Tabs defaultValue="departure-board">
                 <TabsList className="w-full">
                     <TabsTrigger value="departure-board" className="flex-1">
-                        Departure Board
+                        Abfahrtsanzeige
                     </TabsTrigger>
                     <TabsTrigger value="custom" className="flex-1">
-                        Custom Firmware
+                        Eigene Firmware
                     </TabsTrigger>
                 </TabsList>
                 <TabsContent value="departure-board">
@@ -575,14 +575,14 @@ export function EspFlasherPanel() {
             {/* Erase */}
             <Button variant="destructive" onClick={eraseFlash} disabled={!isConnected || isBusy} className="w-full gap-2">
                 <Trash2 className="h-4 w-4" />
-                Erase Flash
+                Flash löschen
             </Button>
 
             {/* Flash Progress */}
             {flashProgress && (
                 <div className="space-y-1">
                     <div className="flex justify-between text-xs text-muted-foreground">
-                        <span>Flashing...</span>
+                        <span>Flashen...</span>
                         <span>{flashProgress.percentage}%</span>
                     </div>
                     <Progress value={flashProgress.percentage} />
@@ -592,15 +592,15 @@ export function EspFlasherPanel() {
             {/* Log */}
             <div>
                 <div className="mb-1 flex items-center justify-between">
-                    <h3 className="text-sm font-medium text-muted-foreground">Log</h3>
+                    <h3 className="text-sm font-medium text-muted-foreground">Protokoll</h3>
                     <Button variant="ghost" size="sm" onClick={clearLogs} className="h-6 px-2 text-xs">
-                        Clear
+                        Löschen
                     </Button>
                 </div>
                 <ScrollArea className="h-48 rounded-md border bg-muted/30">
                     <div className="p-2 font-mono text-xs">
                         {logs.length === 0 ? (
-                            <p className="text-muted-foreground">No log output yet</p>
+                            <p className="text-muted-foreground">Noch keine Ausgabe</p>
                         ) : (
                             logs.map((line, i) => (
                                 <div key={i} className="whitespace-pre-wrap break-all leading-relaxed">

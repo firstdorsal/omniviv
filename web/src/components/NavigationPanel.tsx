@@ -26,7 +26,7 @@ interface LocationInputProps {
 
 function LocationInput({
     label,
-    placeholder = "Search location...",
+    placeholder = "Ort suchen...",
     stations,
     value,
     onChange,
@@ -108,7 +108,7 @@ function LocationInput({
                         size="icon"
                         onClick={onUseCurrentLocation}
                         disabled={isLocating}
-                        title="Use current location"
+                        title="Aktuellen Standort verwenden"
                     >
                         <MapPin className="h-4 w-4" />
                     </Button>
@@ -118,7 +118,7 @@ function LocationInput({
                         variant={isPickingLocation ? "default" : "outline"}
                         size="icon"
                         onClick={onPickOnMap}
-                        title="Pick on map"
+                        title="Auf Karte auswählen"
                     >
                         <TbMapX className="h-4 w-4" />
                     </Button>
@@ -162,7 +162,7 @@ export function NavigationPanel({
 
     const handleUseCurrentLocation = (setLocation: (loc: Location) => void) => {
         if (!navigator.geolocation) {
-            alert("Geolocation is not supported by your browser");
+            alert("Standortbestimmung wird von deinem Browser nicht unterstützt");
             return;
         }
 
@@ -170,7 +170,7 @@ export function NavigationPanel({
         navigator.geolocation.getCurrentPosition(
             (position) => {
                 setLocation({
-                    name: "Current Location",
+                    name: "Aktueller Standort",
                     lat: position.coords.latitude,
                     lon: position.coords.longitude,
                 });
@@ -178,7 +178,7 @@ export function NavigationPanel({
             },
             (error) => {
                 console.error("Error getting location:", error);
-                alert("Unable to get your location");
+                alert("Standort konnte nicht ermittelt werden");
                 setIsLocating(false);
             }
         );
@@ -186,7 +186,7 @@ export function NavigationPanel({
 
     return (
         <div className="p-4">
-            <h2 className="font-semibold mb-4">Route Planning</h2>
+            <h2 className="font-semibold mb-4">Routenplanung</h2>
 
             <div className="space-y-4">
                 <LocationInput
@@ -201,7 +201,7 @@ export function NavigationPanel({
                 />
 
                 <LocationInput
-                    label="Destination"
+                    label="Ziel"
                     stations={stations}
                     value={endLocation}
                     onChange={onEndChange}
@@ -215,16 +215,16 @@ export function NavigationPanel({
                     className="w-full"
                     disabled={!startLocation || !endLocation}
                 >
-                    Find Route
+                    Route finden
                 </Button>
 
                 {(startLocation || endLocation) && (
                     <div className="p-3 bg-muted rounded-lg text-sm space-y-1">
                         {startLocation && (
-                            <p><span className="text-muted-foreground">From:</span> {startLocation.name}</p>
+                            <p><span className="text-muted-foreground">Von:</span> {startLocation.name}</p>
                         )}
                         {endLocation && (
-                            <p><span className="text-muted-foreground">To:</span> {endLocation.name}</p>
+                            <p><span className="text-muted-foreground">Nach:</span> {endLocation.name}</p>
                         )}
                     </div>
                 )}

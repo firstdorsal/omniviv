@@ -261,7 +261,7 @@ export function MappingManager({ onMapDataChange, onFlyTo, initialFilter, onFilt
         return (
             <div className="h-full flex items-center justify-center">
                 <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                <p className="text-muted-foreground text-sm">Loading mappings...</p>
+                <p className="text-muted-foreground text-sm">Zuordnungen werden geladen...</p>
             </div>
         );
     }
@@ -279,14 +279,14 @@ export function MappingManager({ onMapDataChange, onFlyTo, initialFilter, onFilt
                 {/* Stats */}
                 <div className="p-2.5 bg-muted/50 rounded-lg space-y-1.5">
                     <div className="flex justify-between text-xs">
-                        <span>{data.mapped_count} / {data.total_ifopt_count} mapped</span>
+                        <span>{data.mapped_count} / {data.total_ifopt_count} zugeordnet</span>
                         <span className="text-muted-foreground">
-                            {data.manual_count} manual, {data.auto_count} auto
+                            {data.manual_count} manuell, {data.auto_count} automatisch
                         </span>
                     </div>
                     <Progress value={mappedPercent} className="h-2" />
                     <p className="text-xs text-muted-foreground">
-                        {data.unmapped_count} unmapped
+                        {data.unmapped_count} nicht zugeordnet
                     </p>
                 </div>
 
@@ -300,10 +300,10 @@ export function MappingManager({ onMapDataChange, onFlyTo, initialFilter, onFilt
                             className="text-xs flex-1"
                             onClick={() => { setActiveFilter(tab); onFilterChange?.(tab); }}
                         >
-                            {tab === "all" && `All (${data.total_ifopt_count})`}
-                            {tab === "unmapped" && `Unmapped (${data.unmapped_count})`}
-                            {tab === "manual" && `Manual (${data.manual_count})`}
-                            {tab === "auto" && `Auto (${data.auto_count})`}
+                            {tab === "all" && `Alle (${data.total_ifopt_count})`}
+                            {tab === "unmapped" && `Offen (${data.unmapped_count})`}
+                            {tab === "manual" && `Manuell (${data.manual_count})`}
+                            {tab === "auto" && `Automatisch (${data.auto_count})`}
                         </Button>
                     ))}
                 </div>
@@ -312,7 +312,7 @@ export function MappingManager({ onMapDataChange, onFlyTo, initialFilter, onFilt
                 <div className="relative">
                     <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
                     <Input
-                        placeholder="Search by name or IFOPT..."
+                        placeholder="Nach Name oder IFOPT suchen..."
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
                         className="pl-9 h-9 text-sm"
@@ -339,7 +339,7 @@ export function MappingManager({ onMapDataChange, onFlyTo, initialFilter, onFilt
                         ))}
                         {data.entries.length === 0 && (
                             <p className="py-8 text-center text-muted-foreground text-sm">
-                                No entries match the current filter
+                                Keine Einträge für den aktuellen Filter
                             </p>
                         )}
                     </ul>
@@ -358,7 +358,7 @@ export function MappingManager({ onMapDataChange, onFlyTo, initialFilter, onFilt
                         <ChevronLeft className="h-4 w-4" />
                     </Button>
                     <span className="text-xs text-muted-foreground">
-                        Page {page + 1}
+                        Seite {page + 1}
                     </span>
                     <Button
                         variant="outline"
@@ -411,15 +411,15 @@ function MappingEntryCard({
     const statusBadge = () => {
         switch (entry.status) {
             case MappingStatus.Unmapped:
-                return <Badge variant="destructive">Unmapped</Badge>;
+                return <Badge variant="destructive">Offen</Badge>;
             case MappingStatus.Auto:
                 return (
                     <Badge variant="secondary">
-                        Auto {entry.combined_score != null ? `${Math.round(entry.combined_score * 100)}%` : ""}
+                        Automatisch {entry.combined_score != null ? `${Math.round(entry.combined_score * 100)}%` : ""}
                     </Badge>
                 );
             case MappingStatus.Manual:
-                return <Badge>Manual</Badge>;
+                return <Badge>Manuell</Badge>;
         }
     };
 
@@ -463,7 +463,7 @@ function MappingEntryCard({
                 <div className="flex items-center gap-2 min-w-0">
                     {statusBadge()}
                 </div>
-                <FlyToButton lat={entry.lat} lon={entry.lon} onFlyTo={onFlyTo} title="Jump to OSM stop" />
+                <FlyToButton lat={entry.lat} lon={entry.lon} onFlyTo={onFlyTo} title="Zum OSM-Halt springen" />
             </div>
             <p className="text-sm font-medium truncate">
                 {entry.name || entry.ifopt}
@@ -482,7 +482,7 @@ function MappingEntryCard({
                                     lat={entry.gtfs_stop_lat}
                                     lon={entry.gtfs_stop_lon}
                                     onFlyTo={onFlyTo}
-                                    title="Jump to GTFS stop"
+                                    title="Zum GTFS-Halt springen"
                                 />
                             )}
                             <div className="min-w-0">
@@ -502,7 +502,7 @@ function MappingEntryCard({
                                 onClick={() => onRemoveMapping(entry.ifopt)}
                             >
                                 <X className="h-3 w-3 mr-1" />
-                                Remove
+                                Entfernen
                             </Button>
                         )}
                     </div>
@@ -519,8 +519,8 @@ function MappingEntryCard({
                     >
                         <span>
                             {entry.candidates.length > 0
-                                ? `${entry.candidates.length} nearby GTFS stop${entry.candidates.length !== 1 ? "s" : ""}`
-                                : "Search for GTFS stops"}
+                                ? `${entry.candidates.length} GTFS-Halt${entry.candidates.length !== 1 ? "e" : ""} in der Nähe`
+                                : "Nach GTFS-Halten suchen"}
                         </span>
                         <ChevronDown
                             className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : ""}`}
@@ -531,7 +531,7 @@ function MappingEntryCard({
                     {/* GTFS search */}
                     <div className="mt-2 flex gap-1.5">
                         <Input
-                            placeholder="Search GTFS stops..."
+                            placeholder="GTFS-Halte suchen..."
                             value={gtfsSearch}
                             onChange={(e) => setGtfsSearch(e.target.value)}
                             onKeyDown={(e) => e.key === "Enter" && handleGtfsSearch()}
@@ -558,8 +558,8 @@ function MappingEntryCard({
                             <table className="w-full text-xs">
                                 <thead className="bg-muted">
                                     <tr>
-                                        <th className="text-left p-1.5 font-medium">GTFS Stop</th>
-                                        <th className="text-right p-1.5 font-medium w-14">Dist</th>
+                                        <th className="text-left p-1.5 font-medium">GTFS-Halt</th>
+                                        <th className="text-right p-1.5 font-medium w-14">Entf.</th>
                                         <th className="p-1.5 w-16"></th>
                                     </tr>
                                 </thead>
@@ -579,7 +579,7 @@ function MappingEntryCard({
                                                         lat={candidate.lat}
                                                         lon={candidate.lon}
                                                         onFlyTo={onFlyTo}
-                                                        title="Jump to GTFS stop"
+                                                        title="Zum GTFS-Halt springen"
                                                     />
                                                     <div className="min-w-0">
                                                         <div className="font-medium truncate max-w-[120px]">
@@ -606,7 +606,7 @@ function MappingEntryCard({
                                                             onSetMapping(entry.ifopt, candidate.stop_id)
                                                         }
                                                     >
-                                                        Use
+                                                        Zuordnen
                                                     </Button>
                                                 )}
                                             </td>
@@ -617,7 +617,7 @@ function MappingEntryCard({
                         </div>
                     ) : (
                         <p className="text-xs text-muted-foreground py-2 text-center">
-                            No nearby GTFS stops found. Try searching above.
+                            Keine GTFS-Halte in der Nähe gefunden. Versuche die Suche oben.
                         </p>
                     )}
                 </CollapsibleContent>

@@ -104,7 +104,7 @@ export class MapLayerManager {
 
         // Vehicle 3D models (added before markers so markers render on top)
         this.map.addSource("vehicle-models", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-        this.map.addLayer({ id: "vehicle-models-3d", type: "fill-extrusion", source: "vehicle-models", paint: { "fill-extrusion-color": ["get", "color"], "fill-extrusion-height": ["get", "height"], "fill-extrusion-base": 0.5, "fill-extrusion-opacity": 0.9 } });
+        this.map.addLayer({ id: "vehicle-models-3d", type: "fill-extrusion", source: "vehicle-models", minzoom: 15, paint: { "fill-extrusion-color": ["get", "color"], "fill-extrusion-height": ["get", "height"], "fill-extrusion-base": 0.5, "fill-extrusion-opacity": 0.9 } });
         this.vehicleModelsSourceAdded = true;
 
         // Move vehicle models layer to render on top of 3D buildings from the base style
@@ -293,6 +293,15 @@ export class MapLayerManager {
         const source = this.map.getSource("vehicle-models") as maplibregl.GeoJSONSource;
         if (source) {
             source.setData({ type: "FeatureCollection", features });
+        }
+    }
+
+    /**
+     * Update the minimum zoom level at which 3D vehicle models are rendered.
+     */
+    setVehicleModelsMinZoom(minZoom: number): void {
+        if (this.map.getLayer("vehicle-models-3d")) {
+            this.map.setLayerZoomRange("vehicle-models-3d", minZoom, 24);
         }
     }
 

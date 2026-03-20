@@ -18,7 +18,7 @@ export function EspFlasherDialog({ open, onOpenChange }: EspFlasherDialogProps) 
                 <DialogHeader className="px-6 pt-6 pb-0">
                     <DialogTitle>ESP32 Flasher</DialogTitle>
                     <DialogDescription>
-                        Flash firmware to ESP32 devices via Web Serial
+                        Firmware über Web Serial auf ESP32-Geräte flashen
                     </DialogDescription>
                 </DialogHeader>
                 <div className="flex-1 min-h-0 overflow-y-auto">

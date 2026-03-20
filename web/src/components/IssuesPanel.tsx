@@ -20,20 +20,20 @@ import {
 import { MappingManager, type MappingLine, type MappingMapData } from "./MappingManager";
 
 const ISSUE_TYPE_LABELS: Record<OsmIssueType, string> = {
-    [OsmIssueType.MissingIfopt]: "Missing IFOPT",
-    [OsmIssueType.MissingCoordinates]: "Missing Coordinates",
-    [OsmIssueType.OrphanedElement]: "Orphaned Element",
-    [OsmIssueType.MissingRouteRef]: "Missing Route Ref",
-    [OsmIssueType.MissingName]: "Missing Name",
-    [OsmIssueType.MissingStopPosition]: "Missing Stop Position",
-    [OsmIssueType.MissingPlatform]: "Missing Platform",
-    [OsmIssueType.NoGtfsMatch]: "No GTFS Match",
-    [OsmIssueType.AmbiguousGtfsMatch]: "Ambiguous Match",
-    [OsmIssueType.LowConfidenceMatch]: "Low Confidence",
-    [OsmIssueType.UnmappedGtfsStop]: "Unmapped GTFS Stop",
-    [OsmIssueType.GtfsParseSkipped]: "Parse Skipped",
-    [OsmIssueType.GtfsLoadFailed]: "Load Failed",
-    [OsmIssueType.GtfsRtFetchFailed]: "RT Fetch Failed",
+    [OsmIssueType.MissingIfopt]: "IFOPT fehlt",
+    [OsmIssueType.MissingCoordinates]: "Koordinaten fehlen",
+    [OsmIssueType.OrphanedElement]: "Verwaistes Element",
+    [OsmIssueType.MissingRouteRef]: "Linienreferenz fehlt",
+    [OsmIssueType.MissingName]: "Name fehlt",
+    [OsmIssueType.MissingStopPosition]: "Halteposition fehlt",
+    [OsmIssueType.MissingPlatform]: "Steig fehlt",
+    [OsmIssueType.NoGtfsMatch]: "Kein GTFS-Treffer",
+    [OsmIssueType.AmbiguousGtfsMatch]: "Mehrdeutiger Treffer",
+    [OsmIssueType.LowConfidenceMatch]: "Geringe Konfidenz",
+    [OsmIssueType.UnmappedGtfsStop]: "GTFS-Halt nicht zugeordnet",
+    [OsmIssueType.GtfsParseSkipped]: "Parse übersprungen",
+    [OsmIssueType.GtfsLoadFailed]: "Laden fehlgeschlagen",
+    [OsmIssueType.GtfsRtFetchFailed]: "RT-Abruf fehlgeschlagen",
 };
 
 const ISSUE_TYPE_VARIANTS: Partial<
@@ -56,12 +56,12 @@ const ISSUE_TYPE_VARIANTS: Partial<
 };
 
 const TRANSPORT_TYPE_LABELS: Record<TransportType, string> = {
-    [TransportType.Tram]: "Tram",
+    [TransportType.Tram]: "Straßenbahn",
     [TransportType.Bus]: "Bus",
-    [TransportType.Train]: "Train",
-    [TransportType.Subway]: "Subway",
-    [TransportType.Ferry]: "Ferry",
-    [TransportType.Unknown]: "Unknown",
+    [TransportType.Train]: "Zug",
+    [TransportType.Subway]: "U-Bahn",
+    [TransportType.Ferry]: "Fähre",
+    [TransportType.Unknown]: "Unbekannt",
 };
 
 const TRANSPORT_TYPE_ICONS: Record<TransportType, string> = {
@@ -104,7 +104,7 @@ function MatchCandidatesTable({
     if (candidates.length === 0) {
         return (
             <p className="text-xs text-muted-foreground py-2">
-                No candidates within matching distance
+                Keine Kandidaten in Zuordnungsentfernung
             </p>
         );
     }
@@ -112,16 +112,16 @@ function MatchCandidatesTable({
     return (
         <div className="mt-2 space-y-2">
             <p className="text-xs font-medium text-muted-foreground">
-                Match Candidates ({candidates.length})
+                Zuordnungskandidaten ({candidates.length})
             </p>
             <div className="rounded border overflow-hidden">
                 <table className="w-full text-xs">
                     <thead className="bg-muted">
                         <tr>
-                            <th className="text-left p-2 font-medium">GTFS Stop</th>
-                            <th className="text-right p-2 font-medium w-16">Dist</th>
+                            <th className="text-left p-2 font-medium">GTFS-Halt</th>
+                            <th className="text-right p-2 font-medium w-16">Entf.</th>
                             <th className="text-right p-2 font-medium w-20">Name</th>
-                            <th className="text-right p-2 font-medium w-20">Score</th>
+                            <th className="text-right p-2 font-medium w-20">Bewertung</th>
                         </tr>
                     </thead>
                     <tbody className="divide-y">
@@ -203,7 +203,7 @@ function IssueItem({ issue, showCandidates = false }: IssueItemProps) {
                             target="_blank"
                             rel="noopener noreferrer"
                         >
-                            Edit
+                            Bearbeiten
                         </a>
                     </Button>
                 )}
@@ -232,7 +232,7 @@ function IssueItem({ issue, showCandidates = false }: IssueItemProps) {
                     <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">
                             <p className="text-xs text-green-800 dark:text-green-200 font-medium">
-                                Suggested tag:
+                                Vorgeschlagener Tag:
                             </p>
                             <p className="text-xs text-green-700 dark:text-green-300 font-mono truncate">
                                 {ifoptTag}
@@ -244,7 +244,7 @@ function IssueItem({ issue, showCandidates = false }: IssueItemProps) {
                             )}
                             {issue.suggested_ifopt_distance !== null && (
                                 <p className="text-xs text-green-500">
-                                    {issue.suggested_ifopt_distance}m away
+                                    {issue.suggested_ifopt_distance}m entfernt
                                 </p>
                             )}
                         </div>
@@ -254,7 +254,7 @@ function IssueItem({ issue, showCandidates = false }: IssueItemProps) {
                             onClick={handleCopyIfopt}
                             className="shrink-0 text-green-700 dark:text-green-300 hover:text-green-900 dark:hover:text-green-100 hover:bg-green-100 dark:hover:bg-green-900"
                         >
-                            {copied ? "Copied!" : "Copy"}
+                            {copied ? "Kopiert!" : "Kopieren"}
                         </Button>
                     </div>
                 </div>
@@ -269,8 +269,8 @@ function IssueItem({ issue, showCandidates = false }: IssueItemProps) {
                             className="mt-2 w-full justify-between text-xs"
                         >
                             <span>
-                                {candidates.length} candidate{candidates.length !== 1 ? "s" : ""}{" "}
-                                - best score: {Math.round((candidates[0]?.combined_score || 0) * 100)}%
+                                {candidates.length} Kandidat{candidates.length !== 1 ? "en" : ""}{" "}
+                                - beste Bewertung: {Math.round((candidates[0]?.combined_score || 0) * 100)}%
                             </span>
                             <ChevronDown
                                 className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : ""}`}
@@ -296,7 +296,7 @@ function IssuesList({
     if (issues.length === 0) {
         return (
             <p className="py-8 text-center text-muted-foreground">
-                No issues in this category
+                Keine Probleme in dieser Kategorie
             </p>
         );
     }
@@ -373,12 +373,12 @@ export function OsmIssuesPanel({ onMapDataChange, onFlyTo, initialTab, onTabChan
     return (
         <div className="h-full flex flex-col">
             <div className="p-4 border-b">
-                <h2 className="font-semibold">Data Issues ({issues.length})</h2>
+                <h2 className="font-semibold">Datenprobleme ({issues.length})</h2>
             </div>
 
             {isLoading ? (
                 <div className="flex items-center justify-center py-8 flex-1">
-                    <p className="text-muted-foreground">Loading issues...</p>
+                    <p className="text-muted-foreground">Probleme werden geladen...</p>
                 </div>
             ) : (
                 <Tabs
@@ -394,7 +394,7 @@ export function OsmIssuesPanel({ onMapDataChange, onFlyTo, initialTab, onTabChan
                             GTFS ({issuesByCategory.gtfs.length})
                         </TabsTrigger>
                         <TabsTrigger value="mapping" className="text-xs">
-                            Mapping
+                            Zuordnung
                         </TabsTrigger>
                         <TabsTrigger value="system" className="text-xs">
                             System ({issuesByCategory.system.length})
@@ -427,8 +427,8 @@ export function OsmIssuesPanel({ onMapDataChange, onFlyTo, initialTab, onTabChan
             {activeTab !== "mapping" && (
                 <div className="p-3 border-t text-xs text-muted-foreground">
                     {activeTab === "osm" || activeTab === "gtfs"
-                        ? 'Click "Edit" to fix issues in OpenStreetMap'
-                        : `${issues.length} total issues across all categories`}
+                        ? 'Klicke "Bearbeiten" um Probleme in OpenStreetMap zu beheben'
+                        : `${issues.length} Probleme insgesamt in allen Kategorien`}
                 </div>
             )}
         </div>
