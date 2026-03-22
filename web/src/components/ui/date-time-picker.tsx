@@ -1,44 +1,147 @@
 import * as React from "react";
-import { Input } from "@/components/ui/input";
 
+import { cn } from "@/lib/utils";
+import {
+    Popover,
+    PopoverAnchor,
+    PopoverContent
+} from "@/components/ui/popover";
+import { Calendar } from "@/components/ui/calendar";
+import { DateTimeInput } from "@/components/ui/date-time-input";
+import { TimePicker } from "@/components/ui/time-picker";
+import { TimezoneSelector } from "@/components/ui/timezone-selector";
+import { useDateTimePicker } from "@/hooks/use-date-time-picker";
+import {
+    getDetectedTimeFormat,
+    getPlaceholder
+} from "@/lib/date-time-utils";
+
+/** Props for the `DateTimePicker` component. */
 interface DateTimePickerProps {
-    value: Date;
-    onChange: (date: Date) => void;
+    /** Controlled date value. Omit for uncontrolled mode. */
+    value?: Date;
+    /** Initial date when uncontrolled. */
+    defaultValue?: Date;
+    /** Called when the date changes. */
+    onChange?: (date: Date | undefined) => void;
+    /** Time display format. Defaults to the user's locale preference. */
+    timeFormat?: `12h` | `24h`;
+    /** Whether to show a seconds column. Defaults to `false`. */
+    showSeconds?: boolean;
+    /** Whether to show the timezone selector. Defaults to `false`. */
+    showTimezone?: boolean;
+    /** IANA timezone string (e.g. `"America/New_York"`). */
+    timeZone?: string;
+    /** Called when the user changes the timezone. */
+    onTimezoneChange?: (tz: string) => void;
+    /** Position of the time picker relative to the calendar. */
+    timeLayout?: `below` | `beside`;
+    /** Custom placeholder for the text input. */
+    placeholder?: string;
+    /** Disables the entire picker. */
+    disabled?: boolean;
+    /** Prevents selecting dates in the future. */
+    disableFuture?: boolean;
+    /** Additional CSS class for the root element. */
+    className?: string;
 }
 
-export function DateTimePicker({ value, onChange }: DateTimePickerProps) {
-    // Use local date components (not toISOString() which gives UTC and can show wrong date near midnight)
-    const dateStr = `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
-    const timeStr = value.toTimeString().slice(0, 5);
+const DateTimePicker = ({
+    value,
+    defaultValue,
+    onChange,
+    timeFormat = getDetectedTimeFormat(),
+    showSeconds = false,
+    showTimezone = false,
+    timeZone,
+    onTimezoneChange,
+    timeLayout = `below`,
+    placeholder,
+    disabled,
+    disableFuture,
+    className
+}: DateTimePickerProps) => {
+    const picker = useDateTimePicker({
+        value,
+        defaultValue,
+        onChange,
+        timeFormat,
+        showSeconds,
+        timeZone
+    });
 
-    const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const newDate = new Date(value);
-        const [year, month, day] = e.target.value.split("-").map(Number);
-        newDate.setFullYear(year, month - 1, day);
-        onChange(newDate);
-    };
-
-    const handleTimeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const newDate = new Date(value);
-        const [hours, minutes] = e.target.value.split(":").map(Number);
-        newDate.setHours(hours, minutes);
-        onChange(newDate);
-    };
+    const formatPlaceholder =
+        placeholder ?? getPlaceholder({ timeFormat, showSeconds });
 
     return (
-        <div className="flex gap-2">
-            <Input
-                type="date"
-                value={dateStr}
-                onChange={handleDateChange}
-                className="[color-scheme:light] dark:[color-scheme:dark]"
-            />
-            <Input
-                type="time"
-                value={timeStr}
-                onChange={handleTimeChange}
-                className="w-auto [color-scheme:light] dark:[color-scheme:dark]"
-            />
-        </div>
+        <Popover open={picker.isOpen} onOpenChange={picker.setIsOpen}>
+            <PopoverAnchor asChild={true}>
+                <DateTimeInput
+                    value={picker.inputValue}
+                    onChange={picker.setInputValue}
+                    onConfirm={picker.confirmInput}
+                    onCalendarClick={() => picker.setIsOpen(!picker.isOpen)}
+                    isDirty={picker.isDirty}
+                    placeholder={formatPlaceholder}
+                    disabled={disabled}
+                    className={cn(`w-full`, className)}
+                    aria-label={`Date and time`}
+                />
+            </PopoverAnchor>
+            <PopoverContent
+                className={`w-auto overflow-clip p-0`}
+                align={`start`}
+                onOpenAutoFocus={(e) => e.preventDefault()}
+            >
+                <div className={cn(
+                    `flex`,
+                    timeLayout === `beside` ? `flex-row` : `flex-col`
+                )}>
+                    <Calendar
+                        mode={`single`}
+                        selected={picker.date}
+                        onSelect={picker.handleCalendarSelect}
+                        month={picker.month}
+                        onMonthChange={picker.setMonth}
+                        disabled={disabled ? () => true : undefined}
+                        disableFuture={disableFuture}
+                        timeZone={timeZone}
+                    />
+                    <div className={cn(
+                        `flex flex-col`,
+                        timeLayout === `beside` ? `border-l` : `border-t`
+                    )}>
+                        <div className={`px-3 pt-1 pb-2`}>
+                            <TimePicker
+                                date={picker.date}
+                                onChange={picker.handleTimeChange}
+                                timeFormat={timeFormat}
+                                showSeconds={showSeconds}
+                                disabled={disabled}
+                            />
+                        </div>
+                        {showTimezone && onTimezoneChange && (
+                            <div className={`border-t px-3 py-2`}>
+                                <div
+                                    className={
+                                        `mb-1 text-xs font-medium text-muted-foreground`
+                                    }
+                                >
+                                    Timezone
+                                </div>
+                                <TimezoneSelector
+                                    value={timeZone}
+                                    onChange={onTimezoneChange}
+                                    disabled={disabled}
+                                />
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </PopoverContent>
+        </Popover>
     );
-}
+};
+
+export { DateTimePicker };
+export type { DateTimePickerProps };

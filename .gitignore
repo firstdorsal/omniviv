@@ -3,6 +3,9 @@
 *.tar.gz
 *.tsv.gz
 
+# Dependencies
+node_modules/
+
 # Environment files (may contain secrets)
 .env
 .env.*

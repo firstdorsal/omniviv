@@ -80,6 +80,7 @@ interface MapProps {
     onCancelPickMode?: () => void;
     navigationStart?: NavigationLocation | null;
     navigationEnd?: NavigationLocation | null;
+    navigationWaypoints?: (NavigationLocation | null)[];
     highlightedBuilding?: HighlightedBuilding | null;
     onHighlightBuilding?: (building: HighlightedBuilding | null) => void;
     mappingLines?: MappingLine[];
@@ -159,7 +160,7 @@ export default class Map extends React.Component<MapProps, MapState> {
 
     /** Fly the map camera to a specific location */
     public flyTo(lat: number, lon: number) {
-        this.map?.flyTo({ center: [lon, lat], zoom: 17, duration: 1000 });
+        this.map?.flyTo({ center: [lon, lat], zoom: 15, duration: 1000 });
     }
 
     componentDidMount() {
@@ -242,7 +243,8 @@ export default class Map extends React.Component<MapProps, MapState> {
 
         // Update navigation points layer
         if (prevProps.navigationStart !== this.props.navigationStart ||
-            prevProps.navigationEnd !== this.props.navigationEnd) {
+            prevProps.navigationEnd !== this.props.navigationEnd ||
+            prevProps.navigationWaypoints !== this.props.navigationWaypoints) {
             this.updateNavigationPointsLayer();
         }
 
@@ -270,6 +272,9 @@ export default class Map extends React.Component<MapProps, MapState> {
     private cleanup() {
         this.vehicleRenderer?.dispose();
         this.vehicleTracker?.dispose();
+
+        for (const m of this.navigationMarkers) m.remove();
+        this.navigationMarkers = [];
 
         if (this.popupRoot) {
             this.popupRoot.unmount();
@@ -526,6 +531,7 @@ export default class Map extends React.Component<MapProps, MapState> {
             this.setupMapEventHandlers();
             this.setState({ mapLoaded: true });
             this.updateScale();
+            this.updateNavigationPointsLayer();
 
             // Re-apply highlighted building when map moves (tiles may load)
             this.map.on("moveend", () => {
@@ -970,97 +976,37 @@ export default class Map extends React.Component<MapProps, MapState> {
         return inside;
     }
 
+    private navigationMarkers: maplibregl.Marker[] = [];
+
     private updateNavigationPointsLayer() {
         if (!this.map) return;
 
-        const sourceId = "navigation-points";
-        const { navigationStart, navigationEnd } = this.props;
+        // Remove old markers
+        for (const m of this.navigationMarkers) m.remove();
+        this.navigationMarkers = [];
 
-        const pointsData: GeoJSON.FeatureCollection = {
-            type: "FeatureCollection",
-            features: [],
-        };
+        const { navigationStart, navigationEnd, navigationWaypoints } = this.props;
 
-        if (navigationStart) {
-            pointsData.features.push({
-                type: "Feature",
-                geometry: {
-                    type: "Point",
-                    coordinates: [navigationStart.lon, navigationStart.lat],
-                },
-                properties: { type: "start", name: navigationStart.name },
-            });
+        // Build ordered list: start, intermediates, end
+        const points: { location: NavigationLocation; index: number }[] = [];
+        if (navigationStart) points.push({ location: navigationStart, index: 0 });
+        const intermediates = (navigationWaypoints ?? []).filter((w): w is NavigationLocation => w !== null);
+        for (const w of intermediates) {
+            points.push({ location: w, index: points.length });
         }
+        if (navigationEnd) points.push({ location: navigationEnd, index: points.length });
 
-        if (navigationEnd) {
-            pointsData.features.push({
-                type: "Feature",
-                geometry: {
-                    type: "Point",
-                    coordinates: [navigationEnd.lon, navigationEnd.lat],
-                },
-                properties: { type: "end", name: navigationEnd.name },
-            });
-        }
+        for (const { location, index } of points) {
+            const letter = String.fromCharCode(65 + index);
+            const el = document.createElement("div");
+            el.className = "nav-waypoint-marker";
+            el.style.cssText = "width:32px;height:32px;border-radius:50%;background:var(--background);border:2.5px solid var(--foreground);display:flex;align-items:center;justify-content:center;color:var(--foreground);font-weight:700;font-size:14px;line-height:1;box-shadow:0 1px 4px rgba(0,0,0,.3);cursor:default;user-select:none;";
+            el.textContent = letter;
 
-        const source = this.map.getSource(sourceId) as maplibregl.GeoJSONSource | undefined;
-
-        if (source) {
-            source.setData(pointsData);
-        } else {
-            this.map.addSource(sourceId, { type: "geojson", data: pointsData });
-
-            // Start point - green circle
-            this.map.addLayer({
-                id: "navigation-start-point",
-                type: "circle",
-                source: sourceId,
-                filter: ["==", ["get", "type"], "start"],
-                paint: {
-                    "circle-radius": 10,
-                    "circle-color": "#22c55e",
-                    "circle-stroke-color": "#ffffff",
-                    "circle-stroke-width": 3,
-                },
-            });
-
-            // End point - red circle
-            this.map.addLayer({
-                id: "navigation-end-point",
-                type: "circle",
-                source: sourceId,
-                filter: ["==", ["get", "type"], "end"],
-                paint: {
-                    "circle-radius": 10,
-                    "circle-color": "#ef4444",
-                    "circle-stroke-color": "#ffffff",
-                    "circle-stroke-width": 3,
-                },
-            });
-
-            // Start point inner dot
-            this.map.addLayer({
-                id: "navigation-start-inner",
-                type: "circle",
-                source: sourceId,
-                filter: ["==", ["get", "type"], "start"],
-                paint: {
-                    "circle-radius": 4,
-                    "circle-color": "#ffffff",
-                },
-            });
-
-            // End point inner dot
-            this.map.addLayer({
-                id: "navigation-end-inner",
-                type: "circle",
-                source: sourceId,
-                filter: ["==", ["get", "type"], "end"],
-                paint: {
-                    "circle-radius": 4,
-                    "circle-color": "#ffffff",
-                },
-            });
+            const marker = new maplibregl.Marker({ element: el, anchor: "center" })
+                .setLngLat([location.lon, location.lat])
+                .addTo(this.map);
+            this.navigationMarkers.push(marker);
         }
     }
 
@@ -1331,7 +1277,7 @@ export default class Map extends React.Component<MapProps, MapState> {
                             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                             </svg>
-                            Copy coordinates
+                            Koordinaten kopieren
                         </button>
                         <button
                             className="w-full px-3 py-1.5 text-sm text-left hover:bg-accent flex items-center gap-2"
@@ -1340,7 +1286,7 @@ export default class Map extends React.Component<MapProps, MapState> {
                             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5" />
                             </svg>
-                            Measure distance
+                            Entfernung messen
                         </button>
                         <div className="border-t my-1" />
                         <button
@@ -1351,7 +1297,7 @@ export default class Map extends React.Component<MapProps, MapState> {
                                 <circle cx="12" cy="12" r="3" />
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 2v4m0 12v4m10-10h-4M6 12H2" />
                             </svg>
-                            Set as start
+                            Als Start setzen
                         </button>
                         <button
                             className="w-full px-3 py-1.5 text-sm text-left hover:bg-accent flex items-center gap-2"
@@ -1361,7 +1307,7 @@ export default class Map extends React.Component<MapProps, MapState> {
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
                             </svg>
-                            Set as destination
+                            Als Ziel setzen
                         </button>
                         <div className="px-3 py-1 text-xs text-muted-foreground border-t mt-1 pt-1 font-mono">
                             {contextMenu.lat.toFixed(6)}, {contextMenu.lng.toFixed(6)}
@@ -1371,24 +1317,24 @@ export default class Map extends React.Component<MapProps, MapState> {
                 {this.props.pickMode && (
                     <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-popover border rounded-md shadow-md px-4 py-2 flex items-center gap-3">
                         <span className="text-sm">
-                            Click to set {this.props.pickMode === "start" ? "start" : "destination"} location
+                            Auf Karte klicken um Ort zu wählen
                         </span>
                         <button
                             className="text-xs text-muted-foreground hover:text-foreground"
                             onClick={this.props.onCancelPickMode}
                         >
-                            Cancel
+                            Abbrechen
                         </button>
                     </div>
                 )}
                 {this.state.measurement.isActive && !this.props.pickMode && (
                     <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-popover border rounded-md shadow-md px-4 py-2 flex items-center gap-3">
-                        <span className="text-sm">Click to set end point</span>
+                        <span className="text-sm">Klicken um Endpunkt zu setzen</span>
                         <button
                             className="text-xs text-muted-foreground hover:text-foreground"
                             onClick={this.clearMeasurement}
                         >
-                            Cancel
+                            Abbrechen
                         </button>
                     </div>
                 )}

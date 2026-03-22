@@ -19,12 +19,13 @@ export interface PinnedStop {
 interface DeparturesPanelProps {
     stop: PinnedStop;
     routeColors: globalThis.Map<string, string>;
+    routeTypes: globalThis.Map<string, string>;
     /** When set, fetches schedule-based departures for this simulated time */
     referenceTime?: Date;
     onUnpin: (id: string) => void;
 }
 
-export function DeparturesPanel({ stop, routeColors, referenceTime, onUnpin }: DeparturesPanelProps) {
+export function DeparturesPanel({ stop, routeColors, routeTypes, referenceTime, onUnpin }: DeparturesPanelProps) {
     const [events, setEvents] = useState<Departure[]>([]);
     const [loading, setLoading] = useState(true);
     const abortRef = useRef<AbortController | null>(null);
@@ -89,6 +90,7 @@ export function DeparturesPanel({ stop, routeColors, referenceTime, onUnpin }: D
                         <DepartureTable
                             events={events}
                             routeColors={routeColors}
+                            routeTypes={routeTypes}
                             referenceTime={referenceTime}
                             maxTrips={15}
                         />

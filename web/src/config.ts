@@ -1,6 +1,7 @@
 export interface AppConfig {
     apiUrl: string;
     martinUrl: string;
+    motisUrl: string;
 }
 
 let config: AppConfig | null = null;
@@ -8,7 +9,8 @@ let configPromise: Promise<AppConfig> | null = null;
 
 const defaultConfig: AppConfig = {
     apiUrl: import.meta.env.VITE_API_URL ?? "http://localhost:3000",
-    martinUrl: import.meta.env.VITE_MARTIN_URL ?? "http://localhost:3001"
+    martinUrl: import.meta.env.VITE_MARTIN_URL ?? "http://localhost:3001",
+    motisUrl: import.meta.env.VITE_MOTIS_URL ?? "http://omniviv-motis.localhost",
 };
 
 export async function loadConfig(): Promise<AppConfig> {
@@ -31,7 +33,8 @@ export async function loadConfig(): Promise<AppConfig> {
             const data = await response.json();
             config = {
                 apiUrl: data.apiUrl ?? defaultConfig.apiUrl,
-                martinUrl: data.martinUrl ?? defaultConfig.martinUrl
+                martinUrl: data.martinUrl ?? defaultConfig.martinUrl,
+                motisUrl: data.motisUrl ?? defaultConfig.motisUrl,
             };
             return config;
         } catch (error) {

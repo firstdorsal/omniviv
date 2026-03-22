@@ -1,0 +1,15 @@
+osm: /input/germany-latest.osm.pbf
+timetable:
+  first_day: TODAY
+  num_days: 14
+  railviz: true
+  with_shapes: true
+  adjust_footpaths: true
+  link_stop_distance: 100
+  update_interval: 60
+  datasets:
+    gtfs-germany:
+      path: /input/gtfs-germany.zip
+street_routing: true
+geocoding: true
+reverse_geocoding: true

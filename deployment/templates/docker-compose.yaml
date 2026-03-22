@@ -1,6 +1,7 @@
 {{- $apiHostname := mowsJoinDomain .services.api.subdomain (ternary "localhost" .domain (eq .routing "local")) -}}
 {{- $webHostname := mowsJoinDomain .services.web.subdomain (ternary "localhost" .domain (eq .routing "local")) -}}
 {{- $martinHostname := mowsJoinDomain .services.martin.subdomain (ternary "localhost" .domain (eq .routing "local")) -}}
+{{- $motisHostname := mowsJoinDomain .services.motis.subdomain (ternary "localhost" .domain (eq .routing "local")) -}}
 {{- if and .services.postgres.storage.volumeName .services.postgres.storage.absolutePath -}}
 {{- fail "Cannot specify both volumeName and absolutePath for postgres storage" -}}
 {{- end -}}
@@ -110,7 +111,7 @@ services:
             retries: 3
             start_period: 5s
         environment:
-            CSP_CONNECT_SRC: {{ ternary "https://" "http://" .tls }}{{ $apiHostname }} {{ ternary "wss://" "ws://" .tls }}{{ $apiHostname }} {{ ternary "https://" "http://" .tls }}{{ $martinHostname }}
+            CSP_CONNECT_SRC: {{ ternary "https://" "http://" .tls }}{{ $apiHostname }} {{ ternary "wss://" "ws://" .tls }}{{ $apiHostname }} {{ ternary "https://" "http://" .tls }}{{ $martinHostname }} {{ ternary "https://" "http://" .tls }}{{ $motisHostname }}
         volumes:
             - ./config/frontend/config.json:/public/config.json:ro
         networks:
@@ -186,6 +187,61 @@ services:
                                 server:
                                     port: "3000"
 
+    motis:
+        image: "{{ .services.motis.image }}"
+        container_name: omniviv-motis
+        restart: unless-stopped
+        volumes:
+            - "{{ .services.motis.inputPath }}:/input:ro"
+            {{- if .services.motis.storage.volumeName }}
+            - {{ .services.motis.storage.volumeName }}:/data
+            {{- else if .services.motis.storage.absolutePath }}
+            - {{ .services.motis.storage.absolutePath }}:/data
+            {{- end }}
+        working_dir: /data
+        entrypoint: ["/bin/sh", "-c"]
+        command:
+            - |
+                cp /input/config.yml /data/config.yml
+                if [ ! -f /data/import_done ]; then
+                    echo "=== First start: importing data (takes ~20-30 min for Germany) ==="
+                    /motis import && touch /data/import_done
+                    echo "=== Import complete ==="
+                fi
+                exec /motis server
+        healthcheck:
+            test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/api/v1/geocode?text=test"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 2400s
+        mem_limit: {{ .services.motis.memLimit }}
+        networks:
+            - {{ .reverseProxy.network }}
+        labels:
+            traefik:
+                docker:
+                    network: {{ .chart.projectName }}_{{ .reverseProxy.network }}
+                enable: true
+                http:
+                    routers:
+                        omniviv-motis:
+                            rule: "Host(`{{ $motisHostname }}`)"
+                            entrypoints: {{ ternary "websecure" "web" .tls }}
+                            service: omniviv-motis
+                            {{- if eq .tls true }}
+                            tls:
+                                certresolver: "default"
+                                domains:
+                                    - main: "{{ .domain }}"
+                                      sans: "*.{{ .domain }}"
+                            {{- end }}
+                    services:
+                        omniviv-motis:
+                            loadbalancer:
+                                server:
+                                    port: "8080"
+
     {{- if eq .reverseProxy.create true }}
     traefik:
         image: traefik:v3
@@ -208,6 +264,9 @@ volumes:
     {{- end }}
     {{- if .services.api.data.storage.volumeName }}
     {{ .services.api.data.storage.volumeName }}:
+    {{- end }}
+    {{- if .services.motis.storage.volumeName }}
+    {{ .services.motis.storage.volumeName }}:
     {{- end }}
 
 networks:

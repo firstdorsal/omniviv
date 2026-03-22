@@ -8,9 +8,15 @@ importers:
 
   .:
     dependencies:
+      '@date-fns/tz':
+        specifier: ^1.4.1
+        version: 1.4.1
       '@fontsource-variable/inter':
         specifier: ^5.2.8
         version: 5.2.8
+      '@mapbox/maki':
+        specifier: ^8.2.0
+        version: 8.2.0
       '@radix-ui/react-checkbox':
         specifier: ^1.3.3
         version: 1.3.3(@types/react-dom@19.2.2(@types/react@19.2.2))(@types/react@19.2.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
@@ -53,6 +59,9 @@ importers:
       '@radix-ui/react-toggle-group':
         specifier: ^1.1.11
         version: 1.1.11(@types/react-dom@19.2.2(@types/react@19.2.2))(@types/react@19.2.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
+      '@rapideditor/temaki':
+        specifier: ^5.12.0
+        version: 5.12.0
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -578,6 +587,9 @@ packages:
     resolution: {integrity: sha512-rY0o9A5ECsTQRVhv7tL/OyDpGAoUB4tTvLiW1DSzQGq4bvTPhNw1VpSNjDJc5GFZ2XuyOtSWSVN05qOtcD71qQ==}
     engines: {node: '>= 0.6'}
 
+  '@mapbox/maki@8.2.0':
+    resolution: {integrity: sha512-sTd/fEBfkBSidVwwtbijHZYJC7NhqvgLrXzSRHgxbLi52x4IciyTVUufqvJr8oIChw7hT7MIBHu5fyqrrpfFdA==}
+
   '@mapbox/point-geometry@1.1.0':
     resolution: {integrity: sha512-YGcBz1cg4ATXDCM/71L9xveh4dynfGmcLDqufR+nQQy3fKwsAZsWd/x4621/6uJaeB9mwOHE6hPeDgXz9uViUQ==}
 
@@ -1089,6 +1101,10 @@ packages:
 
   '@radix-ui/rect@1.1.1':
     resolution: {integrity: sha512-HPwpGIzkl28mWyZqG52jiqDJ12waP11Pa1lGoiyUkIEuMLBP0oeK/C89esbXrxsky5we7dfd8U58nm0SgAWpVw==}
+
+  '@rapideditor/temaki@5.12.0':
+    resolution: {integrity: sha512-16rS0F/SfrGgcutFL0gA1gvEe8u79MnoiOOtxL22o7xHXrX0nhNTjQtOVpRzbLJ2EW6u4DcNr7mB3VLlmrJfFQ==}
+    engines: {bun: '>=1.3.0'}
 
   '@rolldown/pluginutils@1.0.0-beta.43':
     resolution: {integrity: sha512-5Uxg7fQUCmfhax7FJke2+8B6cqgeUJUD9o2uXIKXhD+mG0mL6NObmVoi9wXEU1tY89mZKgAYA6fTbftx3q2ZPQ==}
@@ -3089,6 +3105,8 @@ snapshots:
 
   '@mapbox/jsonlint-lines-primitives@2.0.2': {}
 
+  '@mapbox/maki@8.2.0': {}
+
   '@mapbox/point-geometry@1.1.0': {}
 
   '@mapbox/tiny-sdf@2.0.7': {}
@@ -3583,6 +3601,8 @@ snapshots:
       '@types/react': 19.2.2
 
   '@radix-ui/rect@1.1.1': {}
+
+  '@rapideditor/temaki@5.12.0': {}
 
   '@rolldown/pluginutils@1.0.0-beta.43': {}
 

@@ -47,6 +47,27 @@ function getUrlParam(key: string): string | null {
     return new URLSearchParams(window.location.search).get(key);
 }
 
+/** Encode a location as pipe-separated string: lat|lon|type|iconName|name */
+function encodeLocation(loc: Location): string {
+    return `${loc.lat}|${loc.lon}|${loc.type}|${loc.iconName ?? ""}|${loc.name}`;
+}
+
+/** Decode a pipe-separated location string back to a Location object */
+function decodeLocation(raw: string | null): Location | null {
+    if (!raw) return null;
+    const [latStr, lonStr, type, iconName, ...nameParts] = raw.split("|");
+    const lat = parseFloat(latStr);
+    const lon = parseFloat(lonStr);
+    if (isNaN(lat) || isNaN(lon) || !type) return null;
+    return {
+        lat,
+        lon,
+        type: type as Location["type"],
+        iconName: iconName || undefined,
+        name: nameParts.join("|") || `${lat.toFixed(5)}, ${lon.toFixed(5)}`,
+    };
+}
+
 let api: Api<unknown> | null = null;
 function getApi() {
     if (!api) {
@@ -157,10 +178,27 @@ export default function App() {
     }, [panelWidth]);
     const [osmIssuesCount, setOsmIssuesCount] = useState<number | null>(null);
 
-    // Navigation state
-    const [navStart, setNavStart] = useState<Location | null>(null);
-    const [navEnd, setNavEnd] = useState<Location | null>(null);
+    // Navigation state — restore from URL params if present
+    // URL format: lat|lon|type|iconName|name (pipe-separated, name last)
+    // Intermediates: semicolon-separated list of encoded locations
+    const [navStart, setNavStart] = useState<Location | null>(() => decodeLocation(getUrlParam("from")));
+    const [navEnd, setNavEnd] = useState<Location | null>(() => decodeLocation(getUrlParam("to")));
+    const [navVia, setNavVia] = useState<(Location | null)[]>(() => {
+        const raw = getUrlParam("via");
+        if (!raw) return [];
+        return raw.split(";").map(s => decodeLocation(s));
+    });
     const [pickMode, setPickMode] = useState<PickMode>(null);
+
+    // Sync navigation locations to URL
+    useEffect(() => {
+        const viaNonEmpty = navVia.filter((v): v is Location => v !== null);
+        updateUrlParams({
+            from: navStart ? encodeLocation(navStart) : null,
+            to: navEnd ? encodeLocation(navEnd) : null,
+            via: viaNonEmpty.length > 0 ? viaNonEmpty.map(encodeLocation).join(";") : null,
+        });
+    }, [navStart, navEnd, navVia]);
 
     // Highlighted building state
     const [highlightedBuilding, setHighlightedBuilding] = useState<{
@@ -287,7 +325,8 @@ export default function App() {
         setNavStart({
             name: `${lat.toFixed(5)}, ${lon.toFixed(5)}`,
             lat,
-            lon
+            lon,
+            type: "map",
         });
         setPickMode(null);
         setActivePanel("navigation");
@@ -297,7 +336,8 @@ export default function App() {
         setNavEnd({
             name: `${lat.toFixed(5)}, ${lon.toFixed(5)}`,
             lat,
-            lon
+            lon,
+            type: "map",
         });
         setPickMode(null);
         setActivePanel("navigation");
@@ -414,11 +454,19 @@ export default function App() {
     // Get route IDs for WebSocket subscription
     const routeIds = useMemo(() => routes.map((r) => r.osm_id), [routes]);
 
-    // Route colors for departure tables (line number → color)
+    // Route colors and types for departure tables (line number → color / type)
     const routeColors = useMemo(() => {
         const map = new globalThis.Map<string, string>();
         for (const route of routes) {
             if (route.ref && route.color) map.set(route.ref, route.color);
+        }
+        return map;
+    }, [routes]);
+
+    const routeTypes = useMemo(() => {
+        const map = new globalThis.Map<string, string>();
+        for (const route of routes) {
+            if (route.ref && route.route_type) map.set(route.ref, route.route_type);
         }
         return map;
     }, [routes]);
@@ -559,23 +607,25 @@ export default function App() {
                 {/* Content panel */}
                 {activePanel && (
                     <div
-                        className="bg-background relative h-full overflow-y-auto border-r shadow-lg"
+                        className="relative flex h-full border-r shadow-lg"
                         style={{ width: panelWidth }}
                     >
-                        {/* Resize handle */}
-                        <div
-                            className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 z-10"
-                            onMouseDown={handlePanelResizeStart}
-                        />
+                        <div className="bg-background h-full flex-1 overflow-y-auto min-w-0">
                         {activePanel === "navigation" && (
                             <NavigationPanel
                                 stations={stations}
+                                areas={areas}
+                                routeColors={routeColors}
+                                routeTypes={routeTypes}
                                 startLocation={navStart}
                                 endLocation={navEnd}
                                 onStartChange={setNavStart}
                                 onEndChange={setNavEnd}
+                                intermediateStops={navVia}
+                                onIntermediateStopsChange={setNavVia}
                                 pickMode={pickMode}
                                 onPickModeChange={handlePickModeChange}
+                                onFlyTo={handleFlyTo}
                             />
                         )}
 
@@ -812,6 +862,7 @@ export default function App() {
                                 <DeparturesPanel
                                     stop={stop}
                                     routeColors={routeColors}
+                                    routeTypes={routeTypes}
                                     referenceTime={timeSimulation.isRealTime ? undefined : timeSimulation.currentTime}
                                     onUnpin={handleUnpinStop}
                                 />
@@ -821,6 +872,12 @@ export default function App() {
                         {activePanel === "time" && (
                             <TimeControlPanel timeSimulation={timeSimulation} />
                         )}
+                        </div>
+                        {/* Resize handle — outside scrollable area, right of scrollbar */}
+                        <div
+                            className="h-full w-1.5 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 shrink-0"
+                            onMouseDown={handlePanelResizeStart}
+                        />
                     </div>
                 )}
             </div>
@@ -848,6 +905,7 @@ export default function App() {
                     onCancelPickMode={() => setPickMode(null)}
                     navigationStart={navStart}
                     navigationEnd={navEnd}
+                    navigationWaypoints={navVia}
                     highlightedBuilding={highlightedBuilding}
                     onHighlightBuilding={setHighlightedBuilding}
                     mappingLines={activePanel === "issues" ? mappingMapData.lines : []}

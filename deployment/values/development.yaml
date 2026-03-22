@@ -38,3 +38,11 @@ services:
         image: ghcr.io/maplibre/martin
         dataPath: ./data/
         cacheSeconds: 86400 # 1 day
+    motis:
+        subdomain: omniviv-motis
+        image: ghcr.io/motis-project/motis:latest
+        inputPath: ./data/motis/input/
+        storage:
+            volumeName: omniviv-motis-data
+            absolutePath: null
+        memLimit: 12g

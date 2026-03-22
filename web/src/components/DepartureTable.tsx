@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { EventType, type Departure } from "../api";
+import { LineBadge } from "./LineBadge";
 import { LiveTime } from "./LiveTime";
 
 export interface TripEvent {
@@ -20,6 +21,7 @@ type TimeColumn = "departure" | "arrival" | "relative";
 interface DepartureTableProps {
     events: Departure[];
     routeColors: globalThis.Map<string, string>;
+    routeTypes?: globalThis.Map<string, string>;
     referenceTime?: Date;
     maxTrips?: number;
 }
@@ -124,7 +126,7 @@ function RelativeTime({ time, isLive, delayMinutes, referenceTime }: {
     );
 }
 
-export function DepartureTable({ events, routeColors, referenceTime, maxTrips = 8 }: DepartureTableProps) {
+export function DepartureTable({ events, routeColors, routeTypes, referenceTime, maxTrips = 8 }: DepartureTableProps) {
     const [visibleColumns, setVisibleColumns] = useState<TimeColumn[]>(["relative"]);
     const [hiddenLines, setHiddenLines] = useState<Set<string>>(new Set());
 
@@ -238,15 +240,14 @@ export function DepartureTable({ events, routeColors, referenceTime, maxTrips = 
                 </thead>
                 <tbody>
                     {filteredTrips.slice(0, maxTrips).map((trip) => {
-                        const color = routeColors.get(trip.lineNumber) || "#6b7280";
                         // For the relative column, prefer departure time, fall back to arrival
                         const relTimeStr = trip.departureTime ?? trip.arrivalTime;
                         const relIsLive = trip.departureTime ? trip.departureIsLive : trip.arrivalIsLive;
 
                         return (
                             <tr key={trip.tripId} className={`whitespace-nowrap${trip.cancelled ? " line-through opacity-50" : ""}`}>
-                                <td className="font-mono font-semibold pr-2" style={{ color }}>
-                                    {trip.lineNumber}
+                                <td className="pr-2">
+                                    <LineBadge line={trip.lineNumber} color={routeColors.get(trip.lineNumber)} mode={routeTypes?.get(trip.lineNumber)} variant="text" />
                                 </td>
                                 <td className="pr-3">{trip.destination}</td>
                                 {showArr && (

@@ -1,3 +1,5 @@
+import { LineBadge } from "./LineBadge";
+
 interface VehiclePopupProps {
     tripId: string;
     lineNumber: string;
@@ -57,12 +59,7 @@ export function VehiclePopup({
         <div className="p-4 pr-8 min-w-48">
             {/* Header with line number and destination */}
             <div className="flex items-center gap-3">
-                <div
-                    className="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-lg shrink-0"
-                    style={{ backgroundColor: routeColor ?? "#3b82f6" }}
-                >
-                    {lineNumber}
-                </div>
+                <LineBadge line={lineNumber} color={routeColor} variant="circle" />
                 <div>
                     <div className="font-semibold text-gray-900">{destination}</div>
                     <div className="text-sm text-gray-500">Linie {lineNumber}</div>

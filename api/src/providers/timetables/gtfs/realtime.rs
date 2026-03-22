@@ -67,11 +67,25 @@ fn collect_cancelled_trips_from_alerts(
     tz: Tz,
 ) -> HashSet<String> {
     let mut cancelled = HashSet::new();
+    let now_unix = now.timestamp() as u64;
 
     for entity in &feed.entity {
         let Some(alert) = &entity.alert else {
             continue;
         };
+
+        // Skip alerts whose active_period does not include the current time.
+        // An empty active_period means "always active" per the GTFS-RT spec.
+        if !alert.active_period.is_empty()
+            && !alert.active_period.iter().any(|period| {
+                let start_ok = period.start.map_or(true, |s| now_unix >= s);
+                let end_ok = period.end.map_or(true, |e| now_unix < e);
+                start_ok && end_ok
+            })
+        {
+            debug!(entity_id = %entity.id, "Skipping alert — active_period does not include current time");
+            continue;
+        }
 
         // NO_SERVICE = trip does not operate.
         // Also match UNKNOWN_EFFECT: some feed providers (e.g., DELFI/gtfs.de)
@@ -519,11 +533,14 @@ pub fn process_trip_updates(
         );
     }
 
-    // Mark any already-emitted departures for alert-cancelled trips
+    // Mark any already-emitted departures for alert-cancelled trips,
+    // but only if the trip has NO realtime data. A trip with live RT updates
+    // (stop times, delays) that isn't trip-level CANCELED is actually running —
+    // the alert is stale (e.g. leftover from a strike that has ended).
     for events in departures.values_mut() {
         for dep in events.iter_mut() {
             if let Some(ref tid) = dep.trip_id {
-                if cancelled_by_alert.contains(tid.as_str()) {
+                if cancelled_by_alert.contains(tid.as_str()) && !trips_with_rt.contains(tid) {
                     dep.cancelled = true;
                 }
             }

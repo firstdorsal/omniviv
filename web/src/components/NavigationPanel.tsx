@@ -1,231 +1,434 @@
-import { useState, useRef, useEffect } from "react";
-import { MapPin } from "lucide-react";
-import { TbMapX } from "react-icons/tb";
+import { useCallback, useRef, useState } from "react";
+import { GripVertical, Plus, Trash2 } from "lucide-react";
+import { TbWalk } from "react-icons/tb";
 import { Button } from "./ui/button";
-import { Input } from "./ui/input";
-import { Popover, PopoverContent, PopoverAnchor } from "./ui/popover";
-import type { Station } from "../api";
-
-interface Location {
-    name: string;
-    lat: number;
-    lon: number;
-}
-
-interface LocationInputProps {
-    label: string;
-    placeholder?: string;
-    stations: Station[];
-    value: Location | null;
-    onChange: (location: Location | null) => void;
-    onUseCurrentLocation?: () => void;
-    onPickOnMap?: () => void;
-    isLocating?: boolean;
-    isPickingLocation?: boolean;
-}
-
-function LocationInput({
-    label,
-    placeholder = "Ort suchen...",
-    stations,
-    value,
-    onChange,
-    onUseCurrentLocation,
-    onPickOnMap,
-    isLocating,
-    isPickingLocation,
-}: LocationInputProps) {
-    const [query, setQuery] = useState(value?.name ?? "");
-    const [isOpen, setIsOpen] = useState(false);
-    const inputRef = useRef<HTMLInputElement>(null);
-
-    // Update query when value changes externally (e.g., from map picking)
-    useEffect(() => {
-        if (value) {
-            setQuery(value.name);
-        }
-    }, [value]);
-
-    const filteredStations = query.length > 0 && !value
-        ? stations.filter(s => s.name.toLowerCase().includes(query.toLowerCase())).slice(0, 5)
-        : [];
-
-    const handleSelectStation = (station: Station) => {
-        onChange({
-            name: station.name,
-            lat: station.lat,
-            lon: station.lon,
-        });
-        setQuery(station.name);
-        setIsOpen(false);
-    };
-
-    const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        setQuery(e.target.value);
-        onChange(null);
-        setIsOpen(true);
-    };
-
-    return (
-        <div>
-            <label className="text-sm font-medium text-muted-foreground block mb-1.5">
-                {label}
-            </label>
-            <div className="flex gap-2">
-                <Popover open={isOpen && filteredStations.length > 0} onOpenChange={setIsOpen}>
-                    <PopoverAnchor asChild>
-                        <Input
-                            ref={inputRef}
-                            placeholder={placeholder}
-                            value={query}
-                            onChange={handleInputChange}
-                            onFocus={() => setIsOpen(true)}
-                        />
-                    </PopoverAnchor>
-                    <PopoverContent
-                        className="p-0 w-[var(--radix-popover-trigger-width)]"
-                        align="start"
-                        onOpenAutoFocus={(e) => e.preventDefault()}
-                    >
-                        <ul className="max-h-48 overflow-y-auto">
-                            {filteredStations.map((station) => (
-                                <li key={station.id}>
-                                    <button
-                                        type="button"
-                                        className="w-full px-3 py-2 text-left text-sm hover:bg-muted"
-                                        onClick={() => handleSelectStation(station)}
-                                    >
-                                        {station.name}
-                                    </button>
-                                </li>
-                            ))}
-                        </ul>
-                    </PopoverContent>
-                </Popover>
-                {onUseCurrentLocation && (
-                    <Button
-                        variant="outline"
-                        size="icon"
-                        onClick={onUseCurrentLocation}
-                        disabled={isLocating}
-                        title="Aktuellen Standort verwenden"
-                    >
-                        <MapPin className="h-4 w-4" />
-                    </Button>
-                )}
-                {onPickOnMap && (
-                    <Button
-                        variant={isPickingLocation ? "default" : "outline"}
-                        size="icon"
-                        onClick={onPickOnMap}
-                        title="Auf Karte auswählen"
-                    >
-                        <TbMapX className="h-4 w-4" />
-                    </Button>
-                )}
-            </div>
-        </div>
-    );
-}
+import { DateTimePicker } from "./ui/date-time-picker";
+import type { Area, Station } from "../api";
+import { getConfig } from "../config";
+import { Duration } from "./Duration";
+import { LineBadge } from "./LineBadge";
+import { LocationSearch, type ResolvedLocation } from "./LocationSearch";
 
 type PickMode = "start" | "end" | null;
 
 interface NavigationPanelProps {
     stations: Station[];
-    startLocation: Location | null;
-    endLocation: Location | null;
-    onStartChange: (location: Location | null) => void;
-    onEndChange: (location: Location | null) => void;
+    areas: Area[];
+    routeColors: globalThis.Map<string, string>;
+    routeTypes: globalThis.Map<string, string>;
+    startLocation: ResolvedLocation | null;
+    endLocation: ResolvedLocation | null;
+    onStartChange: (location: ResolvedLocation | null) => void;
+    onEndChange: (location: ResolvedLocation | null) => void;
+    intermediateStops: (ResolvedLocation | null)[];
+    onIntermediateStopsChange: (stops: (ResolvedLocation | null)[]) => void;
     pickMode: PickMode;
     onPickModeChange: (mode: PickMode) => void;
+    onFlyTo?: (lat: number, lon: number) => void;
 }
 
-export type { Location };
+// Keep the old Location type as alias for backwards compatibility
+type Location = ResolvedLocation;
 
-export { type PickMode };
+export type { Location, PickMode };
+
+interface RouteLeg {
+    mode: string;
+    routeShortName?: string;
+    from: { name: string };
+    to: { name: string };
+    duration: number;
+    startTime: string;
+    endTime: string;
+    distance?: number;
+}
+
+interface RouteItinerary {
+    duration: number;
+    startTime: string;
+    endTime: string;
+    transfers: number;
+    legs: RouteLeg[];
+}
+
+function formatTime(iso: string): string {
+    return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 
 export function NavigationPanel({
     stations,
+    areas,
+    routeColors,
+    routeTypes,
     startLocation,
     endLocation,
     onStartChange,
     onEndChange,
     pickMode,
+    intermediateStops,
+    onIntermediateStopsChange: setIntermediateStops,
     onPickModeChange,
+    onFlyTo,
 }: NavigationPanelProps) {
-    const [isLocating, setIsLocating] = useState(false);
+    const [isSearching, setIsSearching] = useState(false);
+    const [itineraries, setItineraries] = useState<RouteItinerary[]>([]);
+    const [error, setError] = useState<string | null>(null);
+    const [departureDateTime, setDepartureDateTime] = useState<Date | undefined>(() => new Date());
+    const [arriveBy, setArriveBy] = useState(false);
 
-    const handlePickOnMap = (mode: PickMode) => {
-        // Toggle pick mode - if already picking this one, cancel
-        onPickModeChange(pickMode === mode ? null : mode);
-    };
+    // Stable keys for each LocationSearch slot — survive reordering so React
+    // keeps internal component state (query text, popover, etc.) with the data.
+    const nextSlotId = useRef(2);
+    const [slotKeys, setSlotKeys] = useState<string[]>(["slot-0", "slot-1"]);
 
-    const handleUseCurrentLocation = (setLocation: (loc: Location) => void) => {
-        if (!navigator.geolocation) {
-            alert("Standortbestimmung wird von deinem Browser nicht unterstützt");
-            return;
+    // Drag state — HTML5 DnD with ghost image
+    const [dragIndex, setDragIndex] = useState<number | null>(null);
+    const dragStartState = useRef<{
+        locations: (ResolvedLocation | null)[];
+        keys: string[];
+    } | null>(null);
+
+    const handleDragStart = (index: number, e: React.DragEvent) => {
+        e.dataTransfer.effectAllowed = "move";
+        dragStartState.current = {
+            locations: [startLocation, ...intermediateStops, endLocation],
+            keys: [...slotKeys],
+        };
+        const row = e.currentTarget.parentElement;
+        if (row) {
+            const rect = row.getBoundingClientRect();
+            e.dataTransfer.setDragImage(row, e.clientX - rect.left, e.clientY - rect.top);
         }
-
-        setIsLocating(true);
-        navigator.geolocation.getCurrentPosition(
-            (position) => {
-                setLocation({
-                    name: "Aktueller Standort",
-                    lat: position.coords.latitude,
-                    lon: position.coords.longitude,
-                });
-                setIsLocating(false);
-            },
-            (error) => {
-                console.error("Error getting location:", error);
-                alert("Standort konnte nicht ermittelt werden");
-                setIsLocating(false);
-            }
-        );
+        requestAnimationFrame(() => setDragIndex(index));
     };
+
+    const handleDragOver = (index: number, e: React.DragEvent) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        if (dragIndex === null || dragIndex === index) return;
+
+        const allLocs: (ResolvedLocation | null)[] = [startLocation, ...intermediateStops, endLocation];
+        const [movedLoc] = allLocs.splice(dragIndex, 1);
+        allLocs.splice(index, 0, movedLoc);
+        const allKeys = [...slotKeys];
+        const [movedKey] = allKeys.splice(dragIndex, 1);
+        allKeys.splice(index, 0, movedKey);
+
+        onStartChange(allLocs[0]);
+        setIntermediateStops(allLocs.slice(1, -1));
+        onEndChange(allLocs[allLocs.length - 1]);
+        setSlotKeys(allKeys);
+        setDragIndex(index);
+    };
+
+    const handleDrop = () => {
+        dragStartState.current = null;
+        setDragIndex(null);
+        onPickModeChange(null);
+    };
+
+    const handleDragEnd = () => {
+        if (dragStartState.current) {
+            const { locations, keys } = dragStartState.current;
+            onStartChange(locations[0]);
+            setIntermediateStops(locations.slice(1, -1));
+            onEndChange(locations[locations.length - 1]);
+            setSlotKeys(keys);
+            dragStartState.current = null;
+        }
+        setDragIndex(null);
+    };
+
+    const [focusRequest, setFocusRequest] = useState<{ key: string; seq: number } | null>(null);
+
+    const addIntermediateStop = () => {
+        const id = `slot-${nextSlotId.current++}`;
+        // Move the current end into intermediates, new empty slot becomes the end
+        setIntermediateStops(prev => [...prev, endLocation]);
+        onEndChange(null);
+        setSlotKeys(prev => [...prev, id]);
+        setFocusRequest({ key: id, seq: Date.now() });
+    };
+
+    const updateIntermediateStop = (index: number, location: ResolvedLocation | null) => {
+        setIntermediateStops(prev => prev.map((s, i) => i === index ? location : s));
+    };
+
+    const removeIntermediateStop = (index: number) => {
+        setIntermediateStops(prev => prev.filter((_, i) => i !== index));
+        setSlotKeys(prev => prev.filter((_, i) => i !== index + 1));
+    };
+
+    /** Remove any stop by its position in the full [start, ...intermediates, end] list. */
+    const removeStop = (i: number) => {
+        const total = 2 + intermediateStops.length;
+        if (total <= 2) return;
+        const isStart = i === 0;
+        const isEnd = i === total - 1;
+        if (isStart) {
+            // Promote first intermediate to start
+            onStartChange(intermediateStops[0] ?? null);
+            setIntermediateStops(prev => prev.slice(1));
+            setSlotKeys(prev => prev.filter((_, idx) => idx !== 0));
+        } else if (isEnd) {
+            // Promote last intermediate to end
+            onEndChange(intermediateStops[intermediateStops.length - 1] ?? null);
+            setIntermediateStops(prev => prev.slice(0, -1));
+            setSlotKeys(prev => prev.filter((_, idx) => idx !== prev.length - 1));
+        } else {
+            removeIntermediateStop(i - 1);
+        }
+    };
+
+    const handleSearch = useCallback(async () => {
+        if (!startLocation || !endLocation || !departureDateTime) return;
+        setIsSearching(true);
+        setError(null);
+        setItineraries([]);
+
+        try {
+            const params = new URLSearchParams({
+                fromPlace: `${startLocation.lat},${startLocation.lon}`,
+                toPlace: `${endLocation.lat},${endLocation.lon}`,
+                time: departureDateTime.toISOString(),
+                arriveBy: String(arriveBy),
+                mode: "TRANSIT,WALK",
+            });
+            for (const stop of intermediateStops) {
+                if (stop) params.append("intermediatePlaces", `${stop.lat},${stop.lon}`);
+            }
+            const url = `${getConfig().motisUrl}/api/v1/plan?${params}`;
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            const transit = data.itineraries ?? [];
+            const direct = data.direct ?? [];
+            const itins = [...transit, ...direct].sort(
+                (a, b) => new Date(a.endTime).getTime() - new Date(b.endTime).getTime(),
+            );
+            setItineraries(itins);
+            if (itins.length === 0) {
+                setError("Keine Verbindungen gefunden");
+            }
+        } catch (err) {
+            setError("Routensuche fehlgeschlagen");
+            console.error("MOTIS routing error:", err);
+        } finally {
+            setIsSearching(false);
+        }
+    }, [startLocation, endLocation, intermediateStops, departureDateTime, arriveBy]);
 
     return (
         <div className="p-4">
             <h2 className="font-semibold mb-4">Routenplanung</h2>
 
-            <div className="space-y-4">
-                <LocationInput
-                    label="Start"
-                    stations={stations}
-                    value={startLocation}
-                    onChange={onStartChange}
-                    onUseCurrentLocation={() => handleUseCurrentLocation(onStartChange)}
-                    onPickOnMap={() => handlePickOnMap("start")}
-                    isLocating={isLocating}
-                    isPickingLocation={pickMode === "start"}
-                />
+            <div className="space-y-3">
+                {/* Route stops with timeline */}
+                <div>
+                    {Array.from({ length: 2 + intermediateStops.length }, (_, i) => {
+                        const total = 2 + intermediateStops.length;
+                        const isStart = i === 0;
+                        const isEnd = i === total - 1;
+                        const intermediateIdx = i - 1;
 
-                <LocationInput
-                    label="Ziel"
-                    stations={stations}
-                    value={endLocation}
-                    onChange={onEndChange}
-                    onUseCurrentLocation={() => handleUseCurrentLocation(onEndChange)}
-                    onPickOnMap={() => handlePickOnMap("end")}
-                    isLocating={isLocating}
-                    isPickingLocation={pickMode === "end"}
-                />
+                        const location = isStart ? startLocation : isEnd ? endLocation : intermediateStops[intermediateIdx];
+                        const baseChange = isStart
+                            ? onStartChange
+                            : isEnd
+                                ? onEndChange
+                                : (loc: ResolvedLocation | null) => updateIntermediateStop(intermediateIdx, loc);
+                        const handleChange = (loc: ResolvedLocation | null) => {
+                            baseChange(loc);
+                            // When a location is selected, focus the next empty stop
+                            if (loc) {
+                                const allLocs = [startLocation, ...intermediateStops, endLocation];
+                                allLocs[i] = loc;
+                                for (let next = i + 1; next < allLocs.length; next++) {
+                                    if (!allLocs[next]) {
+                                        setFocusRequest({ key: slotKeys[next], seq: Date.now() });
+                                        return;
+                                    }
+                                }
+                            }
+                        };
+
+                        return (
+                            <div key={slotKeys[i]}>
+                                {/* Connecting dots between circles */}
+                                {i > 0 && (
+                                    <div className="flex gap-2">
+                                        <div className="w-5" />
+                                        <div className="w-6 flex flex-col items-center py-0.5 gap-px">
+                                            <div className="w-1 h-1 rounded-full bg-muted-foreground/40" />
+                                            <div className="w-1 h-1 rounded-full bg-muted-foreground/40" />
+                                            <div className="w-1 h-1 rounded-full bg-muted-foreground/40" />
+                                        </div>
+                                    </div>
+                                )}
+                                {/* Location row */}
+                                <div
+                                    className={`flex items-center gap-2 py-0.5 rounded-md ${dragIndex === i ? "opacity-0" : ""}`}
+                                    onDragOver={(e) => handleDragOver(i, e)}
+                                    onDrop={handleDrop}
+                                >
+                                    {/* Drag handle */}
+                                    <div
+                                        className="w-5 flex justify-center cursor-grab active:cursor-grabbing shrink-0"
+                                        draggable
+                                        onDragStart={(e) => handleDragStart(i, e)}
+                                        onDragEnd={handleDragEnd}
+                                    >
+                                        <GripVertical className="h-4 w-4 text-muted-foreground" />
+                                    </div>
+                                    {/* Circle with letter — click to zoom on map */}
+                                    <div
+                                        className={`w-6 h-6 rounded-full border-2 border-foreground flex items-center justify-center shrink-0 ${location ? "cursor-pointer hover:bg-foreground hover:text-background transition-colors" : ""}`}
+                                        onClick={() => { if (location && onFlyTo) onFlyTo(location.lat, location.lon); }}
+                                    >
+                                        <span className="text-[10px] font-bold select-none">{String.fromCharCode(65 + i)}</span>
+                                    </div>
+                                    {/* Input — disable pointer events during drag to prevent popover interference */}
+                                    <div className={`flex-1 min-w-0 ${dragIndex !== null ? "pointer-events-none" : ""}`}>
+                                        <LocationSearch
+                                            stations={stations}
+                                            areas={areas}
+                                            value={location}
+                                            onChange={handleChange}
+                                            showGps
+                                            showMapPick
+                                            isPickingOnMap={isStart ? pickMode === "start" : isEnd ? pickMode === "end" : false}
+                                            onPickOnMap={
+                                                isStart
+                                                    ? () => onPickModeChange(pickMode === "start" ? null : "start")
+                                                    : isEnd
+                                                        ? () => onPickModeChange(pickMode === "end" ? null : "end")
+                                                        : undefined
+                                            }
+                                            autoFocus={focusRequest !== null && slotKeys[i] === focusRequest.key ? focusRequest.seq : undefined}
+                                        />
+                                    </div>
+                                    {/* Remove button — shown for any stop when more than 2 exist */}
+                                    {total > 2 && (
+                                        <Button
+                                            variant="ghost"
+                                            size="icon"
+                                            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+                                            onClick={() => removeStop(i)}
+                                            title="Halt entfernen"
+                                        >
+                                            <Trash2 className="h-3.5 w-3.5" />
+                                        </Button>
+                                    )}
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+                <div
+                    className="flex items-center gap-2 py-0.5 cursor-pointer group"
+                    onClick={addIntermediateStop}
+                    title="Halt hinzufügen"
+                >
+                    <div className="w-5 flex justify-center shrink-0" />
+                    <div className="w-6 flex justify-center shrink-0">
+                        <Plus className="h-4 w-4 text-muted-foreground" />
+                    </div>
+                    <div className="flex-1 min-w-0 h-9 rounded-md border border-input/40 group-hover:border-input bg-transparent px-3 flex items-center">
+                        <span className="text-sm text-muted-foreground/40 group-hover:text-muted-foreground">Halt hinzufügen...</span>
+                    </div>
+                </div>
+
+                <div className="flex gap-2 items-center">
+                    <Button
+                        variant={arriveBy ? "outline" : "default"}
+                        size="sm"
+                        className="text-xs"
+                        onClick={() => setArriveBy(false)}
+                    >
+                        Abfahrt
+                    </Button>
+                    <Button
+                        variant={arriveBy ? "default" : "outline"}
+                        size="sm"
+                        className="text-xs"
+                        onClick={() => setArriveBy(true)}
+                    >
+                        Ankunft
+                    </Button>
+                    <DateTimePicker
+                        value={departureDateTime}
+                        onChange={setDepartureDateTime}
+                        timeFormat="24h"
+                        timeLayout="beside"
+                        className="flex-1"
+                    />
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-xs text-muted-foreground shrink-0"
+                        onClick={() => setDepartureDateTime(new Date())}
+                    >
+                        Jetzt
+                    </Button>
+                </div>
 
                 <Button
                     className="w-full"
-                    disabled={!startLocation || !endLocation}
+                    disabled={!startLocation || !endLocation || isSearching}
+                    onClick={handleSearch}
                 >
-                    Route finden
+                    {isSearching ? "Suche..." : "Route finden"}
                 </Button>
 
-                {(startLocation || endLocation) && (
-                    <div className="p-3 bg-muted rounded-lg text-sm space-y-1">
-                        {startLocation && (
-                            <p><span className="text-muted-foreground">Von:</span> {startLocation.name}</p>
-                        )}
-                        {endLocation && (
-                            <p><span className="text-muted-foreground">Nach:</span> {endLocation.name}</p>
-                        )}
+                {error && (
+                    <div className="text-sm text-destructive">{error}</div>
+                )}
+
+                {itineraries.length > 0 && (
+                    <div className="space-y-3">
+                        {itineraries.map((it, i) => (
+                            <div key={i} className="@container border rounded-lg p-3 space-y-2">
+                                <div className="flex items-center justify-between text-sm">
+                                    <span className="font-medium">
+                                        {formatTime(it.startTime)} - {formatTime(it.endTime)}
+                                    </span>
+                                    <Duration seconds={it.duration} className="text-foreground" />
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <div className="relative min-w-0 flex-1 overflow-hidden" style={{ maxHeight: "2rem" }}>
+                                        <div className="flex items-center gap-1.5 flex-nowrap">
+                                            {it.legs.map((leg, j) => {
+                                                if (leg.mode === "WALK") {
+                                                    const walkMin = Math.round(leg.duration / 60);
+                                                    return (
+                                                        <span key={j} className="inline-flex items-start text-muted-foreground shrink-0">
+                                                            <TbWalk className="h-5 w-5" />
+                                                            <span className="text-[10px] -ml-1 -mt-0.5">{walkMin}</span>
+                                                        </span>
+                                                    );
+                                                }
+                                                return (
+                                                    <LineBadge
+                                                        key={j}
+                                                        line={leg.routeShortName || leg.mode}
+                                                        color={leg.routeShortName ? routeColors.get(leg.routeShortName) : undefined}
+                                                        mode={leg.mode || (leg.routeShortName ? routeTypes.get(leg.routeShortName) : undefined)}
+                                                        className="shrink-0"
+                                                    />
+                                                );
+                                            })}
+                                        </div>
+                                        <div className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-background to-transparent" />
+                                    </div>
+                                    {it.transfers > 0 && (
+                                        <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">
+                                            {it.transfers}x
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
                     </div>
                 )}
             </div>
