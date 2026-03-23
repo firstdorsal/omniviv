@@ -3,7 +3,7 @@
 
 FROM node:23-alpine3.19 AS build-stage
 WORKDIR /build
-RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
 
 COPY package.json pnpm-lock.yaml ./
 
