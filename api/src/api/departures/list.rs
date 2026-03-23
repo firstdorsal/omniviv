@@ -8,7 +8,7 @@ use crate::api::ErrorResponse;
 use crate::providers::timetables::gtfs::{realtime, static_data};
 use crate::sync::Departure;
 
-use super::DeparturesState;
+use crate::api::state::AppState;
 
 /// How many minutes of past departures to keep so that recent arrivals remain visible.
 const PAST_GRACE_MINUTES: i64 = 5;
@@ -100,7 +100,7 @@ use crate::api::utils::parse_reference_time;
     tag = "departures"
 )]
 pub async fn list_departures(
-    State(state): State<DeparturesState>,
+    State(state): State<AppState>,
 ) -> Json<DepartureListResponse> {
     let store = state.departure_store.read().await;
     let departures: Vec<Departure> = store.values().flatten().cloned().collect();
@@ -120,7 +120,7 @@ pub async fn list_departures(
     tag = "departures"
 )]
 pub async fn get_departures_by_stop(
-    State(state): State<DeparturesState>,
+    State(state): State<AppState>,
     Json(request): Json<StopDeparturesRequest>,
 ) -> Json<StopDeparturesResponse> {
     let simulated_time = parse_reference_time(&request.reference_time);
@@ -197,7 +197,7 @@ pub async fn get_departures_by_stop(
     tag = "departures"
 )]
 pub async fn get_departures_by_gtfs_stop(
-    State(state): State<DeparturesState>,
+    State(state): State<AppState>,
     Json(request): Json<GtfsStopDeparturesRequest>,
 ) -> Json<GtfsStopDeparturesResponse> {
     let simulated_time = parse_reference_time(&request.reference_time);

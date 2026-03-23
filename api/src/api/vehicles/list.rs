@@ -1,14 +1,12 @@
 use axum::{extract::State, http::StatusCode, Json};
-use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use utoipa::ToSchema;
 
-use super::VehiclesState;
-use crate::api::ErrorResponse;
-use crate::providers::timetables::gtfs::{realtime, static_data};
-use crate::sync::{Departure, EventType};
+use crate::api::state::AppState;
+use crate::api::{ErrorResponse, error::internal_error};
+use crate::api::utils::parse_reference_time;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct VehiclesByRouteRequest {
@@ -176,7 +174,7 @@ pub fn link_consecutive_trips(vehicles: &mut [Vehicle]) {
     tag = "vehicles"
 )]
 pub async fn get_vehicles_by_route(
-    State(state): State<VehiclesState>,
+    State(state): State<AppState>,
     Json(request): Json<VehiclesByRouteRequest>,
 ) -> Result<Json<VehiclesByRouteResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Get route info
@@ -186,14 +184,7 @@ pub async fn get_vehicles_by_route(
     .bind(request.route_id)
     .fetch_optional(&state.pool)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Database error: {}", e),
-            }),
-        )
-    })?;
+    .map_err(internal_error)?;
 
     let route_info = route_info.ok_or_else(|| {
         (
@@ -224,14 +215,7 @@ pub async fn get_vehicles_by_route(
     .bind(request.route_id)
     .fetch_all(&state.pool)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Database error: {}", e),
-            }),
-        )
-    })?;
+    .map_err(internal_error)?;
 
     // Build a map of stop_ifopt -> (sequence, name, lat, lon)
     let stop_info_map: HashMap<String, (i32, Option<String>, f64, f64)> = route_stops
@@ -254,204 +238,19 @@ pub async fn get_vehicles_by_route(
         }));
     }
 
-    // Determine if we're using simulated time
     let simulated_time = parse_reference_time(&request.reference_time);
 
-    // Get departures either from the store (real-time) or schedule (simulated time)
-    let trip_departures: HashMap<String, Vec<Departure>> = if let Some(ref_time) = simulated_time {
-        // Compute departures from static schedule (loaded from PG) for the simulated time
-        let stop_ids: HashSet<String> = stop_ifopts.iter().map(|s| s.to_string()).collect();
-        match static_data::build_schedule_from_db(&state.pool, &stop_ids).await {
-            Ok(schedule) => {
-                let time_horizon = Duration::minutes(state.time_horizon_minutes as i64);
-                let all_departures = realtime::compute_schedule_departures(
-                    &schedule,
-                    &stop_ids,
-                    ref_time,
-                    time_horizon,
-                    state.timezone,
-                );
+    let trip_departures = super::builder::collect_trip_departures(
+        &state.pool,
+        &state.departure_store,
+        &stop_ifopts,
+        route_info.line_ref.as_deref(),
+        simulated_time,
+        state.time_horizon_minutes,
+        state.timezone,
+    ).await;
 
-                let mut result: HashMap<String, Vec<Departure>> = HashMap::new();
-                for ifopt in &stop_ifopts {
-                    if let Some(departures) = all_departures.get(*ifopt) {
-                        for dep in departures {
-                            let trip_id = match &dep.trip_id {
-                                Some(id) => id,
-                                None => continue,
-                            };
-                            if let Some(ref line_ref) = route_info.line_ref {
-                                if &dep.line_number != line_ref {
-                                    continue;
-                                }
-                            }
-                            result.entry(trip_id.clone()).or_default().push(dep.clone());
-                        }
-                    }
-                }
-                result
-            }
-            Err(_) => HashMap::new(),
-        }
-    } else {
-        // Start with real-time departure store (has estimated times and delays)
-        let store = state.departure_store.read().await;
-        let mut result: HashMap<String, Vec<Departure>> = HashMap::new();
-
-        for ifopt in &stop_ifopts {
-            if let Some(departures) = store.get(*ifopt) {
-                for dep in departures {
-                    let trip_id = match &dep.trip_id {
-                        Some(id) => id,
-                        None => continue,
-                    };
-                    if let Some(ref line_ref) = route_info.line_ref {
-                        if &dep.line_number != line_ref {
-                            continue;
-                        }
-                    }
-                    result.entry(trip_id.clone()).or_default().push(dep.clone());
-                }
-            }
-        }
-        drop(store);
-
-        // Only supplement with schedule data when the RT store has NO data for
-        // this route's stops.  When the RT feed is active (even if all trips are
-        // cancelled during a strike), it is the authority — trips absent from the
-        // feed should not appear as vehicles on the map.
-        if result.is_empty() {
-            let stop_ids: HashSet<String> = stop_ifopts.iter().map(|s| s.to_string()).collect();
-            if let Ok(schedule) = static_data::build_schedule_from_db(&state.pool, &stop_ids).await {
-                let ref_time = Utc::now();
-                let time_horizon = Duration::minutes(state.time_horizon_minutes as i64);
-                let all_departures = realtime::compute_schedule_departures(
-                    &schedule,
-                    &stop_ids,
-                    ref_time,
-                    time_horizon,
-                    state.timezone,
-                );
-
-                for ifopt in &stop_ifopts {
-                    if let Some(departures) = all_departures.get(*ifopt) {
-                        for dep in departures {
-                            let trip_id = match &dep.trip_id {
-                                Some(id) => id,
-                                None => continue,
-                            };
-                            if let Some(ref line_ref) = route_info.line_ref {
-                                if &dep.line_number != line_ref {
-                                    continue;
-                                }
-                            }
-                            result.entry(trip_id.clone()).or_default().push(dep.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        result
-    };
-
-    // Build vehicles from grouped departures
-    let mut vehicles: Vec<Vehicle> = trip_departures
-        .into_iter()
-        .filter_map(|(trip_id, departures)| {
-            if departures.is_empty() {
-                return None;
-            }
-
-            // Skip cancelled trips — they should appear in departure monitors
-            // (with strikethrough) but not as active vehicles on the map.
-            if departures.iter().any(|d| d.cancelled) {
-                return None;
-            }
-
-            // Get line number from first departure
-            let line_number = departures.first()?.line_number.clone();
-
-            // Find destination (from departures) and origin (from arrivals)
-            let destination = departures
-                .iter()
-                .find(|d| d.event_type == EventType::Departure)
-                .map(|d| d.destination.clone())
-                .or_else(|| departures.first().map(|d| d.destination.clone()))?;
-
-            let origin = departures
-                .iter()
-                .find(|d| d.event_type == EventType::Arrival)
-                .map(|d| d.destination.clone()); // For arrivals, destination field contains origin
-
-            // Group by stop to combine arrivals and departures
-            let mut stop_events: HashMap<String, (Option<Departure>, Option<Departure>)> =
-                HashMap::new();
-
-            for dep in departures {
-                let entry = stop_events.entry(dep.stop_ifopt.clone()).or_default();
-                match dep.event_type {
-                    EventType::Arrival => entry.0 = Some(dep),
-                    EventType::Departure => entry.1 = Some(dep),
-                }
-            }
-
-            // Build vehicle stops
-            let mut stops: Vec<VehicleStop> = stop_events
-                .into_iter()
-                .filter_map(|(stop_ifopt, (arrival, departure))| {
-                    let (sequence, stop_name, lat, lon) = stop_info_map.get(&stop_ifopt)?;
-
-                    // Get delay from whichever event is available
-                    let delay_minutes = departure
-                        .as_ref()
-                        .and_then(|d| d.delay_minutes)
-                        .or_else(|| arrival.as_ref().and_then(|a| a.delay_minutes));
-
-                    Some(VehicleStop {
-                        stop_ifopt,
-                        stop_name: stop_name.clone(),
-                        sequence: *sequence,
-                        lat: *lat,
-                        lon: *lon,
-                        arrival_time: arrival.as_ref().map(|a| a.planned_time.clone()),
-                        arrival_time_estimated: arrival.as_ref().and_then(|a| a.estimated_time.clone()),
-                        departure_time: departure.as_ref().map(|d| d.planned_time.clone()),
-                        departure_time_estimated: departure.as_ref().and_then(|d| d.estimated_time.clone()),
-                        delay_minutes,
-                    })
-                })
-                .collect();
-
-            // Sort stops by sequence
-            stops.sort_by_key(|s| s.sequence);
-
-            // Need at least 2 stops to show a moving vehicle
-            if stops.len() < 2 {
-                return None;
-            }
-
-            Some(Vehicle {
-                trip_id,
-                line_number,
-                destination,
-                origin,
-                stops,
-                next_trip_id: None,
-            })
-        })
-        .collect();
-
-    // Link consecutive trips on the same line that represent the same physical
-    // vehicle looping back (e.g., tram at end of line starting the return trip).
-    link_consecutive_trips(&mut vehicles);
-
-    // Sort vehicles by their first stop's departure time
-    vehicles.sort_by(|a, b| {
-        let time_a = a.stops.first().and_then(|s| s.departure_time.as_ref());
-        let time_b = b.stops.first().and_then(|s| s.departure_time.as_ref());
-        time_a.cmp(&time_b)
-    });
+    let vehicles = super::builder::build_vehicles_from_departures(trip_departures, &stop_info_map);
 
     Ok(Json(VehiclesByRouteResponse {
         route_id: request.route_id,
@@ -459,8 +258,6 @@ pub async fn get_vehicles_by_route(
         vehicles,
     }))
 }
-
-use crate::api::utils::parse_reference_time;
 
 #[cfg(test)]
 mod tests {

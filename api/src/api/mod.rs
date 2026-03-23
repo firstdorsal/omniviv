@@ -7,16 +7,18 @@ pub mod health;
 pub mod issues;
 pub mod mapping;
 pub mod routes;
+pub mod state;
 pub mod stations;
 pub mod vehicles;
 pub mod ws;
 
 pub use error::{ErrorResponse, internal_error};
+pub use state::AppState;
 
 use axum::{routing::get, Router};
 use sqlx::PgPool;
 
-use crate::sync::{DepartureStore, OsmIssueStore, VehicleUpdateSender};
+use crate::sync::{OsmIssueStore, VehicleUpdateSender, DepartureStore};
 
 pub fn router(
     pool: PgPool,
@@ -25,10 +27,11 @@ pub fn router(
     timezone: chrono_tz::Tz,
     issue_store: OsmIssueStore,
     vehicle_updates_tx: VehicleUpdateSender,
+    admin_api_key: Option<String>,
 ) -> Router {
-    let ws_state = ws::WsState {
+    let app_state = AppState {
         pool: pool.clone(),
-        departure_store: departure_store.clone(),
+        departure_store,
         time_horizon_minutes,
         timezone,
         vehicle_updates_tx,
@@ -38,11 +41,11 @@ pub fn router(
         .nest("/areas", areas::router(pool.clone()))
         .nest("/routes", routes::router(pool.clone()))
         .nest("/stations", stations::router(pool.clone()))
-        .nest("/departures", departures::router(pool.clone(), departure_store.clone(), time_horizon_minutes, timezone))
-        .nest("/vehicles", vehicles::router(pool.clone(), departure_store, time_horizon_minutes, timezone))
+        .nest("/departures", departures::router(app_state.clone()))
+        .nest("/vehicles", vehicles::router(app_state.clone()))
         .nest("/issues", issues::router(issue_store))
         .nest("/health", health::router(pool.clone()))
         .nest("/gtfs-stops", gtfs_stops::router(pool.clone()))
-        .nest("/mapping", mapping::router(pool.clone()))
-        .route("/ws/vehicles", get(ws::ws_vehicles).with_state(ws_state))
+        .nest("/mapping", mapping::router(pool.clone(), admin_api_key))
+        .route("/ws/vehicles", get(ws::ws_vehicles).with_state(app_state))
 }
