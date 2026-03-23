@@ -47,7 +47,7 @@ Key features:
 - **Framework**: Axum 0.8 (Rust async web framework)
 - **Runtime**: Tokio
 - **Database**: PostgreSQL via SQLx
-- **Documentation**: OpenAPI via utoipa with Swagger UI at `/swagger-ui`
+- **Documentation**: OpenAPI via utoipa with Swagger UI at `/swagger-ui/` (requires `dev-tools` feature)
 
 #### Modules
 
@@ -62,7 +62,13 @@ api/src/
 │   ├── routes/         # Transit route geometries
 │   ├── stations/       # Station and platform info
 │   ├── vehicles/       # Vehicle tracking
-│   └── ws.rs           # WebSocket handlers
+│   │   ├── builder.rs  # Vehicle state construction from departures
+│   │   └── list.rs     # Vehicle list endpoint
+│   ├── ws.rs           # WebSocket handlers
+│   ├── schedule_cache.rs # TTL-based schedule cache
+│   ├── state.rs        # Shared application state (AppState)
+│   ├── utils.rs        # API utility functions
+│   └── error.rs        # API error types
 ├── providers/          # External data sources
 │   ├── osm.rs          # OpenStreetMap data fetching
 │   └── timetables/     # Timetable API integrations
@@ -162,13 +168,21 @@ PostgreSQL stores:
 - **gtfs_feed_meta**: Singleton row tracking GTFS load state and counts
 
 Departures for real-time display are held in-memory (DepartureStore), while the full GTFS
-static schedule is stored in PostgreSQL and queried on demand for time simulation.
+static schedule is stored in PostgreSQL and cached in-memory per stop with a 5-minute TTL
+(ScheduleCache) to avoid per-request DB rebuilds during time simulation.
 
 ## WebSocket Limits
 
 - Maximum 100 route subscriptions per connection
 
 ## Configuration
+
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `ADMIN_API_KEY` | No | API key for `/api/mapping/*` write endpoints. Minimum 16 characters recommended. Supports `ADMIN_API_KEY_FILE` convention for reading from a file. |
 
 ### API (`config.yaml`)
 ```yaml
@@ -187,7 +201,8 @@ gtfs_sync:
     static_feed_url: "https://download.gtfs.de/germany/free/latest.zip"
     realtime_feed_url: "https://realtime.gtfs.de/realtime-free.pb"
     cache_dir: "./data/gtfs"
-    static_refresh_hours: 6          # Shorter intervals for timely pickup of service changes
+    timezone: "Europe/Berlin"        # IANA timezone for GTFS schedule times (default: Europe/Berlin)
+    static_refresh_hours: 24         # Re-download interval (default: 24)
     realtime_interval_secs: 15
     time_horizon_minutes: 120
 ```
@@ -220,12 +235,12 @@ The 1 GB memory limit (as configured in docker-compose) accommodates:
 | Resource | Minimum | Notes |
 |----------|---------|-------|
 | Memory | 256 MB | Static file serving only |
-| CPU | 0.5 core | feoco serving static assets |
+| CPU | 0.5 core | [feoco](https://github.com/pektin-dns/feoco) serving static assets |
 
 ## Development Setup
 
 ### Prerequisites
 
-- **Rust** (1.83+): Install via [rustup](https://rustup.rs/)
+- **Rust** (latest stable): Install via [rustup](https://rustup.rs/)
 - **Node.js** (23+): For frontend development
 - **pnpm** (9.x): Package manager for frontend

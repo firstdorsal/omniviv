@@ -47,15 +47,13 @@ The API runs on `http://localhost:3000`.
 
 **Endpoints:**
 - API root: http://localhost:3000
-- Swagger UI: http://localhost:3000/swagger-ui
-
 **With dev tools:**
 ```bash
 cargo run --features dev-tools
 ```
 
 Enables:
-- SQL Viewer: http://localhost:3000/sql-viewer
+- Swagger UI: http://localhost:3000/swagger-ui/
 - Tracing Console: http://localhost:3000/tracing
 
 ### Frontend
@@ -214,7 +212,7 @@ gtfs_sync:
     static_feed_url: "https://download.gtfs.de/germany/free/latest.zip"
     realtime_feed_url: "https://realtime.gtfs.de/realtime-free.pb"
     cache_dir: "./data/gtfs"        # Where the ZIP is cached
-    static_refresh_hours: 6          # Re-download interval (shorter for timely pickup of service changes)
+    static_refresh_hours: 24         # Re-download interval (default: 24)
     realtime_interval_secs: 15       # RT poll interval
     time_horizon_minutes: 120        # Show departures up to 2h in future
 ```
