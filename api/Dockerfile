@@ -3,7 +3,7 @@ ARG SERVICE_NAME="omniviv-api"
 ARG SERVICE_VERSION="0.2.0"
 ARG BINARY_NAME="omniviv-api"
 
-FROM clux/muslrust:nightly AS chef-builder
+FROM clux/muslrust:nightly-2026-03-22 AS chef-builder
 RUN cargo install cargo-chef
 
 FROM chef-builder AS planner
