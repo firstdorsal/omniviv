@@ -267,3 +267,122 @@ pub fn build_vehicles_from_departures(
 
     vehicles
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::EventType;
+
+    fn parse_dt(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    fn make_dep(stop: &str, trip: &str, line: &str, event: EventType, time: &str) -> Departure {
+        Departure {
+            stop_ifopt: stop.to_string(),
+            event_type: event,
+            line_number: line.to_string(),
+            destination: "Hauptbahnhof".to_string(),
+            destination_id: None,
+            planned_time: parse_dt(time),
+            estimated_time: None,
+            delay_minutes: None,
+            platform: None,
+            trip_id: Some(trip.to_string()),
+            cancelled: false,
+        }
+    }
+
+    fn make_stop_info_map(stops: &[(&str, i32)]) -> HashMap<String, StopInfo> {
+        stops
+            .iter()
+            .map(|(ifopt, seq)| {
+                (ifopt.to_string(), StopInfo {
+                    sequence: *seq,
+                    name: None,
+                    lat: 48.37,
+                    lon: 10.89,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn builds_vehicle_from_departure_pair() {
+        let mut trips: HashMap<String, Vec<Departure>> = HashMap::new();
+        trips.entry("trip1".to_string()).or_default().extend([
+            make_dep("de:09761:10:1:A", "trip1", "1", EventType::Departure, "2026-03-20T08:00:00Z"),
+            make_dep("de:09761:20:1:B", "trip1", "1", EventType::Arrival, "2026-03-20T08:15:00Z"),
+        ]);
+
+        let stop_info = make_stop_info_map(&[("de:09761:10:1:A", 1), ("de:09761:20:1:B", 2)]);
+        let vehicles = build_vehicles_from_departures(trips, &stop_info);
+
+        assert_eq!(vehicles.len(), 1);
+        assert_eq!(vehicles[0].trip_id, "trip1");
+        assert_eq!(vehicles[0].line_number, "1");
+        assert_eq!(vehicles[0].stops.len(), 2);
+        assert_eq!(vehicles[0].stops[0].sequence, 1);
+        assert_eq!(vehicles[0].stops[1].sequence, 2);
+    }
+
+    #[test]
+    fn skips_fully_cancelled_trip() {
+        let mut trips: HashMap<String, Vec<Departure>> = HashMap::new();
+        let mut dep = make_dep("de:09761:10:1:A", "trip1", "1", EventType::Departure, "2026-03-20T08:00:00Z");
+        dep.cancelled = true;
+        let mut arr = make_dep("de:09761:20:1:B", "trip1", "1", EventType::Arrival, "2026-03-20T08:15:00Z");
+        arr.cancelled = true;
+        trips.entry("trip1".to_string()).or_default().extend([dep, arr]);
+
+        let stop_info = make_stop_info_map(&[("de:09761:10:1:A", 1), ("de:09761:20:1:B", 2)]);
+        let vehicles = build_vehicles_from_departures(trips, &stop_info);
+
+        assert!(vehicles.is_empty(), "Fully cancelled trips should not produce vehicles");
+    }
+
+    #[test]
+    fn skips_trip_with_fewer_than_2_stops() {
+        let mut trips: HashMap<String, Vec<Departure>> = HashMap::new();
+        trips.entry("trip1".to_string()).or_default().push(
+            make_dep("de:09761:10:1:A", "trip1", "1", EventType::Departure, "2026-03-20T08:00:00Z"),
+        );
+
+        let stop_info = make_stop_info_map(&[("de:09761:10:1:A", 1)]);
+        let vehicles = build_vehicles_from_departures(trips, &stop_info);
+
+        assert!(vehicles.is_empty(), "Trips with <2 stops should be skipped");
+    }
+
+    #[test]
+    fn preserves_delay_minutes() {
+        let mut trips: HashMap<String, Vec<Departure>> = HashMap::new();
+        let mut dep = make_dep("de:09761:10:1:A", "trip1", "1", EventType::Departure, "2026-03-20T08:00:00Z");
+        dep.delay_minutes = Some(3);
+        trips.entry("trip1".to_string()).or_default().extend([
+            dep,
+            make_dep("de:09761:20:1:B", "trip1", "1", EventType::Arrival, "2026-03-20T08:15:00Z"),
+        ]);
+
+        let stop_info = make_stop_info_map(&[("de:09761:10:1:A", 1), ("de:09761:20:1:B", 2)]);
+        let vehicles = build_vehicles_from_departures(trips, &stop_info);
+
+        assert_eq!(vehicles[0].stops[0].delay_minutes, Some(3));
+    }
+
+    #[test]
+    fn ignores_stops_not_in_stop_info_map() {
+        let mut trips: HashMap<String, Vec<Departure>> = HashMap::new();
+        trips.entry("trip1".to_string()).or_default().extend([
+            make_dep("de:09761:10:1:A", "trip1", "1", EventType::Departure, "2026-03-20T08:00:00Z"),
+            make_dep("de:09761:20:1:B", "trip1", "1", EventType::Arrival, "2026-03-20T08:15:00Z"),
+            make_dep("de:09761:30:1:C", "trip1", "1", EventType::Departure, "2026-03-20T08:20:00Z"),
+        ]);
+
+        // Only include A and B in stop_info — C should be dropped
+        let stop_info = make_stop_info_map(&[("de:09761:10:1:A", 1), ("de:09761:20:1:B", 2)]);
+        let vehicles = build_vehicles_from_departures(trips, &stop_info);
+
+        assert_eq!(vehicles[0].stops.len(), 2);
+    }
+}

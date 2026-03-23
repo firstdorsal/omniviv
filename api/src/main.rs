@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::{Router, routing::get};
+use axum::{Router, extract::DefaultBodyLimit, routing::get};
 use sqlx::PgPool;
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -156,12 +156,15 @@ async fn main() {
         .expect("DATABASE_URL environment variable must be set (or DATABASE_URL_FILE for file-based secret)");
 
     // Read optional ADMIN_API_KEY for mapping write endpoints (supports _FILE convention)
-    let admin_api_key = read_env_or_file("ADMIN_API_KEY").ok();
-    if let Some(ref key) = admin_api_key {
+    let admin_api_key = read_env_or_file("ADMIN_API_KEY").ok().and_then(|key| {
         if key.len() < 16 {
-            tracing::warn!("ADMIN_API_KEY is shorter than 16 characters — consider using a stronger key");
+            tracing::error!("ADMIN_API_KEY is shorter than 16 characters — rejected for security. Mapping write endpoints will be disabled.");
+            None
+        } else {
+            Some(key)
         }
-    } else {
+    });
+    if admin_api_key.is_none() {
         tracing::warn!("ADMIN_API_KEY not set — mapping write endpoints will be disabled");
     }
 
@@ -203,6 +206,7 @@ async fn main() {
     let mut app = Router::new()
         .route("/", get(root))
         .nest("/api", api::router(pool.clone(), departure_store, time_horizon_minutes, timezone, issue_store, vehicle_updates_tx, admin_api_key))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB explicit limit
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer);
