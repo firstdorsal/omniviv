@@ -61,24 +61,24 @@ export function VehiclePopup({
             <div className="flex items-center gap-3">
                 <LineBadge line={lineNumber} color={routeColor} variant="circle" />
                 <div>
-                    <div className="font-semibold text-gray-900">{destination}</div>
-                    <div className="text-sm text-gray-500">Linie {lineNumber}</div>
+                    <div className="font-semibold text-foreground">{destination}</div>
+                    <div className="text-sm text-muted-foreground">Linie {lineNumber}</div>
                 </div>
             </div>
 
             {/* Status and delay */}
             <div className="mt-3 border-t pt-2 space-y-1 text-sm">
                 <div className="flex justify-between gap-4">
-                    <span className="text-gray-600">Status:</span>
-                    <span className="text-gray-900 text-right">{getStatusText()}</span>
+                    <span className="text-muted-foreground">Status:</span>
+                    <span className="text-foreground text-right">{getStatusText()}</span>
                 </div>
                 <div className="flex justify-between gap-4">
-                    <span className="text-gray-600">Verspätung:</span>
+                    <span className="text-muted-foreground">Verspätung:</span>
                     {getDelayDisplay()}
                 </div>
                 <div className="flex justify-between gap-4">
-                    <span className="text-gray-600">Fahrt-ID:</span>
-                    <span className="text-gray-500 font-mono text-xs">{tripId}</span>
+                    <span className="text-muted-foreground">Fahrt-ID:</span>
+                    <span className="text-muted-foreground font-mono text-xs">{tripId}</span>
                 </div>
             </div>
         </div>

@@ -1,5 +1,5 @@
 import type { ComponentType, SVGProps } from "react";
-import { BusIcon, DBIcon, SBahnIcon, TramIcon, TrainIcon, UBahnIcon } from "./TransitIcons";
+import { BusIcon, TramIcon, TrainIcon, UBahnIcon } from "./TransitIcons";
 
 /** Transit mode values from the MOTIS API and our own TransportType enum. */
 export type TransitMode = "TRAM" | "tram" | "BUS" | "bus" | "RAIL" | "TRAIN" | "train" | "SUBWAY" | "subway" | "FERRY" | "ferry" | string;

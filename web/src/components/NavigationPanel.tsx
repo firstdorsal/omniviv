@@ -396,7 +396,7 @@ export function NavigationPanel({
                                     <Duration seconds={it.duration} className="text-foreground" />
                                 </div>
                                 <div className="flex items-center gap-1.5">
-                                    <div className="relative min-w-0 flex-1 overflow-hidden" style={{ maxHeight: "2rem" }}>
+                                    <div className="relative min-w-0 flex-1 overflow-hidden max-h-8">
                                         <div className="flex items-center gap-1.5 flex-nowrap">
                                             {it.legs.map((leg, j) => {
                                                 if (leg.mode === "WALK") {

@@ -1,6 +1,6 @@
 ARG PROFILE="release"
 ARG SERVICE_NAME="omniviv-api"
-ARG SERVICE_VERSION="0.1.0"
+ARG SERVICE_VERSION="0.2.0"
 ARG BINARY_NAME="omniviv-api"
 
 FROM clux/muslrust:nightly AS chef-builder
