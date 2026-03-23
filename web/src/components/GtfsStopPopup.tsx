@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type Departure } from "../api";
 import { getApiClient } from "../apiClient";
 import { DepartureTable } from "./DepartureTable";
@@ -21,14 +21,14 @@ export function GtfsStopPopup({ stopId, stopName, ifopt, isAssigned, routeColors
     const [loading, setLoading] = useState(true);
     const abortRef = useRef<AbortController | null>(null);
 
-    useEffect(() => {
+    const fetchDepartures = useCallback(() => {
         abortRef.current?.abort();
         const controller = new AbortController();
         abortRef.current = controller;
 
         const refTime = referenceTime ? referenceTime.toISOString() : undefined;
 
-        const fetchDepartures = ifopt
+        const promise = ifopt
             ? getApiClient().api.getDeparturesByStop({
                   stop_ifopt: ifopt,
                   reference_time: refTime,
@@ -38,7 +38,7 @@ export function GtfsStopPopup({ stopId, stopName, ifopt, isAssigned, routeColors
                   reference_time: refTime,
               }).then((res) => res.data?.departures ?? []);
 
-        fetchDepartures
+        return promise
             .then((departures) => {
                 if (!controller.signal.aborted) setEvents(departures);
             })
@@ -47,13 +47,21 @@ export function GtfsStopPopup({ stopId, stopName, ifopt, isAssigned, routeColors
                     console.error("Failed to fetch departures:", err);
                     setEvents([]);
                 }
-            })
-            .finally(() => {
-                if (!controller.signal.aborted) setLoading(false);
             });
-
-        return () => controller.abort();
     }, [stopId, ifopt, referenceTime]);
+
+    // Initial fetch + refetch on dependency change
+    useEffect(() => {
+        setLoading(true);
+        fetchDepartures()?.finally(() => setLoading(false));
+        return () => abortRef.current?.abort();
+    }, [fetchDepartures]);
+
+    // Auto-refresh every 30 seconds
+    useEffect(() => {
+        const interval = setInterval(fetchDepartures, 30000);
+        return () => clearInterval(interval);
+    }, [fetchDepartures]);
 
     return (
         <div className="p-4 bg-popover text-popover-foreground rounded-lg">

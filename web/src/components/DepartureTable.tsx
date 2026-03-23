@@ -76,13 +76,15 @@ function formatRelativeTime(isoTime: string, referenceTime?: Date): string {
     const now = referenceTime ?? new Date();
     const target = new Date(isoTime);
     const diffMs = target.getTime() - now.getTime();
-    const diffMin = Math.round(diffMs / 60000);
+    const diffSec = Math.round(diffMs / 1000);
 
-    if (diffMin <= 0) return "jetzt";
+    if (diffSec <= 0) return "jetzt";
+    if (diffSec < 60) return `${diffSec} s`;
+    const diffMin = Math.round(diffMs / 60000);
     if (diffMin > 59) {
         return target.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     }
-    return `${diffMin} Min`;
+    return `${diffMin} min`;
 }
 
 function RelativeTime({ time, isLive, delayMinutes, referenceTime }: {
@@ -130,14 +132,16 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
     const [visibleColumns, setVisibleColumns] = useState<TimeColumn[]>(["relative"]);
     const [hiddenLines, setHiddenLines] = useState<Set<string>>(new Set());
 
-    // Force periodic re-renders so relative times stay current in real-time mode.
-    // In simulated-time mode, re-renders are driven externally via referenceTime changes.
-    const [, setTick] = useState(0);
+    // Force periodic re-renders so relative times stay current in real-time
+    // mode. Ticks every second so the seconds countdown is smooth.
+    // In simulated-time mode the parent drives updates via referenceTime prop.
+    const [now, setNow] = useState(() => new Date());
     useEffect(() => {
         if (referenceTime) return;
-        const interval = setInterval(() => setTick(t => t + 1), 15000);
+        const interval = setInterval(() => setNow(new Date()), 1000);
         return () => clearInterval(interval);
     }, [referenceTime]);
+    const effectiveNow = referenceTime ?? now;
 
     const allTripEvents = useMemo(() => buildTripEvents(events), [events]);
 
@@ -155,9 +159,18 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
     }, [allTripEvents]);
 
     const filteredTrips = useMemo(() => {
-        if (hiddenLines.size === 0) return allTripEvents;
-        return allTripEvents.filter((trip) => !hiddenLines.has(trip.lineNumber));
-    }, [allTripEvents, hiddenLines]);
+        const nowMs = effectiveNow.getTime();
+        return allTripEvents.filter((trip) => {
+            if (hiddenLines.size > 0 && hiddenLines.has(trip.lineNumber)) return false;
+            // Hide departures that are in the past
+            const timeStr = trip.departureTime ?? trip.arrivalTime;
+            if (timeStr) {
+                const tripMs = new Date(timeStr).getTime();
+                if (tripMs < nowMs) return false;
+            }
+            return true;
+        });
+    }, [allTripEvents, hiddenLines, effectiveNow]);
 
     const toggleLine = (line: string) => {
         setHiddenLines((prev) => {
@@ -205,7 +218,7 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
 
             {/* Time column toggles — multi-select */}
             <div className="flex gap-1">
-                {([["departure", "Abfahrt"], ["arrival", "Ankunft"], ["relative", "Abfahrt in"]] as const).map(([col, label]) => {
+                {([["departure", "Abfahrt"], ["arrival", "Ankunft"], ["relative", "Abfahrt in/um"]] as const).map(([col, label]) => {
                     const active = visibleColumns.includes(col);
                     return (
                         <button
@@ -236,7 +249,7 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
                         <th className="text-left font-medium pr-3">Ziel</th>
                         {showArr && <th className="text-left font-medium pr-2">Ankunft</th>}
                         {showDep && <th className="text-left font-medium pr-2">Abfahrt</th>}
-                        {showRel && <th className="text-left font-medium pr-2">Abfahrt in</th>}
+                        {showRel && <th className="text-left font-medium pr-2">Abfahrt in/um</th>}
                     </tr>
                 </thead>
                 <tbody>
@@ -268,7 +281,7 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
                                 {showRel && (
                                     <td className="pr-2">
                                         {relTimeStr
-                                            ? <RelativeTime time={relTimeStr} isLive={relIsLive} delayMinutes={trip.delayMinutes} referenceTime={referenceTime} />
+                                            ? <RelativeTime time={relTimeStr} isLive={relIsLive} delayMinutes={trip.delayMinutes} referenceTime={effectiveNow} />
                                             : <span className="text-muted-foreground">—</span>}
                                     </td>
                                 )}

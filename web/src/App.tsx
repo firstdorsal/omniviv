@@ -885,6 +885,7 @@ export default function App() {
                     showVehicles={showVehicles}
                     debugOptions={debugOptions}
                     simulatedTime={timeSimulation.currentTime}
+                    isRealTime={timeSimulation.isRealTime}
                     timeSpeed={timeSimulation.speed}
                     onSetNavigationStart={handleSetNavigationStart}
                     onSetNavigationEnd={handleSetNavigationEnd}

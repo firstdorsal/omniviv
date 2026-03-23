@@ -22,8 +22,8 @@ export function LiveTime({ time, isLive, delayMinutes }: LiveTimeProps) {
 
     if (!isLive) {
         return (
-            <span className="text-muted-foreground tabular-nums">
-                {main}<span className="opacity-40">{seconds}</span>
+            <span className="text-muted-foreground tabular-nums whitespace-nowrap">
+                {main}{seconds && <span className="opacity-40 tracking-normal">{seconds}</span>}
             </span>
         );
     }
@@ -43,12 +43,12 @@ export function LiveTime({ time, isLive, delayMinutes }: LiveTimeProps) {
     }
 
     return (
-        <span className={`${colorClass} tabular-nums inline-flex items-center gap-1`}>
+        <span className={`${colorClass} tabular-nums inline-flex items-center gap-1 whitespace-nowrap`}>
             <span className="relative flex h-1.5 w-1.5 shrink-0">
                 <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-50 ${dotClass}`} />
                 <span className={`relative inline-flex h-1.5 w-1.5 rounded-full ${dotClass}`} />
             </span>
-            {main}<span className="opacity-40">{seconds}</span>
+            <span>{main}{seconds && <span className="opacity-40 tracking-normal">{seconds}</span>}</span>
         </span>
     );
 }

@@ -1,5 +1,5 @@
 import { Pin, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type Departure, type StationPlatform, type StationStopPosition } from "../api";
 import { getApiClient } from "../apiClient";
 import { DepartureTable } from "./DepartureTable";
@@ -24,17 +24,13 @@ export function PlatformPopup({ platform, stationName, routeColors, routeTypes, 
     const displayName = getPlatformDisplayName(platform);
     const abortRef = useRef<AbortController | null>(null);
 
-    useEffect(() => {
-        if (!platform.ref_ifopt) {
-            setLoading(false);
-            return;
-        }
-
+    const fetchDepartures = useCallback(() => {
+        if (!platform.ref_ifopt) return;
         abortRef.current?.abort();
         const controller = new AbortController();
         abortRef.current = controller;
 
-        getApiClient().api
+        return getApiClient().api
             .getDeparturesByStop({
                 stop_ifopt: platform.ref_ifopt,
                 reference_time: referenceTime ? referenceTime.toISOString() : undefined,
@@ -47,13 +43,25 @@ export function PlatformPopup({ platform, stationName, routeColors, routeTypes, 
                     console.error("Failed to fetch departures:", err);
                     setEvents([]);
                 }
-            })
-            .finally(() => {
-                if (!controller.signal.aborted) setLoading(false);
             });
-
-        return () => controller.abort();
     }, [platform.ref_ifopt, referenceTime]);
+
+    // Initial fetch + refetch on dependency change
+    useEffect(() => {
+        if (!platform.ref_ifopt) {
+            setLoading(false);
+            return;
+        }
+        setLoading(true);
+        fetchDepartures()?.finally(() => setLoading(false));
+        return () => abortRef.current?.abort();
+    }, [fetchDepartures, platform.ref_ifopt]);
+
+    // Auto-refresh every 30 seconds
+    useEffect(() => {
+        const interval = setInterval(fetchDepartures, 30000);
+        return () => clearInterval(interval);
+    }, [fetchDepartures]);
 
     return (
         <div className="p-4 bg-popover text-popover-foreground rounded-lg">

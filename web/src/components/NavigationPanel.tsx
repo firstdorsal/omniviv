@@ -1,5 +1,6 @@
-import { useCallback, useRef, useState } from "react";
-import { Footprints, GripVertical, Plus, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { GripVertical, Plus, Trash2 } from "lucide-react";
+import { TbWalk } from "react-icons/tb";
 import { Button } from "./ui/button";
 import { DateTimePicker } from "./ui/date-time-picker";
 import type { Area, Station } from "../api";
@@ -214,6 +215,33 @@ export function NavigationPanel({
         }
     }, [startLocation, endLocation, intermediateStops, departureDateTime, arriveBy]);
 
+    // Auto-search when the component mounts with valid locations (e.g. tab switch,
+    // page reload with URL params) or when locations/parameters change.
+    const prevSearchKey = useRef<string | null>(null);
+    const hasMounted = useRef(false);
+    useEffect(() => {
+        if (!startLocation || !endLocation) return;
+        // Build a stable key from all search-relevant inputs to avoid duplicate requests
+        const viaKey = intermediateStops
+            .filter((s): s is ResolvedLocation => s !== null)
+            .map(s => `${s.lat},${s.lon}`)
+            .join(";");
+        const key = `${startLocation.lat},${startLocation.lon}|${endLocation.lat},${endLocation.lon}|${viaKey}|${departureDateTime?.toISOString() ?? ""}|${arriveBy}`;
+        if (key === prevSearchKey.current) return;
+        prevSearchKey.current = key;
+
+        // Fire immediately on first mount (reload / tab switch), debounce subsequent changes
+        if (!hasMounted.current) {
+            hasMounted.current = true;
+            handleSearch();
+            return;
+        }
+        const timer = setTimeout(() => {
+            handleSearch();
+        }, 300);
+        return () => clearTimeout(timer);
+    }, [startLocation, endLocation, intermediateStops, departureDateTime, arriveBy, handleSearch]);
+
     return (
         <div className="p-4">
             <h2 className="font-semibold mb-4">Routenplanung</h2>
@@ -398,7 +426,7 @@ export function NavigationPanel({
                                                     const walkMin = Math.round(leg.duration / 60);
                                                     return (
                                                         <span key={j} className="inline-flex items-start text-muted-foreground shrink-0">
-                                                            <Footprints className="h-5 w-5" />
+                                                            <TbWalk className="h-5 w-5" />
                                                             <span className="text-[10px] -ml-1 -mt-0.5">{walkMin}</span>
                                                         </span>
                                                     );

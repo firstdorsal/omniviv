@@ -870,14 +870,16 @@ fn compute_estimated_time_for_event(
             );
         }
     }
-    // Fall back to propagated delay
-    let est = planned_dt + Duration::seconds(propagated_delay as i64);
-    let delay_min = if propagated_delay != 0 {
-        Some((propagated_delay as f64 / 60.0).round() as i32)
+    // Fall back to propagated delay — only produce an estimated time if there
+    // is an actual non-zero delay to propagate; otherwise the departure is
+    // schedule-only and should not appear as "live" in the frontend.
+    if propagated_delay != 0 {
+        let est = planned_dt + Duration::seconds(propagated_delay as i64);
+        let delay_min = Some((propagated_delay as f64 / 60.0).round() as i32);
+        (Some(est), delay_min)
     } else {
-        None
-    };
-    (Some(est), delay_min)
+        (None, None)
+    }
 }
 
 /// Parse GTFS-RT service date string "YYYYMMDD" to NaiveDate.
@@ -1192,7 +1194,8 @@ mod tests {
     fn test_compute_estimated_time_no_event_no_delay() {
         let planned = DateTime::from_timestamp(1000000, 0).unwrap();
         let (est, delay) = compute_estimated_time_for_event(None, planned, 0);
-        assert_eq!(est, Some(planned));
+        // No realtime data and no propagated delay → schedule-only, no estimated time
+        assert_eq!(est, None);
         assert_eq!(delay, None);
     }
 

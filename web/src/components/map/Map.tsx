@@ -73,6 +73,7 @@ interface MapProps {
     showVehicles: boolean;
     debugOptions: DebugOptions;
     simulatedTime: Date;
+    isRealTime: boolean;
     timeSpeed: number;
     onSetNavigationStart?: (lat: number, lon: number) => void;
     onSetNavigationEnd?: (lat: number, lon: number) => void;
@@ -578,7 +579,7 @@ export default class Map extends React.Component<MapProps, MapState> {
             if (station) {
                 const handlePlatformClick = (platform: StationPlatform | StationStopPosition) => {
                     const platformCoords: [number, number] = [platform.lon, platform.lat];
-                    this.showPopup(platformCoords, <PlatformPopup platform={platform} stationName={station.name ?? undefined} routeColors={this.routeColors} routeTypes={this.routeTypes} referenceTime={this.props.simulatedTime} onPin={this.handlePinStop} onClose={() => this.popup?.remove()} />);
+                    this.showPopup(platformCoords, <PlatformPopup platform={platform} stationName={station.name ?? undefined} routeColors={this.routeColors} routeTypes={this.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} onPin={this.handlePinStop} onClose={() => this.popup?.remove()} />);
                 };
                 this.showPopup(coordinates, <StationPopup station={station} onPlatformClick={handlePlatformClick} onClose={() => this.popup?.remove()} />);
             }
@@ -594,12 +595,12 @@ export default class Map extends React.Component<MapProps, MapState> {
             for (const station of this.props.stations) {
                 const platform = station.platforms.find((p) => p.osm_id === osmId);
                 if (platform) {
-                    this.showPopup(coordinates, <PlatformPopup platform={platform} stationName={stationName} routeColors={this.routeColors} routeTypes={this.routeTypes} referenceTime={this.props.simulatedTime} onPin={this.handlePinStop} onClose={() => this.popup?.remove()} />);
+                    this.showPopup(coordinates, <PlatformPopup platform={platform} stationName={stationName} routeColors={this.routeColors} routeTypes={this.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} onPin={this.handlePinStop} onClose={() => this.popup?.remove()} />);
                     return;
                 }
                 const stopPosition = station.stop_positions.find((s) => s.osm_id === osmId);
                 if (stopPosition) {
-                    this.showPopup(coordinates, <PlatformPopup platform={stopPosition} stationName={stationName} routeColors={this.routeColors} routeTypes={this.routeTypes} referenceTime={this.props.simulatedTime} onPin={this.handlePinStop} onClose={() => this.popup?.remove()} />);
+                    this.showPopup(coordinates, <PlatformPopup platform={stopPosition} stationName={stationName} routeColors={this.routeColors} routeTypes={this.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} onPin={this.handlePinStop} onClose={() => this.popup?.remove()} />);
                     return;
                 }
             }
@@ -614,7 +615,7 @@ export default class Map extends React.Component<MapProps, MapState> {
             const stopName = feature.properties?.name ?? stopId;
             const ifopt = feature.properties?.ifopt || null;
             const isAssigned = feature.properties?.isAssigned === true || feature.properties?.isAssigned === "true";
-            this.showPopup(coordinates, <GtfsStopPopup stopId={stopId} stopName={stopName} ifopt={ifopt} isAssigned={isAssigned} routeColors={this.routeColors} routeTypes={this.routeTypes} referenceTime={this.props.simulatedTime} onClose={() => this.popup?.remove()} />);
+            this.showPopup(coordinates, <GtfsStopPopup stopId={stopId} stopName={stopName} ifopt={ifopt} isAssigned={isAssigned} routeColors={this.routeColors} routeTypes={this.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} onClose={() => this.popup?.remove()} />);
         });
 
         // Vehicle click - toggle tracking
