@@ -4,7 +4,7 @@ pub use error::MappingError;
 
 use std::collections::HashSet;
 
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tracing::info;
@@ -611,7 +611,11 @@ async fn fetch_candidates_batch(
             .collect();
 
         // Sort by distance and keep top 10, matching the original per-entry behavior
-        candidates.sort_by(|a, b| a.distance_meters.partial_cmp(&b.distance_meters).unwrap());
+        candidates.sort_by(|a, b| {
+            a.distance_meters
+                .partial_cmp(&b.distance_meters)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         candidates.truncate(10);
         result.push(candidates);
     }
@@ -639,13 +643,56 @@ fn ifopt_dedup_key(ifopt: &str) -> String {
     }
 }
 
-pub fn router(pool: PgPool) -> Router {
+/// Middleware that checks for a valid admin API key in the request headers.
+/// Accepts `Authorization: Bearer <key>` or `X-Api-Key: <key>`.
+async fn require_admin_key(
+    axum::extract::State(expected_key): axum::extract::State<String>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let auth_header = request.headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    let api_key_header = request.headers()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok());
+
+    let provided = auth_header.or(api_key_header);
+
+    match provided {
+        Some(key) if key == expected_key => Ok(next.run(request).await),
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
+pub fn router(pool: PgPool, admin_api_key: Option<String>) -> Router {
     let state = MappingState { pool };
-    Router::new()
-        .route("/set", post(set_mapping))
-        .route("/remove", post(remove_mapping))
+
+    // Read-only status endpoint is always accessible
+    let read_routes = Router::new()
         .route("/status", post(mapping_status))
-        .with_state(state)
+        .with_state(state.clone());
+
+    // Write endpoints require admin authentication
+    let write_routes = match admin_api_key {
+        Some(key) => {
+            Router::new()
+                .route("/set", post(set_mapping))
+                .route("/remove", post(remove_mapping))
+                .with_state(state)
+                .layer(axum::middleware::from_fn_with_state(key, require_admin_key))
+        }
+        None => {
+            tracing::warn!("ADMIN_API_KEY not set — mapping write endpoints are disabled");
+            Router::new()
+                .route("/set", post(|| async { StatusCode::FORBIDDEN }))
+                .route("/remove", post(|| async { StatusCode::FORBIDDEN }))
+        }
+    };
+
+    read_routes.merge(write_routes)
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ use omniviv_api::{
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "Omniviv API", version = "0.1.0"),
+    info(title = "Omniviv API", version = env!("CARGO_PKG_VERSION")),
     paths(
         api::areas::list::list_areas,
         api::areas::list::get_area,
@@ -145,6 +145,12 @@ async fn main() {
     let database_url = read_env_or_file("DATABASE_URL")
         .expect("DATABASE_URL environment variable must be set (or DATABASE_URL_FILE for file-based secret)");
 
+    // Read optional ADMIN_API_KEY for mapping write endpoints (supports _FILE convention)
+    let admin_api_key = read_env_or_file("ADMIN_API_KEY").ok();
+    if admin_api_key.is_none() {
+        tracing::warn!("ADMIN_API_KEY not set — mapping write endpoints will be disabled");
+    }
+
     // Connect to PostgreSQL
     let pool = PgPool::connect(&database_url)
         .await
@@ -178,7 +184,7 @@ async fn main() {
     #[allow(unused_mut)] // mut needed when dev-tools feature is enabled
     let mut app = Router::new()
         .route("/", get(root))
-        .nest("/api", api::router(pool.clone(), departure_store, time_horizon_minutes, timezone, issue_store, vehicle_updates_tx))
+        .nest("/api", api::router(pool.clone(), departure_store, time_horizon_minutes, timezone, issue_store, vehicle_updates_tx, admin_api_key))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
