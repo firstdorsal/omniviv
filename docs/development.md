@@ -203,7 +203,7 @@ areas:
 
 The API uses GTFS (General Transit Feed Specification) for departure and vehicle data:
 
-- **Static GTFS**: A ZIP file containing stops, routes, trips, stop_times, calendars. Downloaded once and cached in `api/data/gtfs/`. Re-downloaded every 24 hours (configurable via `static_refresh_hours`).
+- **Static GTFS**: A ZIP file containing stops, routes, trips, stop_times, calendars. Downloaded once and cached in `api/data/gtfs/`. Re-downloaded every 6 hours (configurable via `static_refresh_hours`). Shorter intervals ensure timely pickup of service changes like strikes; HTTP conditional requests avoid unnecessary data transfer.
 - **GTFS-RT**: A protobuf feed with real-time trip updates (delays, cancellations). Polled every 15 seconds (configurable via `realtime_interval_secs`).
 - **IFOPT mapping**: GTFS numeric stop IDs are mapped to IFOPT identifiers (from OSM) using spatial proximity matching.
 
@@ -214,7 +214,7 @@ gtfs_sync:
     static_feed_url: "https://download.gtfs.de/germany/free/latest.zip"
     realtime_feed_url: "https://realtime.gtfs.de/realtime-free.pb"
     cache_dir: "./data/gtfs"        # Where the ZIP is cached
-    static_refresh_hours: 24         # Re-download interval
+    static_refresh_hours: 6          # Re-download interval (shorter for timely pickup of service changes)
     realtime_interval_secs: 15       # RT poll interval
     time_horizon_minutes: 120        # Show departures up to 2h in future
 ```

@@ -187,7 +187,7 @@ gtfs_sync:
     static_feed_url: "https://download.gtfs.de/germany/free/latest.zip"
     realtime_feed_url: "https://realtime.gtfs.de/realtime-free.pb"
     cache_dir: "./data/gtfs"
-    static_refresh_hours: 24
+    static_refresh_hours: 6          # Shorter intervals for timely pickup of service changes
     realtime_interval_secs: 15
     time_horizon_minutes: 120
 ```
@@ -220,12 +220,12 @@ The 1 GB memory limit (as configured in docker-compose) accommodates:
 | Resource | Minimum | Notes |
 |----------|---------|-------|
 | Memory | 256 MB | Static file serving only |
-| CPU | 0.5 core | Nginx serving static assets |
+| CPU | 0.5 core | feoco serving static assets |
 
 ## Development Setup
 
 ### Prerequisites
 
 - **Rust** (1.83+): Install via [rustup](https://rustup.rs/)
-- **Node.js** (22+): For frontend development
+- **Node.js** (23+): For frontend development
 - **pnpm** (9.x): Package manager for frontend

@@ -110,11 +110,13 @@ Returns all upcoming departures across all stops.
             "stop_ifopt": "de:09761:1234:0:1",
             "line_number": "1",
             "destination": "Lechhausen",
+            "destination_id": "de:09761:5678:0:1",
             "planned_time": "2024-01-15T10:30:00+01:00",
             "estimated_time": "2024-01-15T10:31:00+01:00",
             "delay_minutes": 1,
             "event_type": "departure",
-            "trip_id": "123456789-1"
+            "trip_id": "123456789-1",
+            "cancelled": false
         }
     ]
 }
@@ -203,6 +205,7 @@ Returns all vehicles currently operating on a route with their stop sequences.
             "line_number": "1",
             "destination": "Lechhausen",
             "origin": "Haunstetten Nord",
+            "next_trip_id": "987654321-1",
             "stops": [
                 {
                     "stop_ifopt": "de:09761:1234:0:1",
