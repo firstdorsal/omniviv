@@ -129,9 +129,9 @@ pub fn build_vehicles_from_departures(
                 return None;
             }
 
-            // Skip cancelled trips — they should appear in departure monitors
+            // Skip wholly cancelled trips — they should appear in departure monitors
             // (with strikethrough) but not as active vehicles on the map.
-            if departures.iter().any(|d| d.cancelled) {
+            if departures.iter().all(|d| d.cancelled) {
                 return None;
             }
 
@@ -204,12 +204,6 @@ pub fn build_vehicles_from_departures(
         .collect();
 
     super::link_consecutive_trips(&mut vehicles);
-
-    vehicles.sort_by(|a, b| {
-        let time_a = a.stops.first().and_then(|s| s.departure_time.as_ref());
-        let time_b = b.stops.first().and_then(|s| s.departure_time.as_ref());
-        time_a.cmp(&time_b)
-    });
 
     vehicles
 }

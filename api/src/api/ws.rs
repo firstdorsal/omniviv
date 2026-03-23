@@ -95,6 +95,7 @@ fn compute_vehicle_hash(vehicle: &Vehicle) -> u64 {
     vehicle.trip_id.hash(&mut hasher);
     vehicle.line_number.hash(&mut hasher);
     vehicle.destination.hash(&mut hasher);
+    vehicle.origin.hash(&mut hasher);
     vehicle.next_trip_id.hash(&mut hasher);
     for stop in &vehicle.stops {
         stop.stop_ifopt.hash(&mut hasher);

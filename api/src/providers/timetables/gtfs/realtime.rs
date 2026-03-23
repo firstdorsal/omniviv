@@ -10,6 +10,9 @@ use crate::sync::{Departure, EventType};
 use super::error::GtfsError;
 use super::static_data::{extract_platform_from_ifopt, station_level_ifopt, GtfsSchedule};
 
+use gtfs_realtime::trip_descriptor::ScheduleRelationship as TripSchedule;
+use gtfs_realtime::trip_update::stop_time_update::ScheduleRelationship as StopSchedule;
+
 /// Maximum allowed protobuf response size (100 MB)
 const MAX_PROTOBUF_SIZE: usize = 100 * 1024 * 1024;
 
@@ -67,7 +70,7 @@ fn collect_cancelled_trips_from_alerts(
     tz: Tz,
 ) -> HashSet<String> {
     let mut cancelled = HashSet::new();
-    let now_unix = now.timestamp() as u64;
+    let now_unix = now.timestamp().max(0) as u64;
 
     for entity in &feed.entity {
         let Some(alert) = &entity.alert else {
@@ -220,10 +223,10 @@ pub fn process_trip_updates(
         matched_trips += 1;
         trips_with_rt.insert(trip_id.clone());
 
-        // Check trip-level cancellation (CANCELED=3, DELETED=7)
+        // Check trip-level cancellation
         let mut trip_cancelled = matches!(
-            trip_update.trip.schedule_relationship,
-            Some(3) | Some(7)
+            trip_update.trip.schedule_relationship(),
+            TripSchedule::Canceled | TripSchedule::Deleted
         );
 
         // Check calendar: service must be active today or tomorrow (when horizon crosses midnight)
@@ -284,7 +287,7 @@ pub fn process_trip_updates(
             let all_skipped = trip_update
                 .stop_time_update
                 .iter()
-                .all(|stu| stu.schedule_relationship == Some(1));
+                .all(|stu| stu.schedule_relationship() == StopSchedule::Skipped);
             if all_skipped {
                 trip_cancelled = true;
             }
@@ -375,7 +378,7 @@ pub fn process_trip_updates(
             // Update propagated delay from this STU
             if let Some(stu) = stu {
                 // Check if stop is skipped
-                if stu.schedule_relationship == Some(1) {
+                if stu.schedule_relationship() == StopSchedule::Skipped {
                     continue;
                 }
                 if let Some(dep) = &stu.departure {
@@ -1307,7 +1310,7 @@ mod tests {
             arrival: None,
             departure: None,
             departure_occupancy_status: None,
-            schedule_relationship: Some(1), // SKIPPED
+            schedule_relationship: Some(StopSchedule::Skipped as i32),
             stop_time_properties: None,
         };
 
