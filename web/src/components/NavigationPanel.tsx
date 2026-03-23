@@ -410,18 +410,18 @@ export function NavigationPanel({
 
                 {itineraries.length > 0 && (
                     <div className="space-y-3">
-                        {itineraries.map((it, i) => (
+                        {itineraries.map((itinerary, i) => (
                             <div key={i} className="@container border rounded-lg p-3 space-y-2">
                                 <div className="flex items-center justify-between text-sm">
                                     <span className="font-medium">
-                                        {formatTime(it.startTime, false)} - {formatTime(it.endTime, false)}
+                                        {formatTime(itinerary.startTime, false)} - {formatTime(itinerary.endTime, false)}
                                     </span>
-                                    <Duration seconds={it.duration} className="text-foreground" />
+                                    <Duration seconds={itinerary.duration} className="text-foreground" />
                                 </div>
                                 <div className="flex items-center gap-1.5">
                                     <div className="relative min-w-0 flex-1 overflow-hidden max-h-8">
                                         <div className="flex items-center gap-1.5 flex-nowrap">
-                                            {it.legs.map((leg, j) => {
+                                            {itinerary.legs.map((leg, j) => {
                                                 if (leg.mode === "WALK") {
                                                     const walkMin = Math.round(leg.duration / 60);
                                                     return (
@@ -444,9 +444,9 @@ export function NavigationPanel({
                                         </div>
                                         <div className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-background to-transparent" />
                                     </div>
-                                    {it.transfers > 0 && (
+                                    {itinerary.transfers > 0 && (
                                         <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">
-                                            {it.transfers}x
+                                            {itinerary.transfers}x
                                         </span>
                                     )}
                                 </div>

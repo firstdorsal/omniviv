@@ -269,20 +269,20 @@ pub fn process_trip_updates(
             .unwrap_or(today);
 
         // Build a lookup for StopTimeUpdates by stop_id and stop_sequence
-        let stu_by_stop: HashMap<&str, &gtfs_realtime::trip_update::StopTimeUpdate> = trip_update
+        let stop_updates_by_stop: HashMap<&str, &gtfs_realtime::trip_update::StopTimeUpdate> = trip_update
             .stop_time_update
             .iter()
-            .filter_map(|stu| {
-                stu.stop_id
+            .filter_map(|stop_update| {
+                stop_update.stop_id
                     .as_deref()
-                    .map(|sid| (sid, stu))
+                    .map(|sid| (sid, stop_update))
             })
             .collect();
 
-        let stu_by_seq: HashMap<u32, &gtfs_realtime::trip_update::StopTimeUpdate> = trip_update
+        let stop_updates_by_seq: HashMap<u32, &gtfs_realtime::trip_update::StopTimeUpdate> = trip_update
             .stop_time_update
             .iter()
-            .filter_map(|stu| stu.stop_sequence.map(|seq| (seq, stu)))
+            .filter_map(|stop_update| stop_update.stop_sequence.map(|seq| (seq, stop_update)))
             .collect();
 
         // Detect "all stops skipped" as effectively cancelled.
@@ -292,7 +292,7 @@ pub fn process_trip_updates(
             let all_skipped = trip_update
                 .stop_time_update
                 .iter()
-                .all(|stu| stu.schedule_relationship() == StopSchedule::Skipped);
+                .all(|stop_update| stop_update.schedule_relationship() == StopSchedule::Skipped);
             if all_skipped {
                 trip_cancelled = true;
             }
@@ -375,23 +375,23 @@ pub fn process_trip_updates(
 
         for st in stop_times {
             // Find matching StopTimeUpdate
-            let stu = stu_by_stop
+            let stop_time_update = stop_updates_by_stop
                 .get(st.stop_id.as_str())
-                .or_else(|| stu_by_seq.get(&(st.stop_sequence as u32)))
+                .or_else(|| stop_updates_by_seq.get(&(st.stop_sequence as u32)))
                 .copied();
 
-            // Update propagated delay from this STU
-            if let Some(stu) = stu {
+            // Update propagated delay from this stop time update
+            if let Some(stop_time_update) = stop_time_update {
                 // Check if stop is skipped
-                if stu.schedule_relationship() == StopSchedule::Skipped {
+                if stop_time_update.schedule_relationship() == StopSchedule::Skipped {
                     continue;
                 }
-                if let Some(dep) = &stu.departure {
-                    if let Some(delay) = dep.delay {
+                if let Some(departure) = &stop_time_update.departure {
+                    if let Some(delay) = departure.delay {
                         propagated_delay = delay;
                     }
-                } else if let Some(arr) = &stu.arrival {
-                    if let Some(delay) = arr.delay {
+                } else if let Some(arrival) = &stop_time_update.arrival {
+                    if let Some(delay) = arrival.delay {
                         propagated_delay = delay;
                     }
                 }
@@ -436,9 +436,9 @@ pub fn process_trip_updates(
             // Compute arrival/departure times once (shared across all mapped IFOPTs)
             let arr_event = if let Some(arr_secs) = st.arrival_time {
                 schedule_time_to_utc(arr_secs, service_date, tz).map(|arr_planned_dt| {
-                    let (arr_estimated_dt, arr_delay) = if let Some(stu) = stu {
+                    let (arr_estimated_dt, arr_delay) = if let Some(stop_time_update) = stop_time_update {
                         compute_estimated_time_for_event(
-                            stu.arrival.as_ref().or(stu.departure.as_ref()),
+                            stop_time_update.arrival.as_ref().or(stop_time_update.departure.as_ref()),
                             arr_planned_dt,
                             propagated_delay,
                         )
@@ -459,9 +459,9 @@ pub fn process_trip_updates(
 
             let dep_event = if let Some(dep_secs) = st.departure_time {
                 schedule_time_to_utc(dep_secs, service_date, tz).map(|dep_planned_dt| {
-                    let (dep_estimated_dt, dep_delay) = if let Some(stu) = stu {
+                    let (dep_estimated_dt, dep_delay) = if let Some(stop_time_update) = stop_time_update {
                         compute_estimated_time_for_event(
-                            stu.departure.as_ref().or(stu.arrival.as_ref()),
+                            stop_time_update.departure.as_ref().or(stop_time_update.arrival.as_ref()),
                             dep_planned_dt,
                             propagated_delay,
                         )

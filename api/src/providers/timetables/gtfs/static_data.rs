@@ -2270,7 +2270,7 @@ pub async fn build_schedule_from_db(
     }
 
     // 4. Load stop_times for those trips (ordered for correct sequencing)
-    let st_rows: Vec<(String, i32, String, Option<i32>, Option<i32>)> = sqlx::query_as(
+    let stop_time_rows: Vec<(String, i32, String, Option<i32>, Option<i32>)> = sqlx::query_as(
         "SELECT trip_id, stop_sequence, stop_id, arrival_time, departure_time \
          FROM gtfs_stop_times WHERE trip_id = ANY($1::text[]) \
          ORDER BY trip_id, stop_sequence",
@@ -2281,7 +2281,7 @@ pub async fn build_schedule_from_db(
 
     let mut stop_times: HashMap<String, Vec<GtfsStopTime>> = HashMap::new();
     let mut all_stop_ids: HashSet<String> = HashSet::new();
-    for (trip_id, seq, stop_id, arr, dep) in st_rows {
+    for (trip_id, seq, stop_id, arrival, departure) in stop_time_rows {
         all_stop_ids.insert(stop_id.clone());
         stop_times
             .entry(trip_id)
@@ -2289,17 +2289,17 @@ pub async fn build_schedule_from_db(
             .push(GtfsStopTime {
                 stop_sequence: seq,
                 stop_id,
-                arrival_time: arr,
-                departure_time: dep,
+                arrival_time: arrival,
+                departure_time: departure,
             });
     }
 
     // Build trips_by_stop reverse index
     let mut trips_by_stop: HashMap<String, HashSet<String>> = HashMap::new();
-    for (trip_id, sts) in &stop_times {
-        for st in sts {
+    for (trip_id, stop_time_list) in &stop_times {
+        for stop_time in stop_time_list {
             trips_by_stop
-                .entry(st.stop_id.clone())
+                .entry(stop_time.stop_id.clone())
                 .or_default()
                 .insert(trip_id.clone());
         }
@@ -2483,7 +2483,7 @@ pub async fn build_schedule_from_db_by_gtfs_stop(
     }
 
     // 3. Load stop_times
-    let st_rows: Vec<(String, i32, String, Option<i32>, Option<i32>)> = sqlx::query_as(
+    let stop_time_rows: Vec<(String, i32, String, Option<i32>, Option<i32>)> = sqlx::query_as(
         "SELECT trip_id, stop_sequence, stop_id, arrival_time, departure_time \
          FROM gtfs_stop_times WHERE trip_id = ANY($1::text[]) \
          ORDER BY trip_id, stop_sequence",
@@ -2494,7 +2494,7 @@ pub async fn build_schedule_from_db_by_gtfs_stop(
 
     let mut stop_times: HashMap<String, Vec<GtfsStopTime>> = HashMap::new();
     let mut all_stop_ids: HashSet<String> = HashSet::new();
-    for (trip_id, seq, stop_id, arr, dep) in st_rows {
+    for (trip_id, seq, stop_id, arrival, departure) in stop_time_rows {
         all_stop_ids.insert(stop_id.clone());
         stop_times
             .entry(trip_id)
@@ -2502,16 +2502,16 @@ pub async fn build_schedule_from_db_by_gtfs_stop(
             .push(GtfsStopTime {
                 stop_sequence: seq,
                 stop_id,
-                arrival_time: arr,
-                departure_time: dep,
+                arrival_time: arrival,
+                departure_time: departure,
             });
     }
 
     let mut trips_by_stop: HashMap<String, HashSet<String>> = HashMap::new();
-    for (trip_id, sts) in &stop_times {
-        for st in sts {
+    for (trip_id, stop_time_list) in &stop_times {
+        for stop_time in stop_time_list {
             trips_by_stop
-                .entry(st.stop_id.clone())
+                .entry(stop_time.stop_id.clone())
                 .or_default()
                 .insert(trip_id.clone());
         }
@@ -2880,8 +2880,8 @@ fn parse_stop_times(
     }
 
     // Sort each trip's stop_times by stop_sequence
-    for sts in stop_times.values_mut() {
-        sts.sort_by_key(|st| st.stop_sequence);
+    for stop_time_list in stop_times.values_mut() {
+        stop_time_list.sort_by_key(|stop_time| stop_time.stop_sequence);
     }
 
     Ok(stop_times)
@@ -3942,8 +3942,8 @@ mod tests {
         );
 
         // Sort like load_schedule does
-        for sts in schedule.stop_times.values_mut() {
-            sts.sort_by_key(|st| st.stop_sequence);
+        for stop_time_list in schedule.stop_times.values_mut() {
+            stop_time_list.sort_by_key(|stop_time| stop_time.stop_sequence);
         }
 
         let times = &schedule.stop_times["trip_gap"];
@@ -3986,8 +3986,8 @@ mod tests {
             ],
         );
 
-        for sts in stop_times.values_mut() {
-            sts.sort_by_key(|st| st.stop_sequence);
+        for stop_time_list in stop_times.values_mut() {
+            stop_time_list.sort_by_key(|stop_time| stop_time.stop_sequence);
         }
 
         let times = &stop_times["trip_dup"];
