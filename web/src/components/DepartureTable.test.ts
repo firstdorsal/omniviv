@@ -111,4 +111,61 @@ describe("buildTripEvents", () => {
         const lines = new Set(result.map((t) => t.lineNumber));
         expect(lines).toEqual(new Set(["1", "2", "6"]));
     });
+
+    it("marks cancelled trips", () => {
+        const events: Departure[] = [
+            makeDeparture({
+                trip_id: "trip1",
+                line_number: "1",
+                cancelled: true,
+            }),
+        ];
+
+        const result = buildTripEvents(events);
+        expect(result).toHaveLength(1);
+        expect(result[0].cancelled).toBe(true);
+    });
+
+    it("non-cancelled trips are not marked", () => {
+        const events: Departure[] = [
+            makeDeparture({
+                trip_id: "trip1",
+                line_number: "1",
+            }),
+        ];
+
+        const result = buildTripEvents(events);
+        expect(result[0].cancelled).toBe(false);
+    });
+
+    it("partial cancellation propagates to trip", () => {
+        const events: Departure[] = [
+            makeDeparture({
+                trip_id: "trip1",
+                line_number: "1",
+                event_type: EventType.Arrival,
+                cancelled: false,
+            }),
+            makeDeparture({
+                trip_id: "trip1",
+                line_number: "1",
+                event_type: EventType.Departure,
+                cancelled: true,
+            }),
+        ];
+
+        const result = buildTripEvents(events);
+        expect(result[0].cancelled).toBe(true);
+    });
+
+    it("skips events without trip_id", () => {
+        const events: Departure[] = [
+            makeDeparture({ trip_id: "trip1", line_number: "1" }),
+            { ...makeDeparture({ trip_id: "", line_number: "2" }), trip_id: undefined as unknown as string },
+        ];
+
+        const result = buildTripEvents(events);
+        expect(result).toHaveLength(1);
+        expect(result[0].tripId).toBe("trip1");
+    });
 });

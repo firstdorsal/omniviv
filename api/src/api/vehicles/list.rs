@@ -369,4 +369,26 @@ mod tests {
         // Exactly 15 min gap — should link (gap <= 15)
         assert_eq!(vehicles[0].next_trip_id.as_deref(), Some("trip2"));
     }
+
+    #[test]
+    fn empty_list_no_panic() {
+        let mut vehicles: Vec<Vehicle> = vec![];
+        link_consecutive_trips(&mut vehicles);
+        assert!(vehicles.is_empty());
+    }
+
+    #[test]
+    fn picks_earliest_successor_among_candidates() {
+        let mut vehicles = vec![
+            make_vehicle("trip1", "4", "de:09761:10:1:A3", "2026-03-20T08:00:00Z", "de:09761:20:1:B1", "2026-03-20T08:30:00Z"),
+            // Later candidate — should NOT be picked
+            make_vehicle("trip3", "4", "de:09761:20:1:B2", "2026-03-20T08:40:00Z", "de:09761:10:1:A4", "2026-03-20T09:10:00Z"),
+            // Earlier candidate — should be picked
+            make_vehicle("trip2", "4", "de:09761:20:1:B2", "2026-03-20T08:35:00Z", "de:09761:10:1:A4", "2026-03-20T09:05:00Z"),
+        ];
+        link_consecutive_trips(&mut vehicles);
+        // After sorting by departure time: trip1, trip2, trip3
+        // trip1 should link to trip2 (earlier of the two candidates)
+        assert_eq!(vehicles[0].next_trip_id.as_deref(), Some("trip2"));
+    }
 }
