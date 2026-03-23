@@ -74,11 +74,15 @@ function transformRouteVehicles(wsData: WsRouteVehicles[]): RouteVehicles[] {
 
 // Apply incremental changes to existing state
 function applyChanges(current: RouteVehicles[], changes: VehicleChange[]): RouteVehicles[] {
-    // Create a mutable copy
-    const result = current.map(r => ({
-        ...r,
-        vehicles: [...r.vehicles],
-    }));
+    // Collect which route IDs are affected by changes
+    const affectedRoutes = new Set(changes.map(c => c.route_id));
+
+    // Only copy routes that have changes; reuse unchanged route objects
+    const result = current.map(r =>
+        affectedRoutes.has(r.routeId)
+            ? { ...r, vehicles: [...r.vehicles] }
+            : r
+    );
 
     for (const change of changes) {
         const routeIndex = result.findIndex(r => r.routeId === change.route_id);
@@ -98,7 +102,6 @@ function applyChanges(current: RouteVehicles[], changes: VehicleChange[]): Route
                     if (vehicleIndex >= 0) {
                         result[routeIndex].vehicles[vehicleIndex] = change.vehicle;
                     } else {
-                        // Vehicle not found, add it
                         result[routeIndex].vehicles.push(change.vehicle);
                     }
                 }

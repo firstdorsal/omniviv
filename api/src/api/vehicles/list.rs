@@ -76,6 +76,15 @@ pub struct RouteStopInfo {
     pub lon: Option<f64>,
 }
 
+/// Resolved stop info extracted from a RouteStopInfo row, with guaranteed coordinates.
+#[derive(Debug, Clone)]
+pub struct StopInfo {
+    pub sequence: i32,
+    pub name: Option<String>,
+    pub lat: f64,
+    pub lon: f64,
+}
+
 #[derive(Debug, FromRow)]
 pub struct RouteInfo {
     pub line_ref: Option<String>,
@@ -215,14 +224,17 @@ pub async fn get_vehicles_by_route(
     .await
     .map_err(internal_error)?;
 
-    // Build a map of stop_ifopt -> (sequence, name, lat, lon)
-    let stop_info_map: HashMap<String, (i32, Option<String>, f64, f64)> = route_stops
+    // Build a map of stop_ifopt -> StopInfo
+    let stop_info_map: HashMap<String, StopInfo> = route_stops
         .iter()
         .filter_map(|s| {
             let ifopt = s.stop_ifopt.as_ref()?;
-            let lat = s.lat?;
-            let lon = s.lon?;
-            Some((ifopt.clone(), (s.sequence, s.stop_name.clone(), lat, lon)))
+            Some((ifopt.clone(), StopInfo {
+                sequence: s.sequence,
+                name: s.stop_name.clone(),
+                lat: s.lat?,
+                lon: s.lon?,
+            }))
         })
         .collect();
 

@@ -12,6 +12,7 @@ use crate::providers::timetables::gtfs::realtime;
 use crate::sync::Departure;
 
 /// How many minutes of past departures to keep so that recent arrivals remain visible.
+/// See also: `SCHEDULE_PAST_WINDOW_MINUTES` in `realtime.rs` (10 min for schedule building).
 const PAST_GRACE_MINUTES: i64 = 5;
 
 /// Per-stop board queries use a longer time horizon than the main departure list
@@ -112,10 +113,6 @@ fn filter_past_departures(departures: Vec<Departure>, reference_time: DateTime<U
         .collect()
 }
 
-#[derive(Debug, Serialize, ToSchema)]
-pub struct DepartureListResponse {
-    pub departures: Vec<Departure>,
-}
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct StopDeparturesRequest {
@@ -145,25 +142,6 @@ pub struct GtfsStopDeparturesRequest {
 pub struct GtfsStopDeparturesResponse {
     pub gtfs_stop_id: String,
     pub departures: Vec<Departure>,
-}
-
-/// List all departures across all stops
-#[utoipa::path(
-    get,
-    path = "/api/departures",
-    responses(
-        (status = 200, description = "List of all departures", body = DepartureListResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    ),
-    tag = "departures"
-)]
-pub async fn list_departures(
-    State(state): State<AppState>,
-) -> Json<DepartureListResponse> {
-    let store = state.departure_store.read().await;
-    let departures: Vec<Departure> = store.values().flatten().cloned().collect();
-    let departures = filter_past_departures(departures, Utc::now());
-    Json(DepartureListResponse { departures })
 }
 
 /// Get departures for a specific stop by IFOPT ID

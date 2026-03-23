@@ -15,7 +15,7 @@ use tracing::warn;
 
 use super::state::AppState;
 use super::utils::parse_reference_time as parse_ws_reference_time;
-use super::vehicles::{RouteInfo, RouteStopInfo, Vehicle};
+use super::vehicles::{RouteInfo, RouteStopInfo, StopInfo, Vehicle};
 
 /// Error type for internal WebSocket data-building operations.
 /// Converts to String for WebSocket error messages while providing
@@ -434,13 +434,16 @@ async fn build_vehicle_data(
         let route_stops = route_stops_map.remove(&route_id).unwrap_or_default();
 
         // Build stop info map
-        let stop_info_map: HashMap<String, (i32, Option<String>, f64, f64)> = route_stops
+        let stop_info_map: HashMap<String, StopInfo> = route_stops
             .iter()
             .filter_map(|s| {
                 let ifopt = s.stop_ifopt.as_ref()?;
-                let lat = s.lat?;
-                let lon = s.lon?;
-                Some((ifopt.clone(), (s.sequence, s.stop_name.clone(), lat, lon)))
+                Some((ifopt.clone(), StopInfo {
+                    sequence: s.sequence,
+                    name: s.stop_name.clone(),
+                    lat: s.lat?,
+                    lon: s.lon?,
+                }))
             })
             .collect();
 

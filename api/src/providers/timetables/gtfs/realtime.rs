@@ -13,6 +13,11 @@ use super::static_data::{extract_platform_from_ifopt, station_level_ifopt, GtfsS
 use gtfs_realtime::trip_descriptor::ScheduleRelationship as TripSchedule;
 use gtfs_realtime::trip_update::stop_time_update::ScheduleRelationship as StopSchedule;
 
+/// How many minutes of past departures to include when building the schedule.
+/// Keeps recently-departed vehicles visible for a short window.
+/// See also: `PAST_GRACE_MINUTES` in `api/departures/list.rs` (5 min for display filtering).
+const SCHEDULE_PAST_WINDOW_MINUTES: i64 = 10;
+
 /// Maximum allowed protobuf response size (100 MB)
 const MAX_PROTOBUF_SIZE: usize = 100 * 1024 * 1024;
 
@@ -322,7 +327,7 @@ pub fn process_trip_updates(
                 let primary_secs = st.departure_time.or(st.arrival_time);
                 let Some(primary_secs) = primary_secs else { continue; };
                 let Some(primary_dt) = schedule_time_to_utc(primary_secs, service_date, tz) else { continue; };
-                if primary_dt < now - Duration::minutes(10) || primary_dt > cutoff { continue; }
+                if primary_dt < now - Duration::minutes(SCHEDULE_PAST_WINDOW_MINUTES) || primary_dt > cutoff { continue; }
 
                 for ifopt_id in &relevant_ifopts {
                     if let Some(dep_secs) = st.departure_time {
@@ -424,7 +429,7 @@ pub fn process_trip_updates(
             // 10-minute past window ensures vehicles near their final stops always
             // retain at least 2 stops (the departed + arriving stop), preventing
             // premature vehicle disappearance from the 2-stop minimum filter.
-            if primary_dt < now - Duration::minutes(10) || primary_dt > cutoff {
+            if primary_dt < now - Duration::minutes(SCHEDULE_PAST_WINDOW_MINUTES) || primary_dt > cutoff {
                 continue;
             }
 
@@ -706,7 +711,7 @@ fn add_scheduled_departures(
 
             // 10-minute past window (same as process_trip_updates) to ensure
             // vehicles near their final stops retain enough stop data.
-            if primary_dt < now - Duration::minutes(10) || primary_dt > cutoff {
+            if primary_dt < now - Duration::minutes(SCHEDULE_PAST_WINDOW_MINUTES) || primary_dt > cutoff {
                 continue;
             }
 

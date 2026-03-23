@@ -2,7 +2,7 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 
-use super::{Vehicle, VehicleStop};
+use super::{StopInfo, Vehicle, VehicleStop};
 use crate::api::schedule_cache::ScheduleCache;
 use crate::providers::timetables::gtfs::realtime;
 use crate::sync::{Departure, DepartureStore, EventType};
@@ -120,11 +120,9 @@ async fn collect_from_realtime(
 }
 
 /// Build `Vehicle` structs from trip-grouped departures and stop info.
-///
-/// `stop_info_map` maps stop_ifopt → (sequence, stop_name, lat, lon).
 pub fn build_vehicles_from_departures(
     trip_departures: HashMap<String, Vec<Departure>>,
-    stop_info_map: &HashMap<String, (i32, Option<String>, f64, f64)>,
+    stop_info_map: &HashMap<String, StopInfo>,
 ) -> Vec<Vehicle> {
     let mut vehicles: Vec<Vehicle> = trip_departures
         .into_iter()
@@ -168,7 +166,7 @@ pub fn build_vehicles_from_departures(
             let mut stops: Vec<VehicleStop> = stop_events
                 .into_iter()
                 .filter_map(|(stop_ifopt, (arrival, departure))| {
-                    let (sequence, stop_name, lat, lon) = stop_info_map.get(&stop_ifopt)?;
+                    let info = stop_info_map.get(&stop_ifopt)?;
 
                     let delay_minutes = departure
                         .as_ref()
@@ -177,10 +175,10 @@ pub fn build_vehicles_from_departures(
 
                     Some(VehicleStop {
                         stop_ifopt,
-                        stop_name: stop_name.clone(),
-                        sequence: *sequence,
-                        lat: *lat,
-                        lon: *lon,
+                        stop_name: info.name.clone(),
+                        sequence: info.sequence,
+                        lat: info.lat,
+                        lon: info.lon,
                         arrival_time: arrival.as_ref().map(|a| a.planned_time.clone()),
                         arrival_time_estimated: arrival.as_ref().and_then(|a| a.estimated_time.clone()),
                         departure_time: departure.as_ref().map(|d| d.planned_time.clone()),

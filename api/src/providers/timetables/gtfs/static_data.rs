@@ -2628,12 +2628,9 @@ pub async fn build_schedule_from_db_by_gtfs_stop(
 /// Extract station-level IFOPT (first 3 colon-separated parts).
 /// e.g., "de:09761:691:0:a" -> "de:09761:691"
 pub fn station_level_ifopt(ifopt: &str) -> String {
-    let parts: Vec<&str> = ifopt.split(':').collect();
-    if parts.len() >= 3 {
-        format!("{}:{}:{}", parts[0], parts[1], parts[2])
-    } else {
-        ifopt.to_string()
-    }
+    crate::api::utils::ifopt_station_prefix(ifopt)
+        .unwrap_or(ifopt)
+        .to_string()
 }
 
 /// Extract platform identifier from IFOPT (5th part).

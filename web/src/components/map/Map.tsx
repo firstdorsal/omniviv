@@ -18,28 +18,33 @@ import { MapLayerManager } from "./MapLayerManager";
 
 const MAP_STYLE_URL = import.meta.env.VITE_MAP_STYLE_URL ?? "/styles/basic-preview/style.json";
 
+/** Replace the origin (scheme+host+port) of a URL with the configured martin URL.
+ *  Uses string replacement instead of `new URL()` because style URLs may contain
+ *  template placeholders like `{fontstack}/{range}` that aren't valid URLs. */
+function rebaseUrl(url: string, martinOrigin: string): string {
+    return url.replace(/^https?:\/\/[^/]+/, martinOrigin.replace(/\/$/, ""));
+}
+
 async function loadMapStyle(): Promise<maplibregl.StyleSpecification> {
     const response = await fetch(MAP_STYLE_URL);
     const style = await response.json();
     const martinUrl = getConfig().martinUrl;
 
-    // Replace tile source URLs
+    // Rebase tile source URLs to the configured martin instance
     if (style.sources) {
         for (const source of Object.values(style.sources) as { url?: string }[]) {
-            if (source.url && source.url.includes("localhost")) {
-                source.url = source.url.replace(/http:\/\/localhost:\d+/, martinUrl);
+            if (source.url) {
+                source.url = rebaseUrl(source.url, martinUrl);
             }
         }
     }
 
-    // Replace glyph URL
-    if (style.glyphs && style.glyphs.includes("localhost")) {
-        style.glyphs = style.glyphs.replace(/http:\/\/localhost:\d+/, martinUrl);
+    if (style.glyphs) {
+        style.glyphs = rebaseUrl(style.glyphs, martinUrl);
     }
 
-    // Replace sprite URL if present
-    if (style.sprite && style.sprite.includes("localhost")) {
-        style.sprite = style.sprite.replace(/http:\/\/localhost:\d+/, martinUrl);
+    if (style.sprite) {
+        style.sprite = rebaseUrl(style.sprite, martinUrl);
     }
 
     return style;
