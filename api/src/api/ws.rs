@@ -344,24 +344,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     forward_task.abort();
 }
 
-#[derive(Debug, sqlx::FromRow)]
-struct RouteInfo {
-    line_ref: Option<String>,
-}
+use super::vehicles::{RouteInfo, RouteStopInfo};
 
 #[derive(Debug, sqlx::FromRow)]
 struct RouteInfoWithId {
     osm_id: i64,
     line_ref: Option<String>,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-struct RouteStopInfo {
-    sequence: i32,
-    stop_ifopt: Option<String>,
-    stop_name: Option<String>,
-    lat: Option<f64>,
-    lon: Option<f64>,
 }
 
 #[derive(Debug, sqlx::FromRow)]

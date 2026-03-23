@@ -67,18 +67,18 @@ pub struct VehicleStop {
     pub delay_minutes: Option<i32>,
 }
 
-#[derive(Debug, FromRow)]
-struct RouteStopInfo {
-    sequence: i32,
-    stop_ifopt: Option<String>,
-    stop_name: Option<String>,
-    lat: Option<f64>,
-    lon: Option<f64>,
+#[derive(Debug, Clone, FromRow)]
+pub struct RouteStopInfo {
+    pub sequence: i32,
+    pub stop_ifopt: Option<String>,
+    pub stop_name: Option<String>,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
 }
 
 #[derive(Debug, FromRow)]
-struct RouteInfo {
-    line_ref: Option<String>,
+pub struct RouteInfo {
+    pub line_ref: Option<String>,
 }
 
 /// Maximum time gap (minutes) between a trip's last arrival and the next trip's
