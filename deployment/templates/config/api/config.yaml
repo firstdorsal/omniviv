@@ -1,12 +1,13 @@
 # Omniviv API Configuration
 
 # CORS configuration
-# For development, enable permissive mode (allows all origins)
-cors_permissive: true
-# For production, disable permissive and specify allowed origins:
-# cors_permissive: false
-# cors_origins:
-#   - "https://your-domain.com"
+cors_permissive: {{ .services.api.corsPermissive | default false }}
+{{- if .services.api.corsOrigins }}
+cors_origins:
+{{- range .services.api.corsOrigins }}
+    - "{{ . }}"
+{{- end }}
+{{- end }}
 
 # Areas to fetch OSM data from
 # Each area is defined by a bounding box (south, west, north, east)

@@ -1,11 +1,12 @@
-routing: local # local | domain
-tls: false # only supported with existing traefik
+routing: domain
+tls: true
 
 reverseProxy:
-    create: true
+    create: false # Traefik already running on production server
     network: rp
 
 domain: vindelicum.eu
+lanIp: null
 
 services:
     postgres:
@@ -17,28 +18,26 @@ services:
         shmSize: 256mb
     api:
         subdomain: omniviv-api
-        corsPermissive: true
+        corsPermissive: false
+        corsOrigins:
+            - "https://omniviv.vindelicum.eu"
         data:
             storage:
                 volumeName: omniviv-api-data
                 absolutePath: null
         build:
-            enabled: true
-            context: ../../api
-            dockerfile: Dockerfile
+            enabled: false
         image: ghcr.io/firstdorsal/omniviv-api:latest
     web:
         subdomain: omniviv
         build:
-            enabled: true
-            context: ../../web
-            dockerfile: Dockerfile
+            enabled: false
         image: ghcr.io/firstdorsal/omniviv-frontend:latest
     martin:
         subdomain: omniviv-martin
         image: ghcr.io/maplibre/martin
         dataPath: ./data/
-        cacheSeconds: 86400 # 1 day
+        cacheSeconds: 86400
     motis:
         subdomain: omniviv-motis
         image: ghcr.io/motis-project/motis:latest
