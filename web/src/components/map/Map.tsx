@@ -13,7 +13,8 @@ import { StationPopup } from "../StationPopup";
 import { Button } from "../ui/button";
 import { VehicleRenderer } from "../vehicles/VehicleRenderer";
 import type { DebugOptions } from "../vehicles/VehicleRenderer";
-import { VehicleTracker, type TrackingInfo } from "../vehicles/VehicleTracker";
+import { VehicleTracker } from "../vehicles/VehicleTracker";
+import type { SmoothedVehiclePosition } from "../vehicles/vehicleUtils";
 import { MapLayerManager } from "./MapLayerManager";
 
 const MAP_STYLE_URL = import.meta.env.VITE_MAP_STYLE_URL ?? "/styles/basic-preview/style.json";
@@ -76,6 +77,7 @@ interface MapProps {
     showPlatforms: boolean;
     showRoutes: boolean;
     showVehicles: boolean;
+    showPois: boolean;
     debugOptions: DebugOptions;
     simulatedTime: Date;
     isRealTime: boolean;
@@ -92,6 +94,13 @@ interface MapProps {
     mappingLines?: MappingLine[];
     mappingGtfsStops?: MappingGtfsStop[];
     onPinStop?: (stopIfopt: string, displayName: string, stationName?: string) => void;
+    trackedTripId?: string | null;
+    cameraFollowTripId?: string | null;
+    onVehicleClick?: (tripId: string, lineNumber: string, destination: string, routeId: number) => void;
+    onVehicleDeselect?: () => void;
+    onCameraFollowStop?: () => void;
+    onTrackedTripChanged?: (oldTripId: string, newTripId: string) => void;
+    onTrackedVehicleLost?: (tripId: string) => void;
 }
 
 interface ContextMenuState {
@@ -110,8 +119,6 @@ interface MeasurementState {
 
 interface MapState {
     mapLoaded: boolean;
-    trackedTripId: string | null;
-    trackingInfo: TrackingInfo | null;
     contextMenu: ContextMenuState | null;
     measurement: MeasurementState;
     buildingHighlighted: boolean;
@@ -148,8 +155,6 @@ export default class Map extends React.Component<MapProps, MapState> {
         this.mapContainer = React.createRef();
         this.state = {
             mapLoaded: false,
-            trackedTripId: null,
-            trackingInfo: null,
             contextMenu: null,
             measurement: {
                 startPoint: null,
@@ -168,6 +173,11 @@ export default class Map extends React.Component<MapProps, MapState> {
     /** Fly the map camera to a specific location */
     public flyTo(lat: number, lon: number) {
         this.map?.flyTo({ center: [lon, lat], zoom: 15, duration: 1000 });
+    }
+
+    /** Get the smoothed position for a vehicle by trip ID */
+    public getSmoothedPosition(tripId: string): SmoothedVehiclePosition | undefined {
+        return this.vehicleRenderer?.getSmoothedPosition(tripId);
     }
 
     componentDidMount() {
@@ -203,6 +213,9 @@ export default class Map extends React.Component<MapProps, MapState> {
             if (prevProps.showRoutes !== this.props.showRoutes || prevProps.routes !== this.props.routes) {
                 this.layerManager.updateRoutes(this.props.routes, this.props.showRoutes);
             }
+            if (prevProps.showPois !== this.props.showPois) {
+                this.setPoiVisibility(this.props.showPois);
+            }
             if (prevProps.showVehicles !== this.props.showVehicles) {
                 this.handleVehicleVisibilityChange();
             }
@@ -226,12 +239,18 @@ export default class Map extends React.Component<MapProps, MapState> {
             }
         }
 
-        if (prevState.trackedTripId !== this.state.trackedTripId) {
-            this.handleTrackingChange(prevState.trackedTripId);
-            // Immediately update vehicles to refresh debug visualization
+        // Handle tracked vehicle changes (driven by props from App)
+        if (prevProps.trackedTripId !== this.props.trackedTripId) {
+            this.vehicleRenderer?.setTrackedTripId(this.props.trackedTripId ?? null);
+            this.vehicleRenderer?.setDebugOptions(this.props.debugOptions);
             if (this.props.showVehicles) {
-                this.updateVehicles();
+                this.vehicleRenderer?.updatePositions(this.props.vehicles, ANIMATION_INTERVAL);
             }
+        }
+
+        // Handle camera follow changes (driven by props from App)
+        if (prevProps.cameraFollowTripId !== this.props.cameraFollowTripId) {
+            this.handleCameraFollowChange(prevProps.cameraFollowTripId ?? null);
         }
 
         // Update vehicles when debug options change
@@ -329,6 +348,7 @@ export default class Map extends React.Component<MapProps, MapState> {
         );
         this.layerManager.updateRoutes(this.props.routes, this.props.showRoutes);
         this.layerManager.updateMappingData(this.props.mappingLines ?? [], this.props.mappingGtfsStops ?? [], this.props.stations);
+        this.setPoiVisibility(this.props.showPois);
 
         if (this.props.showVehicles) {
             this.startVehicleAnimation();
@@ -526,16 +546,21 @@ export default class Map extends React.Component<MapProps, MapState> {
             this.vehicleRenderer = new VehicleRenderer(this.layerManager, this.routeColors, this.routeGeometries);
             this.vehicleRenderer.setZoom(this.map.getZoom());
             this.vehicleRenderer.setOnTrackedVehicleLost(() => {
-                this.setState({ trackedTripId: null });
+                const tripId = this.props.trackedTripId;
+                if (tripId) {
+                    this.props.onTrackedVehicleLost?.(tripId);
+                }
             });
             this.vehicleRenderer.setOnTrackedTripChanged((newTripId) => {
-                // Seamless loop transition: update tracked trip without stopping tracking
-                this.setState({ trackedTripId: newTripId });
+                const oldTripId = this.props.trackedTripId;
+                if (oldTripId) {
+                    this.props.onTrackedTripChanged?.(oldTripId, newTripId);
+                }
             });
 
             this.vehicleTracker = new VehicleTracker(this.map, {
-                onTrackingInfoUpdate: (info) => this.setState({ trackingInfo: info }),
-                onTrackingStop: () => this.setState({ trackedTripId: null }),
+                onTrackingInfoUpdate: () => {}, // Panel handles tracking info now
+                onTrackingStop: () => this.props.onCameraFollowStop?.(),
                 getSmoothedPosition: (tripId) => this.vehicleRenderer?.getSmoothedPosition(tripId),
                 getRouteColor: (lineNumber) => this.routeColors.get(lineNumber) ?? "#3b82f6",
             });
@@ -623,11 +648,23 @@ export default class Map extends React.Component<MapProps, MapState> {
             this.showPopup(coordinates, <GtfsStopPopup stopId={stopId} stopName={stopName} ifopt={ifopt} isAssigned={isAssigned} routeColors={this.routeColors} routeTypes={this.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} onClose={() => this.popup?.remove()} />);
         });
 
-        // Vehicle click - toggle tracking
+        // Vehicle click - open sidebar panel
         this.map.on("click", "vehicles-marker", (e) => {
             if (!e.features || e.features.length === 0) return;
-            const tripId = e.features[0].properties?.tripId;
-            this.setState((state) => ({ trackedTripId: state.trackedTripId === tripId ? null : tripId }));
+            const props = e.features[0].properties;
+            if (!props) return;
+            const tripId = props.tripId;
+            const lineNumber = props.lineNumber ?? "";
+            const destination = props.destination ?? "";
+            // Find the routeId from vehicles data
+            let routeId = 0;
+            for (const rv of this.props.vehicles) {
+                if (rv.vehicles.some((v) => v.trip_id === tripId)) {
+                    routeId = rv.routeId;
+                    break;
+                }
+            }
+            this.props.onVehicleClick?.(tripId, lineNumber, destination, routeId);
         });
 
         // Map click - handle pick mode, measurement, stop tracking, close context menu
@@ -652,7 +689,7 @@ export default class Map extends React.Component<MapProps, MapState> {
 
             const features = this.map?.queryRenderedFeatures(e.point, { layers: ["vehicles-marker"] });
             if (!features || features.length === 0) {
-                this.setState({ trackedTripId: null });
+                this.props.onVehicleDeselect?.();
             }
         });
 
@@ -1112,6 +1149,16 @@ export default class Map extends React.Component<MapProps, MapState> {
         }
     }
 
+    private setPoiVisibility(visible: boolean) {
+        if (!this.map) return;
+        const value = visible ? "visible" : "none";
+        for (const layerId of ["poi-circle", "poi-label"]) {
+            if (this.map.getLayer(layerId)) {
+                this.map.setLayoutProperty(layerId, "visibility", value);
+            }
+        }
+    }
+
     private handleVehicleVisibilityChange() {
         if (this.props.showVehicles) {
             this.startVehicleAnimation();
@@ -1132,24 +1179,24 @@ export default class Map extends React.Component<MapProps, MapState> {
     private updateVehicles() {
         if (!this.vehicleRenderer) return;
 
-        this.vehicleRenderer.setTrackedTripId(this.state.trackedTripId);
+        this.vehicleRenderer.setTrackedTripId(this.props.trackedTripId ?? null);
         this.vehicleRenderer.setDebugOptions(this.props.debugOptions);
         this.vehicleRenderer.updatePositions(this.props.vehicles, ANIMATION_INTERVAL);
     }
 
-    private handleTrackingChange(prevTrackedTripId: string | null) {
-        if (prevTrackedTripId && !this.state.trackedTripId) {
-            // Stopped tracking
+    private handleCameraFollowChange(prevCameraFollowTripId: string | null) {
+        const newCameraFollowTripId = this.props.cameraFollowTripId ?? null;
+        if (prevCameraFollowTripId && !newCameraFollowTripId) {
+            // Stopped camera follow
             this.vehicleTracker?.stopTracking();
-            this.setState({ trackingInfo: null });
-        } else if (this.state.trackedTripId && this.vehicleTracker) {
-            // Started tracking
-            this.vehicleTracker.startTracking(this.state.trackedTripId);
+        } else if (newCameraFollowTripId && this.vehicleTracker) {
+            // Started camera follow
+            this.vehicleTracker.startTracking(newCameraFollowTripId);
         }
     }
 
     render() {
-        const { trackingInfo, contextMenu, bearing, scaleWidth, scaleLabel, attributionExpanded } = this.state;
+        const { contextMenu, bearing, scaleWidth, scaleLabel, attributionExpanded } = this.state;
 
         return (
             <div className="relative w-full h-full bg-black">
@@ -1247,36 +1294,6 @@ export default class Map extends React.Component<MapProps, MapState> {
                     </Button>
                 </div>
 
-                {trackingInfo && (
-                    <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-[calc(100%+50px)] pointer-events-none">
-                        <div className="bg-popover text-popover-foreground px-4 py-3 rounded-lg shadow-lg text-sm min-w-48 border">
-                            <div className="font-bold text-base mb-1">
-                                {trackingInfo.lineNumber} → {trackingInfo.destination}
-                            </div>
-                            {trackingInfo.nextStopName && (
-                                <div className="text-muted-foreground">
-                                    <span className="font-medium">Next:</span> {trackingInfo.nextStopName}
-                                </div>
-                            )}
-                            <div className="flex items-center gap-2 mt-2">
-                                <div className="flex-1 h-2 bg-secondary rounded-full overflow-hidden">
-                                    <div
-                                        className="h-full transition-all duration-300"
-                                        style={{
-                                            width: `${Math.round(trackingInfo.progress * 100)}%`,
-                                            backgroundColor: trackingInfo.color,
-                                        }}
-                                    />
-                                </div>
-                                {trackingInfo.secondsToNextStop !== null && (
-                                    <span className="text-xs text-muted-foreground font-mono tabular-nums">
-                                        {`${Math.floor(trackingInfo.secondsToNextStop / 60)}m ${String(trackingInfo.secondsToNextStop % 60).padStart(2, "0")}s`}
-                                    </span>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                )}
                 {contextMenu && (
                     <div
                         className="absolute z-50 bg-popover border rounded-md shadow-md py-1 min-w-40"

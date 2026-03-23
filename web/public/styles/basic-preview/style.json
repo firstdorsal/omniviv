@@ -210,6 +210,44 @@
             }
         },
         {
+            "id": "poi-circle",
+            "type": "circle",
+            "source": "openmaptiles",
+            "source-layer": "poi",
+            "minzoom": 15,
+            "layout": {
+                "visibility": "none"
+            },
+            "paint": {
+                "circle-radius": 3,
+                "circle-color": "#7c3aed",
+                "circle-stroke-width": 1,
+                "circle-stroke-color": "#ffffff"
+            }
+        },
+        {
+            "id": "poi-label",
+            "type": "symbol",
+            "source": "openmaptiles",
+            "source-layer": "poi",
+            "minzoom": 16,
+            "layout": {
+                "visibility": "none",
+                "text-field": "{name}",
+                "text-font": ["Open Sans Regular"],
+                "text-size": 11,
+                "text-offset": [0, 1.2],
+                "text-anchor": "top",
+                "text-max-width": 8,
+                "text-optional": true
+            },
+            "paint": {
+                "text-color": "#5b21b6",
+                "text-halo-color": "#ffffff",
+                "text-halo-width": 1.5
+            }
+        },
+        {
             "id": "place-village",
             "type": "symbol",
             "source": "openmaptiles",

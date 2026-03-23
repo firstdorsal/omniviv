@@ -6,26 +6,36 @@ import { getApiClient } from "./apiClient";
 import { DeparturesPanel, type PinnedStop } from "./components/DeparturesPanel";
 import { FeaturesPanel } from "./components/FeaturesPanel";
 import { OsmIssuesPanel, type MappingMapData } from "./components/IssuesPanel";
+import { LineBadge } from "./components/LineBadge";
 import { NavigationPanel, type Location, type PickMode } from "./components/NavigationPanel";
 import { TimeControlPanel } from "./components/TimeControlPanel";
 import { VehicleMonitorPanel } from "./components/VehicleMonitorPanel";
+import { VehicleTrackingPanel } from "./components/VehicleTrackingPanel";
 import Map from "./components/map/Map";
 import { Button } from "./components/ui/button";
 import { Checkbox } from "./components/ui/checkbox";
 import { Slider } from "./components/ui/slider";
 import type { DebugOptions } from "./components/vehicles/VehicleRenderer";
+import {
+    createTrackedVehicle,
+    findVehicleInRoutes,
+    loadPersistedVehicles,
+    savePersistedVehicles,
+    transitionTrip,
+    type TrackedVehicle,
+} from "./components/vehicles/TrackedVehicle";
 import { useRendezvous } from "./hooks/useRendezvous";
 import { useTimeSimulation } from "./hooks/useTimeSimulation";
 import { useVehicleUpdates, type RouteVehicles } from "./hooks/useVehicleUpdates";
 
-type SidebarPanel = "navigation" | "layers" | "features" | "debug" | "issues" | "time" | `departures:${string}` | null;
+type SidebarPanel = "navigation" | "layers" | "features" | "debug" | "issues" | "time" | `departures:${string}` | `vehicle:${string}` | null;
 
 const VALID_PANELS = new Set(["navigation", "layers", "features", "debug", "issues", "time"]);
 
 function getInitialPanel(): SidebarPanel {
     const params = new URLSearchParams(window.location.search);
     const panel = params.get("panel");
-    if (panel && (VALID_PANELS.has(panel) || panel.startsWith("departures:"))) return panel as SidebarPanel;
+    if (panel && (VALID_PANELS.has(panel) || panel.startsWith("departures:") || panel.startsWith("vehicle:"))) return panel as SidebarPanel;
     return null;
 }
 
@@ -89,6 +99,7 @@ interface PersistedOptions {
     showPlatforms: boolean;
     showRoutes: boolean;
     showVehicles: boolean;
+    showPois: boolean;
     debugOptions: DebugOptions;
     rendezvousEnabled: boolean;
 }
@@ -100,6 +111,7 @@ const DEFAULT_OPTIONS: PersistedOptions = {
     showPlatforms: false,
     showRoutes: true,
     showVehicles: true,
+    showPois: false,
     debugOptions: {
         show3DModels: true,
         model3DMinZoom: 15,
@@ -151,6 +163,8 @@ export default function App() {
         } catch { /* ignore */ }
         return [];
     });
+    const [trackedVehicles, setTrackedVehicles] = useState<TrackedVehicle[]>(loadPersistedVehicles);
+    const [cameraFollowTripId, setCameraFollowTripId] = useState<string | null>(null);
     const [panelWidth, setPanelWidth] = useState(() => {
         try {
             const stored = localStorage.getItem("panel-width");
@@ -159,10 +173,13 @@ export default function App() {
         return 320;
     });
 
-    // Persist pinned stops and panel width
+    // Persist pinned stops, tracked vehicles, and panel width
     useEffect(() => {
         localStorage.setItem("pinned-stops", JSON.stringify(pinnedStops));
     }, [pinnedStops]);
+    useEffect(() => {
+        savePersistedVehicles(trackedVehicles);
+    }, [trackedVehicles]);
     useEffect(() => {
         localStorage.setItem("panel-width", String(panelWidth));
     }, [panelWidth]);
@@ -235,6 +252,7 @@ export default function App() {
         showPlatforms,
         showRoutes,
         showVehicles,
+        showPois,
         debugOptions,
         rendezvousEnabled
     } = options;
@@ -343,6 +361,166 @@ export default function App() {
         mapRef.current?.flyTo(lat, lon);
     }, []);
 
+    // Route colors and types for departure tables (line number → color / type)
+    const routeColors = useMemo(() => {
+        const map = new globalThis.Map<string, string>();
+        for (const route of routes) {
+            if (route.ref && route.color) map.set(route.ref, route.color);
+        }
+        return map;
+    }, [routes]);
+
+    const routeTypes = useMemo(() => {
+        const map = new globalThis.Map<string, string>();
+        for (const route of routes) {
+            if (route.ref && route.route_type) map.set(route.ref, route.route_type);
+        }
+        return map;
+    }, [routes]);
+
+    // Derive the active tracked trip ID for Map highlight
+    const activeTrackedTripId = useMemo(() => {
+        if (!activePanel?.startsWith("vehicle:")) return null;
+        const entityId = activePanel.slice("vehicle:".length);
+        const entity = trackedVehicles.find((v) => v.id === entityId);
+        return entity?.currentTripId ?? null;
+    }, [activePanel, trackedVehicles]);
+
+    // Vehicle click from map: open sidebar panel + auto-follow
+    const handleVehicleClick = useCallback((tripId: string, lineNumber: string, destination: string, routeId: number) => {
+        // Check if this vehicle is already tracked
+        const existing = trackedVehicles.find((v) => v.currentTripId === tripId);
+        if (existing) {
+            // Toggle: if panel is already showing this vehicle, close it
+            const panelId: SidebarPanel = `vehicle:${existing.id}`;
+            setActivePanel((current) => {
+                if (current === panelId) {
+                    setCameraFollowTripId(null);
+                    return null;
+                }
+                setCameraFollowTripId(tripId);
+                return panelId;
+            });
+            return;
+        }
+
+        // Find the full vehicle data
+        const liveData = findVehicleInRoutes(tripId, vehicles);
+        const color = routeColors.get(lineNumber) ?? "#3b82f6";
+        const stops = liveData?.vehicle.stops ?? [];
+        const origin = liveData?.vehicle.origin ?? null;
+
+        const entity = createTrackedVehicle(tripId, lineNumber, destination, origin, color, routeId, stops);
+        setTrackedVehicles((prev) => [...prev, entity]);
+        setActivePanel(`vehicle:${entity.id}`);
+        setCameraFollowTripId(tripId);
+    }, [trackedVehicles, vehicles, routeColors]);
+
+    // Pin a vehicle to the sidebar
+    const handlePinVehicle = useCallback((entityId: string) => {
+        setTrackedVehicles((prev) =>
+            prev.map((v) => v.id === entityId ? { ...v, pinned: true } : v)
+        );
+    }, []);
+
+    // Unpin and remove a vehicle from the sidebar
+    const handleUnpinVehicle = useCallback((entityId: string) => {
+        setTrackedVehicles((prev) => prev.filter((v) => v.id !== entityId));
+        setActivePanel((current) => current === `vehicle:${entityId}` ? null : current);
+        setCameraFollowTripId((current) => {
+            const entity = trackedVehicles.find((v) => v.id === entityId);
+            if (entity && current === entity.currentTripId) return null;
+            return current;
+        });
+    }, [trackedVehicles]);
+
+    // Toggle camera follow for a vehicle
+    const handleToggleCameraFollow = useCallback((tripId: string) => {
+        setCameraFollowTripId((current) => current === tripId ? null : tripId);
+    }, []);
+
+    // Handle trip transition (loop continuation)
+    const handleTrackedTripChanged = useCallback((oldTripId: string, newTripId: string) => {
+        setTrackedVehicles((prev) =>
+            prev.map((v) => {
+                if (v.currentTripId !== oldTripId) return v;
+                const newVehicleData = findVehicleInRoutes(newTripId, vehicles);
+                return transitionTrip(v, newTripId, newVehicleData?.vehicle ?? null);
+            })
+        );
+        setCameraFollowTripId((current) => current === oldTripId ? newTripId : current);
+    }, [vehicles]);
+
+    // Handle vehicle lost (disappeared from data)
+    const handleTrackedVehicleLost = useCallback((tripId: string) => {
+        setTrackedVehicles((prev) =>
+            prev.map((v) => {
+                if (v.currentTripId !== tripId) return v;
+                if (v.pinned) return { ...v, status: "lost" as const };
+                return v; // Will be cleaned up by deselect
+            }).filter((v) => {
+                // Remove unpinned lost vehicles
+                if (v.currentTripId === tripId && !v.pinned) return false;
+                return true;
+            })
+        );
+        setCameraFollowTripId((current) => current === tripId ? null : current);
+        setActivePanel((current) => {
+            if (!current?.startsWith("vehicle:")) return current;
+            const entityId = current.slice("vehicle:".length);
+            const entity = trackedVehicles.find((v) => v.id === entityId);
+            if (entity?.currentTripId === tripId && !entity.pinned) return null;
+            return current;
+        });
+    }, [trackedVehicles]);
+
+    // Handle vehicle deselect (click on empty map)
+    const handleVehicleDeselect = useCallback(() => {
+        if (!activePanel?.startsWith("vehicle:")) return;
+        const entityId = activePanel.slice("vehicle:".length);
+        const entity = trackedVehicles.find((v) => v.id === entityId);
+
+        if (entity && !entity.pinned) {
+            // Remove unpinned vehicle
+            setTrackedVehicles((prev) => prev.filter((v) => v.id !== entityId));
+        }
+        setActivePanel(null);
+        setCameraFollowTripId(null);
+    }, [activePanel, trackedVehicles]);
+
+    // Handle camera follow stop (user dragged away in tracking mode)
+    const handleCameraFollowStop = useCallback(() => {
+        setCameraFollowTripId(null);
+    }, []);
+
+    // Update tracked vehicle status when vehicles data changes
+    useEffect(() => {
+        setTrackedVehicles((prev) => {
+            let changed = false;
+            const updated = prev.map((entity) => {
+                if (entity.status === "lost") {
+                    // Check if vehicle reappeared
+                    const liveData = findVehicleInRoutes(entity.currentTripId, vehicles);
+                    if (liveData) {
+                        changed = true;
+                        return { ...entity, status: "active" as const, lastKnownStops: liveData.vehicle.stops };
+                    }
+                } else if (entity.status === "active") {
+                    // Update cached stops from live data
+                    const liveData = findVehicleInRoutes(entity.currentTripId, vehicles);
+                    if (liveData && liveData.vehicle.stops.length > 0) {
+                        if (liveData.vehicle.stops !== entity.lastKnownStops) {
+                            changed = true;
+                            return { ...entity, lastKnownStops: liveData.vehicle.stops };
+                        }
+                    }
+                }
+                return entity;
+            });
+            return changed ? updated : prev;
+        });
+    }, [vehicles]);
+
     // Fetch OSM issues count
     useEffect(() => {
         const fetchIssuesCount = async () => {
@@ -441,23 +619,6 @@ export default function App() {
     // Get route IDs for WebSocket subscription
     const routeIds = useMemo(() => routes.map((r) => r.osm_id), [routes]);
 
-    // Route colors and types for departure tables (line number → color / type)
-    const routeColors = useMemo(() => {
-        const map = new globalThis.Map<string, string>();
-        for (const route of routes) {
-            if (route.ref && route.color) map.set(route.ref, route.color);
-        }
-        return map;
-    }, [routes]);
-
-    const routeTypes = useMemo(() => {
-        const map = new globalThis.Map<string, string>();
-        for (const route of routes) {
-            if (route.ref && route.route_type) map.set(route.ref, route.route_type);
-        }
-        return map;
-    }, [routes]);
-
     // Compute reference time for simulated time (only when not in real-time mode)
     const referenceTimeISO = useMemo(() => {
         if (timeSimulation.isRealTime) return undefined;
@@ -530,6 +691,31 @@ export default function App() {
                                 aria-label={stop.displayName}
                             >
                                 <span className="text-[10px] font-bold leading-none">{stop.displayName.replace(/^Steig\s*/i, "")}</span>
+                            </Button>
+                        );
+                    })}
+
+                    {/* Separator + pinned vehicle buttons */}
+                    {trackedVehicles.some((v) => v.pinned) && <div className="mx-2 border-t border-border" />}
+                    {trackedVehicles.filter((v) => v.pinned).map((vehicle) => {
+                        const panelId: SidebarPanel = `vehicle:${vehicle.id}`;
+                        return (
+                            <Button
+                                key={vehicle.id}
+                                variant={activePanel === panelId ? "default" : "ghost"}
+                                size="icon"
+                                onClick={() => togglePanel(panelId)}
+                                className={`m-2 ${vehicle.status === "lost" ? "opacity-50" : ""}`}
+                                title={`Linie ${vehicle.lineNumber} → ${vehicle.destination}`}
+                                aria-label={`Linie ${vehicle.lineNumber}`}
+                            >
+                                <LineBadge
+                                    line={vehicle.lineNumber}
+                                    color={routeColors.get(vehicle.lineNumber) ?? vehicle.color}
+                                    mode={routeTypes.get(vehicle.lineNumber)}
+                                    variant="text"
+                                    className="text-[10px]"
+                                />
                             </Button>
                         );
                     })}
@@ -683,6 +869,19 @@ export default function App() {
                                         />
                                         <span className="text-sm">
                                             Linien ({routes.length})
+                                        </span>
+                                    </label>
+
+                                    <label className="flex cursor-pointer items-center gap-3">
+                                        <Checkbox
+                                            checked={showPois}
+                                            onCheckedChange={(checked) =>
+                                                updateOption("showPois", checked === true)
+                                            }
+                                        />
+                                        <span className="text-sm flex items-center gap-2">
+                                            POIs
+                                            <span className="inline-block h-2 w-2 rounded-full bg-violet-600" />
                                         </span>
                                     </label>
 
@@ -856,6 +1055,25 @@ export default function App() {
                             );
                         })()}
 
+                        {activePanel?.startsWith("vehicle:") && (() => {
+                            const entityId = activePanel.slice("vehicle:".length);
+                            const entity = trackedVehicles.find((v) => v.id === entityId);
+                            if (!entity) return null;
+                            return (
+                                <VehicleTrackingPanel
+                                    vehicle={entity}
+                                    vehicles={vehicles}
+                                    routeColors={routeColors}
+                                    routeTypes={routeTypes}
+                                    currentTime={timeSimulation.currentTime}
+                                    cameraFollowing={cameraFollowTripId === entity.currentTripId}
+                                    onPin={handlePinVehicle}
+                                    onUnpin={handleUnpinVehicle}
+                                    onToggleCameraFollow={handleToggleCameraFollow}
+                                />
+                            );
+                        })()}
+
                         {activePanel === "time" && (
                             <TimeControlPanel timeSimulation={timeSimulation} />
                         )}
@@ -883,6 +1101,7 @@ export default function App() {
                     showPlatforms={showPlatforms}
                     showRoutes={showRoutes}
                     showVehicles={showVehicles}
+                    showPois={showPois}
                     debugOptions={debugOptions}
                     simulatedTime={timeSimulation.currentTime}
                     isRealTime={timeSimulation.isRealTime}
@@ -899,6 +1118,13 @@ export default function App() {
                     mappingLines={activePanel === "issues" ? mappingMapData.lines : []}
                     mappingGtfsStops={activePanel === "issues" ? mappingMapData.gtfsStops : []}
                     onPinStop={handlePinStop}
+                    trackedTripId={activeTrackedTripId}
+                    cameraFollowTripId={cameraFollowTripId}
+                    onVehicleClick={handleVehicleClick}
+                    onVehicleDeselect={handleVehicleDeselect}
+                    onCameraFollowStop={handleCameraFollowStop}
+                    onTrackedTripChanged={handleTrackedTripChanged}
+                    onTrackedVehicleLost={handleTrackedVehicleLost}
                 />
             </div>
         </div>
