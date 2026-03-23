@@ -116,6 +116,114 @@ async fn load_osm_route_sets(
     Ok((route_sets, directional_routes))
 }
 
+/// Load OSM route destination names per IFOPT.
+/// Extracts the destination from OSM route names like "Straßenbahn 1: Göggingen => Lechhausen"
+/// → destination "Lechhausen" for the IFOPT on this route.
+/// Returns IFOPT → set of normalized destination keywords.
+async fn load_osm_destinations(
+    pool: &PgPool,
+) -> Result<HashMap<String, HashSet<String>>, GtfsError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT
+            COALESCE(p.ref_ifopt, sp.ref_ifopt) AS ifopt,
+            r.name AS route_name
+        FROM route_stops rs
+        JOIN routes r ON r.osm_id = rs.route_id
+        LEFT JOIN platforms p ON p.osm_id = rs.platform_id
+        LEFT JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+        WHERE r.name IS NOT NULL
+        AND (p.ref_ifopt IS NOT NULL OR sp.ref_ifopt IS NOT NULL)
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut result: HashMap<String, HashSet<String>> = HashMap::new();
+    for (ifopt, route_name) in rows {
+        // Parse "Straßenbahn 1: Göggingen => Lechhausen Neuer Ostfriedhof"
+        // The part after "=>" is the destination
+        if let Some(arrow_pos) = route_name.find("=>") {
+            let dest = route_name[arrow_pos + 2..].trim();
+            // Normalize: extract significant words, lowercase
+            for word in dest.split_whitespace() {
+                let normalized = word.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
+                if normalized.len() >= 3 {
+                    result.entry(ifopt.clone()).or_default().insert(normalized);
+                }
+            }
+        }
+    }
+
+    info!(
+        ifopts_with_destinations = result.len(),
+        "Loaded OSM route destinations for direction matching"
+    );
+    Ok(result)
+}
+
+/// Load the dominant last-stop names per GTFS stop + line.
+/// For each GTFS stop, finds what the last stop of most trips is (per route),
+/// giving us the direction the vehicle is heading.
+/// Returns gtfs_stop_id → set of normalized last-stop keywords.
+async fn load_gtfs_directions(
+    pool: &PgPool,
+    stop_ids: &[&str],
+) -> Result<HashMap<String, HashSet<String>>, GtfsError> {
+    if stop_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut result: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for chunk in stop_ids.chunks(500) {
+        let chunk_vec: Vec<&str> = chunk.to_vec();
+        // For each stop, find the last stop name of each trip visiting it (grouped by route)
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            r#"
+            WITH trip_last_stops AS (
+                SELECT st.stop_id, r.route_short_name,
+                    (SELECT gs.stop_name FROM gtfs_stop_times lst
+                     JOIN gtfs_stops gs ON lst.stop_id = gs.stop_id
+                     WHERE lst.trip_id = t.trip_id
+                     ORDER BY lst.stop_sequence DESC LIMIT 1) as last_stop
+                FROM gtfs_stop_times st
+                JOIN gtfs_trips t ON st.trip_id = t.trip_id
+                JOIN gtfs_routes r ON t.route_id = r.route_id
+                WHERE st.stop_id = ANY($1::text[])
+                  AND r.route_short_name ~ '^\d+$'
+            )
+            SELECT stop_id, last_stop, COUNT(*) as trips
+            FROM trip_last_stops
+            WHERE last_stop IS NOT NULL
+            GROUP BY stop_id, last_stop
+            HAVING COUNT(*) > 5
+            "#,
+        )
+        .bind(&chunk_vec)
+        .fetch_all(pool)
+        .await?;
+
+        for (stop_id, last_stop, _trips) in rows {
+            // Normalize: extract significant words, lowercase
+            for word in last_stop.split_whitespace() {
+                let normalized = word.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
+                if normalized.len() >= 3 {
+                    result.entry(stop_id.clone()).or_default().insert(normalized);
+                }
+            }
+        }
+    }
+
+    info!(
+        gtfs_stops_with_directions = result.len(),
+        "Loaded GTFS trip directions for matching"
+    );
+    Ok(result)
+}
+
 /// Batch-load GTFS trip sets for given stop IDs.
 /// Returns stop_id → set of trip_ids that visit that stop.
 async fn load_gtfs_trip_sets(
@@ -339,6 +447,25 @@ pub struct GtfsSchedule {
 }
 
 impl GtfsSchedule {
+    /// Create an empty schedule, optionally carrying IFOPT↔GTFS mappings.
+    pub fn empty_with_mappings(
+        ifopt_to_gtfs: HashMap<String, Vec<String>>,
+        gtfs_to_ifopt: HashMap<String, Vec<String>>,
+    ) -> Self {
+        Self {
+            stops: HashMap::new(),
+            routes: HashMap::new(),
+            trips: HashMap::new(),
+            stop_times: HashMap::new(),
+            calendars: HashMap::new(),
+            calendar_dates: HashMap::new(),
+            trips_by_stop: HashMap::new(),
+            ifopt_to_gtfs,
+            gtfs_to_ifopt,
+            loaded_at: chrono::Utc::now(),
+        }
+    }
+
     /// Check if a service is active on the given date.
     pub fn is_service_active(&self, service_id: &str, date: NaiveDate) -> bool {
         // Check calendar_dates exceptions first (they override regular calendar)
@@ -637,8 +764,25 @@ impl GtfsSchedule {
                     .fold(f64::MAX, f64::min);
                 let max_fallback = (nearest_distance * 3.0).max(100.0).min(200.0);
 
-                // Sort by: trip overlap sum → distance → shared_routes
+                // Specificity: prefer GTFS stops whose route set closely matches
+                // the OSM platform's routes (fewer extra lines = better match).
+                let specificity_for = |c: &MatchCandidate| -> f64 {
+                    let gtfs_routes = gtfs_route_sets
+                        .get(&c.gtfs_stop_id)
+                        .map(|s| s.len())
+                        .unwrap_or(1)
+                        .max(1);
+                    c.shared_routes.len() as f64 / gtfs_routes as f64
+                };
+
+                // Sort by: specificity → trip overlap sum → distance → shared_routes
                 definitive_candidates.sort_by(|a, b| {
+                    let a_spec = specificity_for(a);
+                    let b_spec = specificity_for(b);
+                    let spec_cmp = b_spec
+                        .partial_cmp(&a_spec)
+                        .unwrap_or(std::cmp::Ordering::Equal);
+
                     let trip_cmp = if peer_gtfs_ids.is_empty() {
                         std::cmp::Ordering::Equal
                     } else {
@@ -679,7 +823,8 @@ impl GtfsSchedule {
                             .sum();
                         b_overlap.cmp(&a_overlap)
                     };
-                    trip_cmp
+                    spec_cmp
+                        .then(trip_cmp)
                         .then_with(|| {
                             a.distance_meters
                                 .partial_cmp(&b.distance_meters)
@@ -1446,12 +1591,14 @@ pub(crate) async fn build_ifopt_mapping_to_db(
 
     // Load OSM route sets (bulk, all IFOPTs) and directional route IDs
     let (osm_route_sets, osm_directional_routes) = load_osm_route_sets(pool).await?;
+    let osm_destinations = load_osm_destinations(pool).await?;
 
     let max_dist_deg = MAX_DISTANCE_METERS / 111_000.0;
     let max_dist_sq = max_dist_deg * max_dist_deg;
     let empty_route_set: HashSet<RouteIdentifier> = HashSet::new();
     let empty_osm_id_set: HashSet<i64> = HashSet::new();
     let empty_trip_set: HashSet<String> = HashSet::new();
+    let empty_string_set: HashSet<String> = HashSet::new();
 
     // Proximity pre-filter: collect all GTFS stop IDs within range of any OSM stop
     let mut proximity_gtfs_ids: HashSet<&str> = HashSet::new();
@@ -1478,6 +1625,9 @@ pub(crate) async fn build_ifopt_mapping_to_db(
 
     // Load GTFS trip sets for direction-aware matching via trip overlap
     let gtfs_trip_sets = load_gtfs_trip_sets(pool, &proximity_gtfs_vec).await?;
+
+    // Load GTFS direction info (last stop names) for direction-based matching
+    let gtfs_directions = load_gtfs_directions(pool, &proximity_gtfs_vec).await?;
 
     // Build reverse index: OSM route osm_id → IFOPTs on that route
     let mut osm_route_to_ifopts: HashMap<i64, Vec<String>> = HashMap::new();
@@ -1623,15 +1773,25 @@ pub(crate) async fn build_ifopt_mapping_to_db(
             break;
         }
 
-        // Sort: most peers first (direction-seeded platforms go first), then distance
+        // Sort: fewest unclaimed definitive candidates first (most constrained
+        // platforms get priority to avoid being blocked), then most peers
+        // (direction-seeded platforms go next), then distance.
         to_process.sort_by(|a, b| {
+            let a_unclaimed = a.candidates.iter()
+                .filter(|c| c.is_definitive && !claimed_gtfs.contains(&c.gtfs_stop_id))
+                .count();
+            let b_unclaimed = b.candidates.iter()
+                .filter(|c| c.is_definitive && !claimed_gtfs.contains(&c.gtfs_stop_id))
+                .count();
             let a_peers = peer_count_for(&a.ifopt, &mapping_results);
             let b_peers = peer_count_for(&b.ifopt, &mapping_results);
-            b_peers.cmp(&a_peers).then_with(|| {
-                a.best_distance
-                    .partial_cmp(&b.best_distance)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            a_unclaimed.cmp(&b_unclaimed)
+                .then_with(|| b_peers.cmp(&a_peers))
+                .then_with(|| {
+                    a.best_distance
+                        .partial_cmp(&b.best_distance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
         });
 
         let entry = to_process.remove(0);
@@ -1666,8 +1826,47 @@ pub(crate) async fn build_ifopt_mapping_to_db(
                 .fold(f64::MAX, f64::min);
             let max_fallback = (nearest_distance * 3.0).max(100.0).min(200.0);
 
-            // Sort by: trip overlap sum (primary when peers exist) → distance → shared_routes.
+            // Direction overlap: how many destination keywords from the OSM route
+            // name match the GTFS stop's last-stop keywords. This is the strongest
+            // signal for matching platforms at stations like Königsplatz where all
+            // GTFS stops share the same name but serve different directions.
+            let osm_dest = osm_destinations
+                .get(&entry.ifopt)
+                .unwrap_or(&empty_string_set);
+            let direction_score_for = |c: &MatchCandidate| -> usize {
+                if osm_dest.is_empty() {
+                    return 0;
+                }
+                let gtfs_dir = gtfs_directions
+                    .get(&c.gtfs_stop_id)
+                    .unwrap_or(&empty_string_set);
+                osm_dest.intersection(gtfs_dir).count()
+            };
+
+            // Specificity: prefer GTFS stops whose route set closely matches
+            // the OSM platform's routes.
+            let specificity_for = |c: &MatchCandidate| -> f64 {
+                let gtfs_routes = gtfs_route_sets
+                    .get(&c.gtfs_stop_id)
+                    .map(|s| s.len())
+                    .unwrap_or(1)
+                    .max(1);
+                c.shared_routes.len() as f64 / gtfs_routes as f64
+            };
+
+            // Sort by: direction match (primary) → specificity → trip overlap
+            // (when peers exist) → distance → shared_routes count.
             definitive_candidates.sort_by(|a, b| {
+                let a_dir = direction_score_for(a);
+                let b_dir = direction_score_for(b);
+                let dir_cmp = b_dir.cmp(&a_dir);
+
+                let a_spec = specificity_for(a);
+                let b_spec = specificity_for(b);
+                let spec_cmp = b_spec
+                    .partial_cmp(&a_spec)
+                    .unwrap_or(std::cmp::Ordering::Equal);
+
                 let trip_cmp = if peer_gtfs_ids.is_empty() {
                     std::cmp::Ordering::Equal
                 } else {
@@ -1705,7 +1904,9 @@ pub(crate) async fn build_ifopt_mapping_to_db(
                         .sum();
                     b_overlap.cmp(&a_overlap)
                 };
-                trip_cmp
+                dir_cmp
+                    .then(spec_cmp)
+                    .then(trip_cmp)
                     .then_with(|| {
                         a.distance_meters
                             .partial_cmp(&b.distance_meters)
@@ -1855,6 +2056,130 @@ pub(crate) async fn build_ifopt_mapping_to_db(
     })
 }
 
+/// Validate IFOPT-to-GTFS mappings against known-correct assignments.
+/// Logs warnings for any mismatches. This runs after every mapping rebuild
+/// to catch regressions in the matching algorithm.
+///
+/// Expected mappings are based on official AVV platform assignments and verified
+/// GTFS stop directions. New stations can be added to the `expected` list.
+pub async fn validate_mappings(pool: &PgPool) {
+    // Each entry: (IFOPT, expected primary tram line, expected direction keyword)
+    // The GTFS stop must serve the expected line AND have trips ending at stops
+    // whose names contain the direction keyword.
+    let expected: Vec<(&str, &str, &str)> = vec![
+        // Königsplatz (official AVV platform assignments)
+        ("de:09761:101:31:A1", "1", "lechhausen"),
+        ("de:09761:101:31:A2", "1", "göggingen"),
+        ("de:09761:101:31:A3", "4", "oberhausen"),
+        ("de:09761:101:31:A4", "4", "hauptbahnhof"),
+        ("de:09761:101:41:B1", "2", "haunstetten"),
+        ("de:09761:101:41:B2", "2", "augsburg"),  // "Augsburg West P+R"
+        ("de:09761:101:51:C1", "6", "stadtbergen"),
+        ("de:09761:101:51:C2", "6", "friedberg"),
+        ("de:09761:101:51:C3", "3", "hauptbahnhof"),
+        ("de:09761:101:51:C4", "3", "inninger"),  // "Inninger Straße P+R"
+        // Kulturstraße (single GTFS stop for both directions, direction filtering in API)
+        ("de:09761:691:0:a", "1", "lechhausen"),
+        ("de:09761:691:0:e", "1", "göggingen"),
+        // Maria Stern
+        ("de:09761:715:31:A", "1", "göggingen"),
+        ("de:09761:715:31:B", "1", "lechhausen"),
+    ];
+
+    let mut failures = 0;
+    let mut checked = 0;
+
+    for (ifopt, expected_line, expected_direction) in &expected {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT gtfs_stop_id FROM ifopt_gtfs_mapping WHERE ifopt = $1",
+        )
+        .bind(ifopt)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+        let Some((gtfs_id,)) = row else {
+            tracing::warn!(
+                ifopt,
+                expected_line,
+                expected_direction,
+                "Mapping validation FAILED: IFOPT not mapped"
+            );
+            failures += 1;
+            continue;
+        };
+
+        // Check: does this GTFS stop serve the expected line?
+        let has_line: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT COUNT(DISTINCT t.trip_id)
+            FROM gtfs_stop_times st
+            JOIN gtfs_trips t ON st.trip_id = t.trip_id
+            JOIN gtfs_routes r ON t.route_id = r.route_id
+            WHERE st.stop_id = $1 AND r.route_short_name = $2
+            "#,
+        )
+        .bind(&gtfs_id)
+        .bind(expected_line)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+        let line_ok = has_line.map(|(c,)| c > 0).unwrap_or(false);
+
+        // Check: do trips at this stop end at a destination matching the keyword?
+        let has_direction: Option<(i64,)> = sqlx::query_as(
+            r#"
+            WITH last_stops AS (
+                SELECT DISTINCT
+                    (SELECT gs.stop_name FROM gtfs_stop_times lst
+                     JOIN gtfs_stops gs ON lst.stop_id = gs.stop_id
+                     WHERE lst.trip_id = t.trip_id
+                     ORDER BY lst.stop_sequence DESC LIMIT 1) as last_stop
+                FROM gtfs_stop_times st
+                JOIN gtfs_trips t ON st.trip_id = t.trip_id
+                JOIN gtfs_routes r ON t.route_id = r.route_id
+                WHERE st.stop_id = $1 AND r.route_short_name = $2
+                LIMIT 100
+            )
+            SELECT COUNT(*) FROM last_stops WHERE LOWER(last_stop) LIKE '%' || $3 || '%'
+            "#,
+        )
+        .bind(&gtfs_id)
+        .bind(expected_line)
+        .bind(expected_direction)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+        let dir_ok = has_direction.map(|(c,)| c > 0).unwrap_or(false);
+
+        checked += 1;
+        if !line_ok || !dir_ok {
+            tracing::warn!(
+                ifopt,
+                gtfs_stop_id = %gtfs_id,
+                expected_line,
+                expected_direction,
+                line_ok,
+                dir_ok,
+                "Mapping validation FAILED: wrong GTFS stop assigned"
+            );
+            failures += 1;
+        }
+    }
+
+    if failures == 0 {
+        tracing::info!(checked, "Mapping validation passed: all expected assignments correct");
+    } else {
+        tracing::error!(
+            failures,
+            checked,
+            "Mapping validation FAILED: some expected assignments are wrong"
+        );
+    }
+}
+
 /// Build a partial GtfsSchedule from PostgreSQL containing only data relevant
 /// to the given IFOPT stop IDs. Used by the realtime processing cycle to avoid
 /// holding the full schedule (~1GB) in memory.
@@ -1896,18 +2221,7 @@ pub async fn build_schedule_from_db(
     let gtfs_stop_ids: Vec<&str> = gtfs_to_ifopt.keys().map(|s| s.as_str()).collect();
     if gtfs_stop_ids.is_empty() {
         debug!("No GTFS mapping found for relevant stops, returning empty schedule");
-        return Ok(GtfsSchedule {
-            stops: HashMap::new(),
-            routes: HashMap::new(),
-            trips: HashMap::new(),
-            stop_times: HashMap::new(),
-            calendars: HashMap::new(),
-            calendar_dates: HashMap::new(),
-            trips_by_stop: HashMap::new(),
-            ifopt_to_gtfs,
-            gtfs_to_ifopt,
-            loaded_at: chrono::Utc::now(),
-        });
+        return Ok(GtfsSchedule::empty_with_mappings(ifopt_to_gtfs, gtfs_to_ifopt));
     }
 
     // 2. Get trip IDs that visit our monitored GTFS stops
@@ -1925,18 +2239,7 @@ pub async fn build_schedule_from_db(
     );
 
     if trip_ids.is_empty() {
-        return Ok(GtfsSchedule {
-            stops: HashMap::new(),
-            routes: HashMap::new(),
-            trips: HashMap::new(),
-            stop_times: HashMap::new(),
-            calendars: HashMap::new(),
-            calendar_dates: HashMap::new(),
-            trips_by_stop: HashMap::new(),
-            ifopt_to_gtfs,
-            gtfs_to_ifopt,
-            loaded_at: chrono::Utc::now(),
-        });
+        return Ok(GtfsSchedule::empty_with_mappings(ifopt_to_gtfs, gtfs_to_ifopt));
     }
 
     // 3. Load trip details
@@ -2137,18 +2440,7 @@ pub async fn build_schedule_from_db_by_gtfs_stop(
     let gtfs_id_list: Vec<&str> = gtfs_stop_ids.iter().map(|s| s.as_str()).collect();
 
     if gtfs_id_list.is_empty() {
-        return Ok(GtfsSchedule {
-            stops: HashMap::new(),
-            routes: HashMap::new(),
-            trips: HashMap::new(),
-            stop_times: HashMap::new(),
-            calendars: HashMap::new(),
-            calendar_dates: HashMap::new(),
-            trips_by_stop: HashMap::new(),
-            ifopt_to_gtfs: HashMap::new(),
-            gtfs_to_ifopt: HashMap::new(),
-            loaded_at: chrono::Utc::now(),
-        });
+        return Ok(GtfsSchedule::empty_with_mappings(HashMap::new(), HashMap::new()));
     }
 
     // 1. Get trip IDs that visit our GTFS stops
@@ -2160,18 +2452,7 @@ pub async fn build_schedule_from_db_by_gtfs_stop(
     .await?;
 
     if trip_ids.is_empty() {
-        return Ok(GtfsSchedule {
-            stops: HashMap::new(),
-            routes: HashMap::new(),
-            trips: HashMap::new(),
-            stop_times: HashMap::new(),
-            calendars: HashMap::new(),
-            calendar_dates: HashMap::new(),
-            trips_by_stop: HashMap::new(),
-            ifopt_to_gtfs: HashMap::new(),
-            gtfs_to_ifopt: HashMap::new(),
-            loaded_at: chrono::Utc::now(),
-        });
+        return Ok(GtfsSchedule::empty_with_mappings(HashMap::new(), HashMap::new()));
     }
 
     // 2. Load trip details
@@ -3433,9 +3714,9 @@ mod tests {
     }
 
     #[test]
-    fn test_prefers_closer_distance_over_more_shared_routes() {
-        // With distance-first sorting, a closer stop should be preferred over a farther
-        // stop even if the farther one shares more routes. This prevents cross-station theft.
+    fn test_prefers_specific_match_over_closer_distance() {
+        // A GTFS stop that exactly matches the OSM platform's routes (high specificity)
+        // should be preferred over a closer but less specific stop.
         let mut schedule = GtfsSchedule {
             stops: HashMap::new(),
             routes: HashMap::new(),
@@ -3524,8 +3805,8 @@ mod tests {
         assert_eq!(stats.matched, 1);
         assert_eq!(
             schedule.ifopt_to_gtfs.get("de:09761:100"),
-            Some(&vec!["gtfs_close".to_string()]),
-            "Should prefer the closer stop even if the farther one shares more routes"
+            Some(&vec!["gtfs_far".to_string()]),
+            "Should prefer the more specific GTFS stop (exact route match) over a closer but less specific one"
         );
     }
 
