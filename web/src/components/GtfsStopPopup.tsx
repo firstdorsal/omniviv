@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { type Departure } from "../api";
 import { getApiClient } from "../apiClient";
 import { DepartureTable } from "./DepartureTable";
@@ -11,15 +11,21 @@ interface GtfsStopPopupProps {
     ifopt: string | null;
     isAssigned: boolean;
     routeColors: globalThis.Map<string, string>;
+    routeTypes?: globalThis.Map<string, string>;
     referenceTime?: Date;
     onClose?: () => void;
 }
 
-export function GtfsStopPopup({ stopId, stopName, ifopt, isAssigned, routeColors, referenceTime, onClose }: GtfsStopPopupProps) {
+export function GtfsStopPopup({ stopId, stopName, ifopt, isAssigned, routeColors, routeTypes, referenceTime, onClose }: GtfsStopPopupProps) {
     const [events, setEvents] = useState<Departure[]>([]);
     const [loading, setLoading] = useState(true);
+    const abortRef = useRef<AbortController | null>(null);
 
     useEffect(() => {
+        abortRef.current?.abort();
+        const controller = new AbortController();
+        abortRef.current = controller;
+
         const refTime = referenceTime ? referenceTime.toISOString() : undefined;
 
         const fetchDepartures = ifopt
@@ -33,12 +39,20 @@ export function GtfsStopPopup({ stopId, stopName, ifopt, isAssigned, routeColors
               }).then((res) => res.data?.departures ?? []);
 
         fetchDepartures
-            .then((departures) => setEvents(departures))
-            .catch((err) => {
-                console.error("Failed to fetch departures:", err);
-                setEvents([]);
+            .then((departures) => {
+                if (!controller.signal.aborted) setEvents(departures);
             })
-            .finally(() => setLoading(false));
+            .catch((err) => {
+                if (!controller.signal.aborted) {
+                    console.error("Failed to fetch departures:", err);
+                    setEvents([]);
+                }
+            })
+            .finally(() => {
+                if (!controller.signal.aborted) setLoading(false);
+            });
+
+        return () => controller.abort();
     }, [stopId, ifopt, referenceTime]);
 
     return (
@@ -68,6 +82,7 @@ export function GtfsStopPopup({ stopId, stopName, ifopt, isAssigned, routeColors
                     <DepartureTable
                         events={events}
                         routeColors={routeColors}
+                        routeTypes={routeTypes}
                         referenceTime={referenceTime}
                     />
                 )}

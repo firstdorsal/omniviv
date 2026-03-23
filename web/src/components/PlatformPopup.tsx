@@ -1,5 +1,5 @@
 import { Pin, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { type Departure, type StationPlatform, type StationStopPosition } from "../api";
 import { getApiClient } from "../apiClient";
 import { DepartureTable } from "./DepartureTable";
@@ -9,6 +9,7 @@ interface PlatformPopupProps {
     platform: StationPlatform | StationStopPosition;
     stationName?: string;
     routeColors: globalThis.Map<string, string>;
+    routeTypes?: globalThis.Map<string, string>;
     /** When set, requests schedule-based departures for this simulated time */
     referenceTime?: Date;
     /** Callback to pin this platform to the sidebar departures panel */
@@ -17,10 +18,11 @@ interface PlatformPopupProps {
     onClose?: () => void;
 }
 
-export function PlatformPopup({ platform, stationName, routeColors, referenceTime, onPin, onClose }: PlatformPopupProps) {
+export function PlatformPopup({ platform, stationName, routeColors, routeTypes, referenceTime, onPin, onClose }: PlatformPopupProps) {
     const [events, setEvents] = useState<Departure[]>([]);
     const [loading, setLoading] = useState(true);
     const displayName = getPlatformDisplayName(platform);
+    const abortRef = useRef<AbortController | null>(null);
 
     useEffect(() => {
         if (!platform.ref_ifopt) {
@@ -28,21 +30,29 @@ export function PlatformPopup({ platform, stationName, routeColors, referenceTim
             return;
         }
 
+        abortRef.current?.abort();
+        const controller = new AbortController();
+        abortRef.current = controller;
+
         getApiClient().api
             .getDeparturesByStop({
                 stop_ifopt: platform.ref_ifopt,
                 reference_time: referenceTime ? referenceTime.toISOString() : undefined,
             })
             .then((res) => {
-                setEvents(res.data?.departures ?? []);
+                if (!controller.signal.aborted) setEvents(res.data?.departures ?? []);
             })
             .catch((err) => {
-                console.error("Failed to fetch departures:", err);
-                setEvents([]);
+                if (!controller.signal.aborted) {
+                    console.error("Failed to fetch departures:", err);
+                    setEvents([]);
+                }
             })
             .finally(() => {
-                setLoading(false);
+                if (!controller.signal.aborted) setLoading(false);
             });
+
+        return () => controller.abort();
     }, [platform.ref_ifopt, referenceTime]);
 
     return (
@@ -81,6 +91,7 @@ export function PlatformPopup({ platform, stationName, routeColors, referenceTim
                     <DepartureTable
                         events={events}
                         routeColors={routeColors}
+                        routeTypes={routeTypes}
                         referenceTime={referenceTime}
                     />
                 )}

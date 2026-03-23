@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { EventType, type Departure } from "../api";
 import { LineBadge } from "./LineBadge";
 import { LiveTime } from "./LiveTime";
@@ -130,6 +130,15 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
     const [visibleColumns, setVisibleColumns] = useState<TimeColumn[]>(["relative"]);
     const [hiddenLines, setHiddenLines] = useState<Set<string>>(new Set());
 
+    // Force periodic re-renders so relative times stay current in real-time mode.
+    // In simulated-time mode, re-renders are driven externally via referenceTime changes.
+    const [, setTick] = useState(0);
+    useEffect(() => {
+        if (referenceTime) return;
+        const interval = setInterval(() => setTick(t => t + 1), 15000);
+        return () => clearInterval(interval);
+    }, [referenceTime]);
+
     const allTripEvents = useMemo(() => buildTripEvents(events), [events]);
 
     const availableLines = useMemo(() => {
@@ -174,28 +183,20 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
         <div className="flex flex-col gap-2">
             {/* Line filter */}
             {availableLines.length > 1 && (
-                <div className="flex flex-wrap gap-1">
+                <div className="flex flex-wrap items-center gap-1">
                     {availableLines.map((line) => {
-                        const color = routeColors.get(line) || "#6b7280";
                         const isHidden = hiddenLines.has(line);
                         return (
                             <button
                                 key={line}
-                                className="inline-flex items-center rounded-md text-xs font-mono font-semibold px-1.5 py-0.5 border cursor-pointer select-none transition-all"
-                                style={isHidden ? {
-                                    borderColor: "var(--border)",
-                                    color: "var(--muted-foreground)",
-                                    backgroundColor: "transparent",
-                                    textDecoration: "line-through",
-                                    opacity: 0.5,
-                                } : {
-                                    borderColor: color,
-                                    backgroundColor: color,
-                                    color: "#fff",
-                                }}
+                                className={`cursor-pointer select-none transition-all inline-flex ${isHidden ? "opacity-30 line-through" : ""}`}
                                 onClick={() => toggleLine(line)}
                             >
-                                {line}
+                                <LineBadge
+                                    line={line}
+                                    color={routeColors.get(line)}
+                                    mode={routeTypes?.get(line)}
+                                />
                             </button>
                         );
                     })}
@@ -246,8 +247,8 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
 
                         return (
                             <tr key={trip.tripId} className={`whitespace-nowrap${trip.cancelled ? " line-through opacity-50" : ""}`}>
-                                <td className="pr-2">
-                                    <LineBadge line={trip.lineNumber} color={routeColors.get(trip.lineNumber)} mode={routeTypes?.get(trip.lineNumber)} variant="text" />
+                                <td className="pr-2 py-1">
+                                    <LineBadge line={trip.lineNumber} color={routeColors.get(trip.lineNumber)} mode={routeTypes?.get(trip.lineNumber)} />
                                 </td>
                                 <td className="pr-3">{trip.destination}</td>
                                 {showArr && (
