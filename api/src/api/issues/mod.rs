@@ -20,13 +20,11 @@ pub struct IssueListResponse {
     tag = "issues"
 )]
 pub async fn list_issues(State(store): State<OsmIssueStore>) -> Json<IssueListResponse> {
-    let issues = store.read().await;
-    let issues_vec = issues.clone();
-    let count = issues_vec.len();
-    Json(IssueListResponse {
-        issues: issues_vec,
-        count,
-    })
+    let guard = store.read().await;
+    let count = guard.len();
+    let issues = guard.clone();
+    drop(guard);
+    Json(IssueListResponse { issues, count })
 }
 
 pub fn router(issue_store: OsmIssueStore) -> Router {

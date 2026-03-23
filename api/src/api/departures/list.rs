@@ -160,13 +160,13 @@ pub async fn get_departures_by_stop(
                 .filter_map(|d| d.trip_id.clone())
                 .collect();
 
-            for dep in schedule_deps {
-                if let Some(ref tid) = dep.trip_id {
+            for departure in schedule_deps {
+                if let Some(ref tid) = departure.trip_id {
                     if !rt_trip_ids.contains(tid) {
-                        departures.push(dep);
+                        departures.push(departure);
                     }
                 } else {
-                    departures.push(dep);
+                    departures.push(departure);
                 }
             }
         }
@@ -371,30 +371,30 @@ mod tests {
 
     #[test]
     fn test_filter_same_station_removes_loop_destination() {
-        let mut dep = make_departure("2026-03-10T13:00:00Z", None);
-        dep.stop_ifopt = "de:09761:10:1:A3".to_string();
-        dep.destination_id = Some("de:09761:10:1:A4".to_string()); // same station, different platform
+        let mut departure = make_departure("2026-03-10T13:00:00Z", None);
+        departure.stop_ifopt = "de:09761:10:1:A3".to_string();
+        departure.destination_id = Some("de:09761:10:1:A4".to_string()); // same station, different platform
 
-        let result = filter_same_station_destinations(vec![dep], "de:09761:10:1:A3");
+        let result = filter_same_station_destinations(vec![departure], "de:09761:10:1:A3");
         assert_eq!(result.len(), 0);
     }
 
     #[test]
     fn test_filter_same_station_keeps_different_station() {
-        let mut dep = make_departure("2026-03-10T13:00:00Z", None);
-        dep.stop_ifopt = "de:09761:10:1:A3".to_string();
-        dep.destination_id = Some("de:09761:20:1:B1".to_string()); // different station
+        let mut departure = make_departure("2026-03-10T13:00:00Z", None);
+        departure.stop_ifopt = "de:09761:10:1:A3".to_string();
+        departure.destination_id = Some("de:09761:20:1:B1".to_string()); // different station
 
-        let result = filter_same_station_destinations(vec![dep], "de:09761:10:1:A3");
+        let result = filter_same_station_destinations(vec![departure], "de:09761:10:1:A3");
         assert_eq!(result.len(), 1);
     }
 
     #[test]
     fn test_filter_same_station_keeps_no_destination_id() {
-        let dep = make_departure("2026-03-10T13:00:00Z", None);
+        let departure = make_departure("2026-03-10T13:00:00Z", None);
         // destination_id is None by default
 
-        let result = filter_same_station_destinations(vec![dep], "de:09761:10:1:A3");
+        let result = filter_same_station_destinations(vec![departure], "de:09761:10:1:A3");
         assert_eq!(result.len(), 1);
     }
 }
