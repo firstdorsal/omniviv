@@ -413,67 +413,6 @@ Returns a summary of IFOPT-to-GTFS mapping statistics and a paginated list of ma
 
 ---
 
-### Offline / GTFS Bundles
-
-The offline endpoints provide downloadable GTFS bundles for offline-first operation.
-
-#### Get Bundle Metadata
-```
-GET /api/offline/bundle/{area_id}/meta
-```
-
-Returns metadata about the bundle without downloading it. Useful for checking if an update is needed.
-
-**Response:**
-```json
-{
-    "area_id": 1,
-    "area_name": "Augsburg",
-    "south": 48.2,
-    "west": 10.7,
-    "north": 48.5,
-    "east": 11.0,
-    "generated_at": "2025-02-06T10:00:00Z",
-    "timezone": "Europe/Berlin",
-    "schema_version": 1,
-    "gtfs_version": "2025-02-05T12:00:00Z",
-    "stop_count": 500,
-    "route_count": 25,
-    "trip_count": 1200
-}
-```
-
-**Rate Limiting:** Limited to ~10 requests per minute per IP.
-
-#### Download Bundle
-```
-GET /api/offline/bundle/{area_id}
-```
-
-Downloads the GTFS bundle as Protocol Buffer format for an area.
-
-**Response:** Binary protobuf data (`application/x-protobuf`)
-
-**Rate Limiting:** Limited to ~10 requests per minute per IP.
-
-#### Offline Health Check
-```
-GET /api/offline/health
-```
-
-Returns offline subsystem health status.
-
-**Response:**
-```json
-{
-    "schedule_loaded": true,
-    "areas_available": [1, 2, 3],
-    "last_schedule_update": "2025-02-06T06:00:00Z"
-}
-```
-
----
-
 ## WebSocket Endpoints
 
 ### Vehicle Updates
@@ -481,7 +420,7 @@ Returns offline subsystem health status.
 WS /api/ws/vehicles
 ```
 
-Real-time vehicle position and trip updates. Supports both route-based and area-based subscriptions.
+Real-time vehicle position and trip updates. Supports route-based subscriptions.
 
 #### Connection Established
 
@@ -545,56 +484,9 @@ The optional `reference_time` enables time simulation mode (for viewing past/fut
 }
 ```
 
-#### Subscribe to Area (for offline clients)
-
-**Client message:**
-```json
-{
-    "type": "subscribe_area",
-    "area_id": 1
-}
-```
-
-**Server response - Confirmation:**
-```json
-{
-    "type": "area_subscribed",
-    "area_id": 1,
-    "stop_count": 500
-}
-```
-
-**Server response - Real-time updates:**
-```json
-{
-    "type": "trip_updates",
-    "updates": [
-        {
-            "trip_id": "123456789-1",
-            "stop_ifopt": "de:09761:1234:0:1",
-            "line_number": "1",
-            "destination": "Lechhausen",
-            "arrival_delay_seconds": 60,
-            "departure_delay_seconds": 90,
-            "planned_departure": "2025-02-06T14:30:00Z",
-            "estimated_departure": "2025-02-06T14:31:30Z"
-        }
-    ]
-}
-```
-
-**Unsubscribe from area:**
-```json
-{
-    "type": "unsubscribe_area",
-    "area_id": 1
-}
-```
-
 #### Connection Limits
 
 - Maximum 100 route subscriptions per connection
-- Maximum 10 area subscriptions per connection
 
 ---
 

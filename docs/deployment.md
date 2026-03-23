@@ -59,13 +59,21 @@ reverseProxy:
 domain: example.com # Base domain for subdomains
 
 services:
+    postgres:
+        image: postgres:18-alpine
+        database: omniviv
+        storage:
+            volumeName: omniviv-postgres-data
+            absolutePath: null
+        shmSize: 256mb
+
     api:
         subdomain: omniviv-api
-        database:
-            type: sqlite
+        corsPermissive: true
+        data:
             storage:
-                volumeName: api-database # Use Docker volume
-                absolutePath: null # Or use absolute path
+                volumeName: omniviv-api-data
+                absolutePath: null
         build:
             enabled: false # Set true to build from source
             context: ../../api
@@ -85,6 +93,15 @@ services:
         image: ghcr.io/maplibre/martin
         dataPath: ./data/
         cacheSeconds: 86400 # 1 day cache
+
+    motis:
+        subdomain: omniviv-motis
+        image: ghcr.io/motis-project/motis:latest
+        inputPath: ./data/motis/input/
+        storage:
+            volumeName: omniviv-motis-data
+            absolutePath: null
+        memLimit: 12g
 ```
 
 ## Routing Modes
@@ -164,12 +181,14 @@ Fonts for map labels go in `deployment/data/fonts/`.
 
 ## Health Checks
 
--   API root: `GET /` returns "Live Tram API"
+-   API health: `GET /api/health` returns service health status
+-   API root: `GET /` returns "Omniviv API"
 -   Swagger UI: `GET /swagger-ui/`
 
 ## Volumes
 
--   `api-database`: SQLite database persistence (when using volumeName)
+-   `omniviv-postgres-data`: PostgreSQL database persistence (when using volumeName)
+-   `omniviv-api-data`: API data persistence (GTFS cache, etc.)
 
 ## Troubleshooting
 

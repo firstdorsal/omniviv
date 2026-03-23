@@ -56,17 +56,13 @@ api/src/
 ├── api/                 # REST endpoints
 │   ├── areas/          # Service area management
 │   ├── departures/     # Real-time departure data
-│   ├── gtfs_stops/     # GTFS stop queries for offline
+│   ├── gtfs_stops/     # GTFS stop queries
 │   ├── issues/         # OSM data quality issues
-│   ├── offline/        # Offline bundle generation
-│   │   ├── mod.rs      # Bundle endpoints
-│   │   └── error.rs    # Offline error types
+│   ├── mapping/        # IFOPT-to-GTFS stop mapping
 │   ├── routes/         # Transit route geometries
 │   ├── stations/       # Station and platform info
 │   ├── vehicles/       # Vehicle tracking
 │   └── ws.rs           # WebSocket handlers
-├── middleware/          # Request middleware
-│   └── rate_limit.rs   # Rate limiting for bundle downloads
 ├── providers/          # External data sources
 │   ├── osm.rs          # OpenStreetMap data fetching
 │   └── timetables/     # Timetable API integrations
@@ -81,8 +77,6 @@ api/src/
 │   └── issues.rs       # Issue detection
 ├── config.rs           # Configuration management
 └── main.rs             # Application entry point
-proto/
-└── gtfs_bundle.proto   # Protobuf schema for offline bundles
 ```
 
 ### Martin (Tile Server)
@@ -168,73 +162,11 @@ PostgreSQL stores:
 - **gtfs_feed_meta**: Singleton row tracking GTFS load state and counts
 
 Departures for real-time display are held in-memory (DepartureStore), while the full GTFS
-static schedule is stored in PostgreSQL and queried on demand for time simulation and offline bundles.
+static schedule is stored in PostgreSQL and queried on demand for time simulation.
 
-## Offline Subsystem
-
-The offline subsystem enables clients to download GTFS schedule data for local storage and compute departures client-side.
-
-### Bundle Generation
-
-- **Endpoint**: `GET /api/offline/bundle/{area_id}`
-- **Format**: Protocol Buffers (protobuf)
-- **Filtering**: Only includes stops within the area bounding box and their associated trips, routes, calendars
-- **Rate Limited**: ~10 requests per minute per IP via SmartIpKeyExtractor
-
-### Frontend Storage
-
-The frontend stores offline data in IndexedDB:
-- **bundleMeta**: Bundle metadata for cache validation
-- **stops**: GTFS stops indexed by area
-- **routes**: GTFS routes indexed by area
-- **trips**: GTFS trips indexed by area and service
-- **stopTimes**: Stop times indexed by area, trip, and stop
-- **calendars**: Calendar rules indexed by area
-- **calendarDates**: Calendar exceptions indexed by area and service
-
-### Schedule Engine
-
-Client-side TypeScript implementation of departure computation:
-1. Query active services for the reference date (calendar + exceptions)
-2. Find stop times for requested stops within time horizon
-3. Convert GTFS times (including >24h) to wall clock times
-4. Apply any cached real-time delays from WebSocket updates
-
-## Rate Limiting
-
-The API implements rate limiting to prevent abuse, particularly on resource-intensive endpoints like bundle downloads.
-
-### Implementation
-
-- **Crate**: `tower_governor` (wraps the `governor` rate limiting crate for Tower/Axum)
-- **Key Extractor**: `SmartIpKeyExtractor` checks headers in order:
-  1. `X-Forwarded-For`
-  2. `X-Real-IP`
-  3. `Forwarded`
-  4. Falls back to peer IP
-
-This works correctly when running behind a reverse proxy like Traefik, which sets these headers.
-
-### Bundle Download Limits
-
-Endpoint: `/api/offline/bundle/{area_id}` and `/api/offline/bundle/{area_id}/meta`
-
-- **Rate**: 1 token replenished every 6 seconds (~10 per minute)
-- **Burst**: 5 requests allowed in burst
-- **Response on limit**: HTTP 429 Too Many Requests
-
-### WebSocket Limits
+## WebSocket Limits
 
 - Maximum 100 route subscriptions per connection
-- Maximum 10 area subscriptions per connection
-- No per-message rate limit (subscription limits prevent resource exhaustion)
-
-### Troubleshooting
-
-If rate limiting doesn't work as expected:
-1. Verify Traefik/proxy is setting `X-Forwarded-For` header
-2. Ensure proxy strips client-supplied headers to prevent spoofing
-3. Check logs for rate limit hits
 
 ## Configuration
 
@@ -280,7 +212,6 @@ gtfs_sync:
 
 The 1 GB memory limit (as configured in docker-compose) accommodates:
 - GTFS static schedule import processing
-- Concurrent bundle generation for multiple areas
 - GTFS-RT protobuf parsing overhead
 - PostgreSQL connection pool and query buffers
 
@@ -291,38 +222,6 @@ The 1 GB memory limit (as configured in docker-compose) accommodates:
 | Memory | 256 MB | Static file serving only |
 | CPU | 0.5 core | Nginx serving static assets |
 
-## Protobuf Schema
-
-The offline bundle uses Protocol Buffers for compact serialization.
-
-### Schema Location
-
-`api/proto/gtfs_bundle.proto`
-
-### Message Types
-
-```protobuf
-message GtfsBundle {
-    BundleMeta meta = 1;
-    repeated Stop stops = 2;
-    repeated Route routes = 3;
-    repeated Trip trips = 4;
-    repeated StopTime stop_times = 5;
-    repeated Calendar calendars = 6;
-    repeated CalendarDate calendar_dates = 7;
-}
-```
-
-See the proto file for complete field definitions.
-
-### Estimated Bundle Sizes
-
-| Area Type | Stops | Trips | Bundle (compressed) |
-|-----------|-------|-------|---------------------|
-| Small city | ~200 | ~2,000 | ~500 KB |
-| Medium city | ~800 | ~8,000 | ~2 MB |
-| Large city | ~2,000 | ~15,000 | ~5 MB |
-
 ## Development Setup
 
 ### Prerequisites
@@ -330,23 +229,3 @@ See the proto file for complete field definitions.
 - **Rust** (1.83+): Install via [rustup](https://rustup.rs/)
 - **Node.js** (22+): For frontend development
 - **pnpm** (9.x): Package manager for frontend
-- **protobuf-compiler**: Required for building the API
-
-#### Installing protobuf-compiler
-
-**Ubuntu/Debian:**
-```bash
-apt install protobuf-compiler
-```
-
-**macOS:**
-```bash
-brew install protobuf
-```
-
-**NixOS:**
-```bash
-nix-shell -p protobuf
-```
-
-The API uses `prost-build` to compile `.proto` files at build time. If protobuf is not installed, the build will fail with an error about missing `protoc`.
