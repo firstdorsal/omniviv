@@ -10,26 +10,36 @@ export function getPlatformDisplayName(platform: StationPlatform | StationStopPo
     return "?";
 }
 
-// Time formatter - created lazily to use browser's locale at runtime
-let timeFormatter: Intl.DateTimeFormat | null = null;
+// Time formatters - created lazily to use browser's locale at runtime
+let timeFormatterWithSeconds: Intl.DateTimeFormat | null = null;
+let timeFormatterNoSeconds: Intl.DateTimeFormat | null = null;
 
-function getTimeFormatter(): Intl.DateTimeFormat {
-    if (!timeFormatter) {
-        // Use navigator.language explicitly to respect browser locale
+function getTimeFormatter(includeSeconds: boolean = true): Intl.DateTimeFormat {
+    if (includeSeconds) {
+        if (!timeFormatterWithSeconds) {
+            const locale = typeof navigator !== 'undefined' ? navigator.language : undefined;
+            timeFormatterWithSeconds = new Intl.DateTimeFormat(locale, {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+            });
+        }
+        return timeFormatterWithSeconds;
+    }
+    if (!timeFormatterNoSeconds) {
         const locale = typeof navigator !== 'undefined' ? navigator.language : undefined;
-        timeFormatter = new Intl.DateTimeFormat(locale, {
+        timeFormatterNoSeconds = new Intl.DateTimeFormat(locale, {
             hour: "2-digit",
             minute: "2-digit",
-            second: "2-digit",
         });
     }
-    return timeFormatter;
+    return timeFormatterNoSeconds;
 }
 
 // Format time from ISO string using the browser's locale
-export function formatTime(isoString: string): string {
+export function formatTime(isoString: string, includeSeconds: boolean = true): string {
     const date = new Date(isoString);
-    return getTimeFormatter().format(date);
+    return getTimeFormatter(includeSeconds).format(date);
 }
 
 /** Split a formatted time into the main part (HH:MM + AM/PM) and the seconds part (:SS).

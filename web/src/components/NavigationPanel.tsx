@@ -1,6 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { GripVertical, Plus, Trash2 } from "lucide-react";
-import { TbWalk } from "react-icons/tb";
+import { Footprints, GripVertical, Plus, Trash2 } from "lucide-react";
 import { Button } from "./ui/button";
 import { DateTimePicker } from "./ui/date-time-picker";
 import type { Area, Station } from "../api";
@@ -8,6 +7,7 @@ import { getConfig } from "../config";
 import { Duration } from "./Duration";
 import { LineBadge } from "./LineBadge";
 import { LocationSearch, type ResolvedLocation } from "./LocationSearch";
+import { formatTime } from "./map/mapUtils";
 
 type PickMode = "start" | "end" | null;
 
@@ -50,11 +50,6 @@ interface RouteItinerary {
     transfers: number;
     legs: RouteLeg[];
 }
-
-function formatTime(iso: string): string {
-    return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
 
 export function NavigationPanel({
     stations,
@@ -391,7 +386,7 @@ export function NavigationPanel({
                             <div key={i} className="@container border rounded-lg p-3 space-y-2">
                                 <div className="flex items-center justify-between text-sm">
                                     <span className="font-medium">
-                                        {formatTime(it.startTime)} - {formatTime(it.endTime)}
+                                        {formatTime(it.startTime, false)} - {formatTime(it.endTime, false)}
                                     </span>
                                     <Duration seconds={it.duration} className="text-foreground" />
                                 </div>
@@ -403,7 +398,7 @@ export function NavigationPanel({
                                                     const walkMin = Math.round(leg.duration / 60);
                                                     return (
                                                         <span key={j} className="inline-flex items-start text-muted-foreground shrink-0">
-                                                            <TbWalk className="h-5 w-5" />
+                                                            <Footprints className="h-5 w-5" />
                                                             <span className="text-[10px] -ml-1 -mt-0.5">{walkMin}</span>
                                                         </span>
                                                     );

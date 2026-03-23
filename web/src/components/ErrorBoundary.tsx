@@ -31,23 +31,23 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             }
 
             return (
-                <div className="flex items-center justify-center h-full bg-gray-50">
-                    <div className="max-w-md p-6 bg-white rounded-lg shadow-lg">
-                        <h2 className="text-xl font-semibold text-red-600 mb-2">Etwas ist schiefgelaufen</h2>
-                        <p className="text-gray-600 mb-4">
+                <div className="flex items-center justify-center h-full bg-muted">
+                    <div className="max-w-md p-6 bg-background rounded-lg shadow-lg">
+                        <h2 className="text-xl font-semibold text-destructive mb-2">Etwas ist schiefgelaufen</h2>
+                        <p className="text-muted-foreground mb-4">
                             Ein unerwarteter Fehler ist aufgetreten. Bitte lade die Seite neu.
                         </p>
                         {this.state.error && (
-                            <details className="text-sm text-gray-500">
-                                <summary className="cursor-pointer hover:text-gray-700">Fehlerdetails</summary>
-                                <pre className="mt-2 p-2 bg-gray-100 rounded overflow-auto text-xs">
+                            <details className="text-sm text-muted-foreground">
+                                <summary className="cursor-pointer hover:text-foreground">Fehlerdetails</summary>
+                                <pre className="mt-2 p-2 bg-muted rounded overflow-auto text-xs">
                                     {this.state.error.message}
                                 </pre>
                             </details>
                         )}
                         <button
                             onClick={() => window.location.reload()}
-                            className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                            className="mt-4 px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors"
                         >
                             Seite neu laden
                         </button>
