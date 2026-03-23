@@ -29,6 +29,26 @@ pub async fn collect_trip_departures(
     }
 }
 
+/// Like `collect_trip_departures` but takes a pre-read snapshot of the departure
+/// store instead of acquiring the lock. Used by the WS handler which reads the
+/// store once for all routes.
+pub async fn collect_trip_departures_from_snapshot(
+    pool: &PgPool,
+    departure_snapshot: &HashMap<String, Vec<Departure>>,
+    schedule_cache: &ScheduleCache,
+    stop_ifopts: &[&str],
+    line_ref: Option<&str>,
+    simulated_time: Option<DateTime<Utc>>,
+    time_horizon_minutes: u32,
+    timezone: chrono_tz::Tz,
+) -> HashMap<String, Vec<Departure>> {
+    if let Some(ref_time) = simulated_time {
+        collect_from_schedule(pool, schedule_cache, stop_ifopts, line_ref, ref_time, time_horizon_minutes, timezone).await
+    } else {
+        collect_from_realtime_snapshot(pool, schedule_cache, departure_snapshot, stop_ifopts, line_ref, time_horizon_minutes, timezone).await
+    }
+}
+
 /// Filter departures by line_ref and group by trip_id.
 fn filter_and_group(
     departures: &[Departure],
@@ -99,6 +119,44 @@ async fn collect_from_realtime(
     // Only supplement with schedule data when the RT store has NO data for
     // this route's stops. When the RT feed is active (even if all trips are
     // cancelled during a strike), it is the authority.
+    if result.is_empty() {
+        let stop_ids: HashSet<String> = stop_ifopts.iter().map(|s| s.to_string()).collect();
+        if let Ok(schedule) = schedule_cache.get_or_build(pool, &stop_ids).await {
+            let ref_time = Utc::now();
+            let time_horizon = Duration::minutes(time_horizon_minutes as i64);
+            let all_departures = realtime::compute_schedule_departures(
+                &schedule, &stop_ids, ref_time, time_horizon, timezone,
+            );
+
+            for ifopt in stop_ifopts {
+                if let Some(departures) = all_departures.get(*ifopt) {
+                    filter_and_group(departures, line_ref, &mut result);
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Like `collect_from_realtime` but uses a pre-read snapshot instead of locking.
+async fn collect_from_realtime_snapshot(
+    pool: &PgPool,
+    schedule_cache: &ScheduleCache,
+    departure_snapshot: &HashMap<String, Vec<Departure>>,
+    stop_ifopts: &[&str],
+    line_ref: Option<&str>,
+    time_horizon_minutes: u32,
+    timezone: chrono_tz::Tz,
+) -> HashMap<String, Vec<Departure>> {
+    let mut result = HashMap::new();
+
+    for ifopt in stop_ifopts {
+        if let Some(departures) = departure_snapshot.get(*ifopt) {
+            filter_and_group(departures, line_ref, &mut result);
+        }
+    }
+
     if result.is_empty() {
         let stop_ids: HashSet<String> = stop_ifopts.iter().map(|s| s.to_string()).collect();
         if let Ok(schedule) = schedule_cache.get_or_build(pool, &stop_ids).await {

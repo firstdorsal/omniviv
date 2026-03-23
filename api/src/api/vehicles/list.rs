@@ -102,21 +102,42 @@ const TRIP_LINK_MAX_GAP_MINUTES: i64 = 15;
 /// Link consecutive trips that represent the same physical vehicle looping back.
 /// Sets `next_trip_id` on a trip when the next trip on the same line starts at
 /// the same station where this trip ends, within a short time window.
+///
+/// Uses a HashMap index for O(n log n) instead of O(n²) inner-loop scanning.
 pub fn link_consecutive_trips(vehicles: &mut [Vehicle]) {
     // Sort by first departure time
     vehicles.sort_by(|a, b| {
-        let time_a = a.stops.first().and_then(|s| s.departure_time.as_ref());
-        let time_b = b.stops.first().and_then(|s| s.departure_time.as_ref());
+        let time_a = a.stops.first().and_then(|s| s.departure_time);
+        let time_b = b.stops.first().and_then(|s| s.departure_time);
         time_a.cmp(&time_b)
     });
 
-    // For each vehicle, try to find its successor
-    let n = vehicles.len();
-    // Collect linking info first to avoid borrow issues
-    let mut links: Vec<(usize, String)> = Vec::new();
+    // Index: (line, station_prefix) → list of (first_departure, vehicle_index)
+    // sorted by departure time (inherited from the vehicle sort above).
+    let mut departure_index: HashMap<(String, String), Vec<(DateTime<Utc>, usize)>> = HashMap::new();
+    for (i, vehicle) in vehicles.iter().enumerate() {
+        let first_stop = match vehicle.stops.first() {
+            Some(s) => s,
+            None => continue,
+        };
+        let first_departure = match first_stop.departure_time {
+            Some(t) => t,
+            None => continue,
+        };
+        let station = match ifopt_station_prefix(&first_stop.stop_ifopt) {
+            Some(p) => p.to_string(),
+            None => continue,
+        };
+        departure_index
+            .entry((vehicle.line_number.clone(), station))
+            .or_default()
+            .push((first_departure, i));
+    }
 
-    for i in 0..n {
-        let last_stop = match vehicles[i].stops.last() {
+    // For each vehicle, look up the earliest successor in the index
+    let mut links: Vec<(usize, String)> = Vec::new();
+    for (i, vehicle) in vehicles.iter().enumerate() {
+        let last_stop = match vehicle.stops.last() {
             Some(s) => s,
             None => continue,
         };
@@ -128,34 +149,22 @@ pub fn link_consecutive_trips(vehicles: &mut [Vehicle]) {
             Some(p) => p.to_string(),
             None => continue,
         };
-        let line = &vehicles[i].line_number;
 
-        // Search forward for the earliest matching successor
-        for j in (i + 1)..n {
-            if &vehicles[j].line_number != line {
-                continue;
-            }
-            let first_stop = match vehicles[j].stops.first() {
-                Some(s) => s,
-                None => continue,
-            };
-            let first_departure = match first_stop.departure_time {
-                Some(t) => t,
-                None => continue,
-            };
-            let first_station = match ifopt_station_prefix(&first_stop.stop_ifopt) {
-                Some(p) => p,
-                None => continue,
-            };
-
-            // Same station?
-            if first_station != last_station {
-                continue;
-            }
-
-            // Time gap check
-            let gap = first_departure.signed_duration_since(last_arrival).num_minutes();
-            if gap >= 0 && gap <= TRIP_LINK_MAX_GAP_MINUTES {
+        let key = (vehicle.line_number.clone(), last_station);
+        if let Some(candidates) = departure_index.get(&key) {
+            // Candidates are sorted by departure time. Find the first one after
+            // last_arrival that's within the gap window and isn't the same vehicle.
+            for &(dep_time, j) in candidates {
+                if j == i {
+                    continue;
+                }
+                let gap = dep_time.signed_duration_since(last_arrival).num_minutes();
+                if gap < 0 {
+                    continue; // Departs before we arrive — skip
+                }
+                if gap > TRIP_LINK_MAX_GAP_MINUTES {
+                    break; // All subsequent candidates are even later — stop
+                }
                 links.push((i, vehicles[j].trip_id.clone()));
                 break;
             }

@@ -16,6 +16,7 @@ use tracing::warn;
 use super::state::AppState;
 use super::utils::parse_reference_time as parse_ws_reference_time;
 use super::vehicles::{RouteInfo, RouteStopInfo, StopInfo, Vehicle};
+use crate::sync::Departure;
 
 /// Error type for internal WebSocket data-building operations.
 /// Converts to String for WebSocket error messages while providing
@@ -423,6 +424,12 @@ async fn build_vehicle_data(
 
     let mut results = Vec::new();
 
+    // Read departure store once for all routes (avoids acquiring the lock N times)
+    let departure_snapshot: HashMap<String, Vec<Departure>> = {
+        let store = state.departure_store.read().await;
+        store.clone()
+    };
+
     for &route_id in route_ids {
         // Get route info from pre-fetched map
         let route_info = match route_info_map.get(&route_id) {
@@ -458,9 +465,9 @@ async fn build_vehicle_data(
             continue;
         }
 
-        let trip_departures = super::vehicles::builder::collect_trip_departures(
+        let trip_departures = super::vehicles::builder::collect_trip_departures_from_snapshot(
             &state.pool,
-            &state.departure_store,
+            &departure_snapshot,
             &state.schedule_cache,
             &stop_ifopts,
             route_info.line_ref.as_deref(),
