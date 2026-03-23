@@ -459,6 +459,7 @@ async fn build_vehicle_data(
         let trip_departures = super::vehicles::builder::collect_trip_departures(
             &state.pool,
             &state.departure_store,
+            &state.schedule_cache,
             &stop_ifopts,
             route_info.line_ref.as_deref(),
             simulated_time,

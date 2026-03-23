@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use utoipa::ToSchema;
 
 use crate::api::ErrorResponse;
-use crate::providers::timetables::gtfs::{realtime, static_data};
+use crate::providers::timetables::gtfs::realtime;
 use crate::sync::Departure;
 
 use crate::api::state::AppState;
@@ -143,7 +143,7 @@ pub async fn get_departures_by_stop(
 
     // Supplement with schedule-based departures to fill the 12-hour window.
     // This adds trips that aren't in the real-time store (e.g., next morning).
-    match static_data::build_schedule_from_db(&state.pool, &stop_ids).await {
+    match state.schedule_cache.get_or_build(&state.pool, &stop_ids).await {
         Ok(schedule) => {
             let time_horizon = Duration::minutes(STOP_BOARD_HORIZON_MINUTES);
             let schedule_departures = realtime::compute_schedule_departures(
@@ -208,7 +208,7 @@ pub async fn get_departures_by_gtfs_stop(
 
     // Always compute schedule-based departures with the longer stop board horizon
     let departures =
-        match static_data::build_schedule_from_db_by_gtfs_stop(&state.pool, &stop_ids).await {
+        match state.schedule_cache.get_or_build_by_gtfs_stop(&state.pool, &stop_ids).await {
             Ok(schedule) => {
                 let time_horizon = Duration::minutes(STOP_BOARD_HORIZON_MINUTES);
                 let all_departures = realtime::compute_schedule_departures(

@@ -3,7 +3,8 @@ use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 
 use super::{Vehicle, VehicleStop};
-use crate::providers::timetables::gtfs::{realtime, static_data};
+use crate::api::schedule_cache::ScheduleCache;
+use crate::providers::timetables::gtfs::realtime;
 use crate::sync::{Departure, DepartureStore, EventType};
 
 /// Collect departures for the given stops, filtered by line_ref, grouped by trip_id.
@@ -14,6 +15,7 @@ use crate::sync::{Departure, DepartureStore, EventType};
 pub async fn collect_trip_departures(
     pool: &PgPool,
     departure_store: &DepartureStore,
+    schedule_cache: &ScheduleCache,
     stop_ifopts: &[&str],
     line_ref: Option<&str>,
     simulated_time: Option<DateTime<Utc>>,
@@ -21,9 +23,9 @@ pub async fn collect_trip_departures(
     timezone: chrono_tz::Tz,
 ) -> HashMap<String, Vec<Departure>> {
     if let Some(ref_time) = simulated_time {
-        collect_from_schedule(pool, stop_ifopts, line_ref, ref_time, time_horizon_minutes, timezone).await
+        collect_from_schedule(pool, schedule_cache, stop_ifopts, line_ref, ref_time, time_horizon_minutes, timezone).await
     } else {
-        collect_from_realtime(pool, departure_store, stop_ifopts, line_ref, time_horizon_minutes, timezone).await
+        collect_from_realtime(pool, schedule_cache, departure_store, stop_ifopts, line_ref, time_horizon_minutes, timezone).await
     }
 }
 
@@ -49,6 +51,7 @@ fn filter_and_group(
 
 async fn collect_from_schedule(
     pool: &PgPool,
+    schedule_cache: &ScheduleCache,
     stop_ifopts: &[&str],
     line_ref: Option<&str>,
     ref_time: DateTime<Utc>,
@@ -56,7 +59,7 @@ async fn collect_from_schedule(
     timezone: chrono_tz::Tz,
 ) -> HashMap<String, Vec<Departure>> {
     let stop_ids: HashSet<String> = stop_ifopts.iter().map(|s| s.to_string()).collect();
-    let schedule = match static_data::build_schedule_from_db(pool, &stop_ids).await {
+    let schedule = match schedule_cache.get_or_build(pool, &stop_ids).await {
         Ok(s) => s,
         Err(_) => return HashMap::new(),
     };
@@ -76,6 +79,7 @@ async fn collect_from_schedule(
 
 async fn collect_from_realtime(
     pool: &PgPool,
+    schedule_cache: &ScheduleCache,
     departure_store: &DepartureStore,
     stop_ifopts: &[&str],
     line_ref: Option<&str>,
@@ -97,7 +101,7 @@ async fn collect_from_realtime(
     // cancelled during a strike), it is the authority.
     if result.is_empty() {
         let stop_ids: HashSet<String> = stop_ifopts.iter().map(|s| s.to_string()).collect();
-        if let Ok(schedule) = static_data::build_schedule_from_db(pool, &stop_ids).await {
+        if let Ok(schedule) = schedule_cache.get_or_build(pool, &stop_ids).await {
             let ref_time = Utc::now();
             let time_horizon = Duration::minutes(time_horizon_minutes as i64);
             let all_departures = realtime::compute_schedule_departures(

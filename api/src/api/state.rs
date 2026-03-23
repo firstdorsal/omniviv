@@ -1,5 +1,6 @@
 use sqlx::PgPool;
 
+use super::schedule_cache::ScheduleCache;
 use crate::sync::{DepartureStore, VehicleUpdateSender};
 
 /// Shared application state for handlers that need departure/vehicle data.
@@ -14,4 +15,5 @@ pub struct AppState {
     pub time_horizon_minutes: u32,
     pub timezone: chrono_tz::Tz,
     pub vehicle_updates_tx: VehicleUpdateSender,
+    pub schedule_cache: ScheduleCache,
 }

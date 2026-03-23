@@ -36,10 +36,15 @@ pub struct SyncManager {
     issues: OsmIssueStore,
     vehicle_updates_tx: VehicleUpdateSender,
     time_horizon_minutes: u32,
+    schedule_cache: crate::api::schedule_cache::ScheduleCache,
 }
 
 impl SyncManager {
-    pub fn new(pool: PgPool, config: Config) -> Result<Self, SyncError> {
+    pub fn new(
+        pool: PgPool,
+        config: Config,
+        schedule_cache: crate::api::schedule_cache::ScheduleCache,
+    ) -> Result<Self, SyncError> {
         let osm_client = OsmClient::new().map_err(|e| SyncError::OsmError(e.to_string()))?;
 
         let gtfs_provider = GtfsProvider::new(config.gtfs_sync.clone(), pool.clone())?;
@@ -59,6 +64,7 @@ impl SyncManager {
             issues: Arc::new(RwLock::new(Vec::new())),
             vehicle_updates_tx,
             time_horizon_minutes,
+            schedule_cache,
         })
     }
 
@@ -350,6 +356,8 @@ impl SyncManager {
                     } else {
                         // Rebuild IFOPT mapping after schedule refresh
                         self.build_gtfs_mapping().await;
+                        // Invalidate cached schedules so handlers pick up the new data
+                        self.schedule_cache.invalidate().await;
                     }
                 }
             }

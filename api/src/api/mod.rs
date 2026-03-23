@@ -7,12 +7,14 @@ pub mod health;
 pub mod issues;
 pub mod mapping;
 pub mod routes;
+pub mod schedule_cache;
 pub mod state;
 pub mod stations;
 pub mod vehicles;
 pub mod ws;
 
 pub use error::{ErrorResponse, internal_error};
+pub use schedule_cache::ScheduleCache;
 pub use state::AppState;
 
 use axum::{routing::get, Router};
@@ -35,6 +37,7 @@ pub fn router(
         time_horizon_minutes,
         timezone,
         vehicle_updates_tx,
+        schedule_cache: ScheduleCache::new(std::time::Duration::from_secs(300)),
     };
 
     Router::new()

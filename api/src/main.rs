@@ -182,9 +182,13 @@ async fn main() {
         .expect("Failed to run migrations");
     tracing::info!("Database migrations completed");
 
+    // Create shared schedule cache (5-minute TTL; GTFS data changes every 6+ hours)
+    let schedule_cache = api::ScheduleCache::new(std::time::Duration::from_secs(300));
+
     // Start sync manager in background
     let sync_manager = Arc::new(
-        SyncManager::new(pool.clone(), config).expect("Failed to initialize sync manager"),
+        SyncManager::new(pool.clone(), config, schedule_cache.clone())
+            .expect("Failed to initialize sync manager"),
     );
     let departure_store = sync_manager.departure_store();
     let time_horizon_minutes = sync_manager.time_horizon_minutes();

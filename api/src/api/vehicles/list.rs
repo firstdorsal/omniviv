@@ -243,6 +243,7 @@ pub async fn get_vehicles_by_route(
     let trip_departures = super::builder::collect_trip_departures(
         &state.pool,
         &state.departure_store,
+        &state.schedule_cache,
         &stop_ifopts,
         route_info.line_ref.as_deref(),
         simulated_time,
