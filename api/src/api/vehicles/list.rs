@@ -90,6 +90,23 @@ pub struct StopInfo {
     pub lon: f64,
 }
 
+/// Build a stop_ifopt → StopInfo map from route stop rows, filtering out
+/// entries without IFOPT or coordinates.
+pub fn build_stop_info_map(route_stops: &[RouteStopInfo]) -> HashMap<String, StopInfo> {
+    route_stops
+        .iter()
+        .filter_map(|s| {
+            let ifopt = s.stop_ifopt.as_ref()?;
+            Some((ifopt.clone(), StopInfo {
+                sequence: s.sequence,
+                name: s.stop_name.clone(),
+                lat: s.lat?,
+                lon: s.lon?,
+            }))
+        })
+        .collect()
+}
+
 #[derive(Debug, FromRow)]
 pub struct RouteInfo {
     pub line_ref: Option<String>,
@@ -233,19 +250,7 @@ pub async fn get_vehicles_by_route(
     .await
     .map_err(internal_error)?;
 
-    // Build a map of stop_ifopt -> StopInfo
-    let stop_info_map: HashMap<String, StopInfo> = route_stops
-        .iter()
-        .filter_map(|s| {
-            let ifopt = s.stop_ifopt.as_ref()?;
-            Some((ifopt.clone(), StopInfo {
-                sequence: s.sequence,
-                name: s.stop_name.clone(),
-                lat: s.lat?,
-                lon: s.lon?,
-            }))
-        })
-        .collect();
+    let stop_info_map = build_stop_info_map(&route_stops);
 
     let stop_ifopts: Vec<&str> = stop_info_map.keys().map(|s| s.as_str()).collect();
 
