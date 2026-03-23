@@ -179,10 +179,10 @@ pub fn build_vehicles_from_departures(
                         sequence: info.sequence,
                         lat: info.lat,
                         lon: info.lon,
-                        arrival_time: arrival.as_ref().map(|a| a.planned_time.clone()),
-                        arrival_time_estimated: arrival.as_ref().and_then(|a| a.estimated_time.clone()),
-                        departure_time: departure.as_ref().map(|d| d.planned_time.clone()),
-                        departure_time_estimated: departure.as_ref().and_then(|d| d.estimated_time.clone()),
+                        arrival_time: arrival.as_ref().map(|a| a.planned_time),
+                        arrival_time_estimated: arrival.as_ref().and_then(|a| a.estimated_time),
+                        departure_time: departure.as_ref().map(|d| d.planned_time),
+                        departure_time_estimated: departure.as_ref().and_then(|d| d.estimated_time),
                         delay_minutes,
                     })
                 })

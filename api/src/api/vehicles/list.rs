@@ -1,4 +1,5 @@
 use axum::{extract::State, http::StatusCode, Json};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::collections::HashMap;
@@ -55,14 +56,18 @@ pub struct VehicleStop {
     pub lat: f64,
     /// Longitude
     pub lon: f64,
-    /// Arrival time at this stop (ISO 8601)
-    pub arrival_time: Option<String>,
+    /// Arrival time at this stop
+    #[schema(value_type = Option<String>)]
+    pub arrival_time: Option<DateTime<Utc>>,
     /// Estimated arrival time (real-time, if available)
-    pub arrival_time_estimated: Option<String>,
-    /// Departure time from this stop (ISO 8601)
-    pub departure_time: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub arrival_time_estimated: Option<DateTime<Utc>>,
+    /// Departure time from this stop
+    #[schema(value_type = Option<String>)]
+    pub departure_time: Option<DateTime<Utc>>,
     /// Estimated departure time (real-time, if available)
-    pub departure_time_estimated: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub departure_time_estimated: Option<DateTime<Utc>>,
     /// Delay in minutes (positive = late, negative = early)
     pub delay_minutes: Option<i32>,
 }
@@ -115,8 +120,8 @@ pub fn link_consecutive_trips(vehicles: &mut [Vehicle]) {
             Some(s) => s,
             None => continue,
         };
-        let last_arrival = match &last_stop.arrival_time {
-            Some(t) => t.clone(),
+        let last_arrival = match last_stop.arrival_time {
+            Some(t) => t,
             None => continue,
         };
         let last_station = match ifopt_station_prefix(&last_stop.stop_ifopt) {
@@ -134,7 +139,7 @@ pub fn link_consecutive_trips(vehicles: &mut [Vehicle]) {
                 Some(s) => s,
                 None => continue,
             };
-            let first_departure = match &first_stop.departure_time {
+            let first_departure = match first_stop.departure_time {
                 Some(t) => t,
                 None => continue,
             };
@@ -149,15 +154,10 @@ pub fn link_consecutive_trips(vehicles: &mut [Vehicle]) {
             }
 
             // Time gap check
-            if let (Ok(end_time), Ok(start_time)) = (
-                chrono::DateTime::parse_from_rfc3339(&last_arrival),
-                chrono::DateTime::parse_from_rfc3339(first_departure),
-            ) {
-                let gap = start_time.signed_duration_since(end_time).num_minutes();
-                if gap >= 0 && gap <= TRIP_LINK_MAX_GAP_MINUTES {
-                    links.push((i, vehicles[j].trip_id.clone()));
-                    break;
-                }
+            let gap = first_departure.signed_duration_since(last_arrival).num_minutes();
+            if gap >= 0 && gap <= TRIP_LINK_MAX_GAP_MINUTES {
+                links.push((i, vehicles[j].trip_id.clone()));
+                break;
             }
         }
     }
@@ -274,6 +274,10 @@ pub async fn get_vehicles_by_route(
 mod tests {
     use super::*;
 
+    fn parse_dt(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
     fn make_vehicle(trip_id: &str, line: &str, first_ifopt: &str, first_dep: &str, last_ifopt: &str, last_arr: &str) -> Vehicle {
         Vehicle {
             trip_id: trip_id.to_string(),
@@ -289,7 +293,7 @@ mod tests {
                     lat: 48.37, lon: 10.90,
                     arrival_time: None,
                     arrival_time_estimated: None,
-                    departure_time: Some(first_dep.to_string()),
+                    departure_time: Some(parse_dt(first_dep)),
                     departure_time_estimated: None,
                     delay_minutes: None,
                 },
@@ -298,7 +302,7 @@ mod tests {
                     stop_name: None,
                     sequence: 10,
                     lat: 48.37, lon: 10.90,
-                    arrival_time: Some(last_arr.to_string()),
+                    arrival_time: Some(parse_dt(last_arr)),
                     arrival_time_estimated: None,
                     departure_time: None,
                     departure_time_estimated: None,

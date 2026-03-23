@@ -1,5 +1,6 @@
 //! Type definitions for the sync module.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,8 +25,10 @@ pub struct Departure {
     pub destination: String,
     /// Destination stop ID (for departures) or origin stop ID (for arrivals)
     pub destination_id: Option<String>,
-    pub planned_time: String,
-    pub estimated_time: Option<String>,
+    #[schema(value_type = String)]
+    pub planned_time: DateTime<Utc>,
+    #[schema(value_type = Option<String>)]
+    pub estimated_time: Option<DateTime<Utc>>,
     pub delay_minutes: Option<i32>,
     pub platform: Option<String>,
     /// Unique trip identifier (GTFS trip_id) - consistent across all stops for a journey

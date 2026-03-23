@@ -101,10 +101,10 @@ fn compute_vehicle_hash(vehicle: &Vehicle) -> u64 {
     for stop in &vehicle.stops {
         stop.stop_ifopt.hash(&mut hasher);
         stop.delay_minutes.hash(&mut hasher);
-        stop.departure_time.hash(&mut hasher);
-        stop.departure_time_estimated.hash(&mut hasher);
-        stop.arrival_time.hash(&mut hasher);
-        stop.arrival_time_estimated.hash(&mut hasher);
+        stop.departure_time.map(|t| t.timestamp_millis()).hash(&mut hasher);
+        stop.departure_time_estimated.map(|t| t.timestamp_millis()).hash(&mut hasher);
+        stop.arrival_time.map(|t| t.timestamp_millis()).hash(&mut hasher);
+        stop.arrival_time_estimated.map(|t| t.timestamp_millis()).hash(&mut hasher);
     }
     hasher.finish()
 }

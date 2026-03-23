@@ -103,12 +103,8 @@ fn filter_past_departures(departures: Vec<Departure>, reference_time: DateTime<U
     departures
         .into_iter()
         .filter(|d| {
-            // Use estimated time if available, otherwise planned time
-            let time_str = d.estimated_time.as_ref().unwrap_or(&d.planned_time);
-            match chrono::DateTime::parse_from_rfc3339(time_str) {
-                Ok(time) => time > cutoff,
-                Err(_) => true, // Keep if we can't parse the time
-            }
+            let time = d.estimated_time.unwrap_or(d.planned_time);
+            time > cutoff
         })
         .collect()
 }
@@ -288,6 +284,10 @@ pub async fn get_departures_by_gtfs_stop(
 mod tests {
     use super::*;
     use crate::sync::EventType;
+    fn parse_dt(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
     fn make_departure(planned_time: &str, estimated_time: Option<&str>) -> Departure {
         Departure {
             stop_ifopt: "de:08111:6115".to_string(),
@@ -295,8 +295,8 @@ mod tests {
             line_number: "U1".to_string(),
             destination: "Central Station".to_string(),
             destination_id: None,
-            planned_time: planned_time.to_string(),
-            estimated_time: estimated_time.map(|s| s.to_string()),
+            planned_time: parse_dt(planned_time),
+            estimated_time: estimated_time.map(|s| parse_dt(s)),
             delay_minutes: None,
             platform: None,
             trip_id: Some("trip_1".to_string()),
@@ -319,7 +319,7 @@ mod tests {
 
         let result = filter_past_departures(departures, reference);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].planned_time, "2026-03-10T13:00:00Z");
+        assert_eq!(result[0].planned_time, parse_dt("2026-03-10T13:00:00Z"));
     }
 
     #[test]
@@ -361,26 +361,9 @@ mod tests {
         // Only the one with future estimated time should remain
         assert_eq!(result.len(), 1);
         assert_eq!(
-            result[0].estimated_time.as_deref(),
-            Some("2026-03-10T13:00:00Z")
+            result[0].estimated_time,
+            Some(parse_dt("2026-03-10T13:00:00Z"))
         );
-    }
-
-    #[test]
-    fn test_filter_past_departures_keeps_unparseable_times() {
-        let reference = DateTime::parse_from_rfc3339("2026-03-10T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-
-        let departures = vec![
-            make_departure("not-a-valid-time", None),
-            make_departure("2026-03-10T11:00:00Z", None), // past, should be removed
-        ];
-
-        let result = filter_past_departures(departures, reference);
-        // Unparseable time is kept, past time is removed
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].planned_time, "not-a-valid-time");
     }
 
     #[test]
@@ -411,7 +394,7 @@ mod tests {
 
         let result = filter_past_departures(departures, reference);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].planned_time, "2026-03-10T11:57:00Z");
+        assert_eq!(result[0].planned_time, parse_dt("2026-03-10T11:57:00Z"));
     }
 
     // --- filter_same_station_destinations tests ---
