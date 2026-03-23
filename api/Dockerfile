@@ -3,7 +3,7 @@ ARG SERVICE_NAME="omniviv-api"
 ARG SERVICE_VERSION="0.2.0"
 ARG BINARY_NAME="omniviv-api"
 
-FROM clux/muslrust:nightly-2026-03-22 AS chef-builder
+FROM clux/muslrust:nightly-2026-03-22@sha256:8292104d511d378fccd5ab62c4a7e0dd42c60ff6808a45d6eaea666097abd2cb AS chef-builder
 RUN cargo install cargo-chef
 
 FROM chef-builder AS planner
@@ -51,7 +51,7 @@ RUN useradd -u 50003 -N ${SERVICE_NAME}
 RUN mkdir -p /app/data/gtfs && chown -R ${SERVICE_NAME}:users /app/data
 
 # Get static wget for health checks
-FROM busybox:musl AS busybox
+FROM busybox:musl@sha256:19b646668802469d968a05342a601e78da4322a414a7c09b1c9ee25165042138 AS busybox
 
 # Final stage
 FROM scratch

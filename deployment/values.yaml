@@ -1,0 +1,52 @@
+routing: local # local | domain
+tls: false # only supported with existing traefik
+
+reverseProxy:
+    create: true
+    network: rp
+
+domain: vindelicum.eu
+lanIp: "10.0.0.20" # LAN IP for device access (set to null to disable)
+
+services:
+    postgres:
+        image: postgres:17-alpine@sha256:ff4ccc02b97e0ebb6b328ef9ff92522f95586f83be6801896b615088defc8ad2
+        database: omniviv
+        storage:
+            volumeName: omniviv-postgres-data
+            absolutePath: null
+        shmSize: 256mb
+    api:
+        subdomain: omniviv-api
+        corsPermissive: true
+        corsOrigins: []
+        data:
+            storage:
+                volumeName: omniviv-api-data
+                absolutePath: null
+        build:
+            enabled: true
+            context: ../../api
+            dockerfile: Dockerfile
+        image: ghcr.io/firstdorsal/omniviv-api:latest
+    web:
+        subdomain: omniviv
+        build:
+            enabled: true
+            context: ../../web
+            dockerfile: Dockerfile
+        image: ghcr.io/firstdorsal/omniviv-frontend:latest
+    martin:
+        subdomain: omniviv-martin
+        image: ghcr.io/maplibre/martin@sha256:b51c201d4b1a2128676fbe3c8f370dae74efa49b3f14f13a0b0248ffddfdea86
+        dataPath: ./data/
+        cacheSeconds: 86400 # 1 day
+    motis:
+        subdomain: omniviv-motis
+        image: ghcr.io/motis-project/motis:latest@sha256:5ace015c6667bf02cc127fa94e2c944543dbe6e9ea56d8837d71d9c82530cf7f
+        # Path to directory containing germany-latest.osm.pbf and GTFS zip(s)
+        inputPath: ./data/motis/input/
+        storage:
+            volumeName: omniviv-motis-data
+            absolutePath: null
+        memLimit: 12g
