@@ -1,8 +1,10 @@
 use axum::{
     extract::{
+        ConnectInfo,
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
+    http::StatusCode,
     response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
@@ -180,8 +182,13 @@ fn compute_changes(
 pub async fn ws_vehicles(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let guard = state.ws_tracker.try_connect(addr.ip()).await.map_err(|count| {
+        warn!(ip = %addr.ip(), count, "WebSocket connection limit exceeded");
+        StatusCode::TOO_MANY_REQUESTS
+    })?;
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, guard)))
 }
 
 /// Commands sent from the receiver task to the forward task
@@ -197,7 +204,7 @@ enum SubscriptionCommand {
     },
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState, _guard: super::state::WsConnectionGuard) {
     let (mut sender, mut receiver) = socket.split();
     let mut vehicle_rx = state.vehicle_updates_tx.subscribe();
     let mut subscribed_routes: HashSet<i64> = HashSet::new();

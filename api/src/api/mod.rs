@@ -38,6 +38,7 @@ pub fn router(
         timezone,
         vehicle_updates_tx,
         schedule_cache: ScheduleCache::new(std::time::Duration::from_secs(300)),
+        ws_tracker: state::WsConnectionTracker::default(),
     };
 
     Router::new()

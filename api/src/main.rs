@@ -232,9 +232,12 @@ async fn main() {
         tracing::info!("Tracing Console: http://localhost:3000/tracing");
     }
 
-    axum::serve(listener, app)
-        .await
-        .expect("Failed to start server");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .expect("Failed to start server");
 }
 
 async fn root() -> &'static str {
