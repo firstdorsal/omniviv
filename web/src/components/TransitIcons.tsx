@@ -51,19 +51,6 @@ export function UBahnIcon({ className, ...props }: IconProps) {
 }
 
 /**
- * German S-Bahn logo - green circle with white "S".
- * Source: Wikimedia Commons, S-Bahn-Logo.svg
- */
-export function SBahnIcon({ className, ...props }: IconProps) {
-    return (
-        <svg viewBox="0 0 500 500" className={className} {...props}>
-            <circle cx="250" cy="250" r="250" fill="#008D4F" />
-            <path fill="#fff" d="M414.1 316.5c0 60.6-58.8 131.1-157.8 131.1-55.2 0-118.9-24.8-153.7-56v-78.7c33 47.5 93.1 84.1 153.7 84.1 37.1 0 66.9-21.2 66.9-43.9 0-85.4-223.8-32.6-223.8-179.9 0-77.3 75.5-118.9 143.3-118.9 56.5 0 107.1 18.5 147.4 49.7v65.6C355.3 132 302.9 99 241.4 99c-34.8 0-54.7 18.5-54.7 40.2 0 91.4 227.4 27.2 227.4 177.3" />
-        </svg>
-    );
-}
-
-/**
  * German Sinnbild Eisenbahn - train/railway pictogram (black silhouette).
  * Source: Wikimedia Commons, Sinnbild Eisenbahn.svg (StVO)
  */
@@ -90,16 +77,3 @@ export function TrainIcon({ className, ...props }: IconProps) {
     );
 }
 
-/**
- * Deutsche Bahn (DB) logo - red rounded rectangle with white DB letters.
- * Source: Wikimedia Commons, Deutsche_Bahn_AG-Logo.svg
- */
-export function DBIcon({ className, ...props }: IconProps) {
-    return (
-        <svg viewBox="0 0 100 70" className={className} {...props}>
-            <path fill="#f01414" d="M90 0H10C4.5 0 0 4.5 0 10v50c0 5.5 4.5 10 10 10h80c5.5 0 10-4.5 10-10.1V10c0-5.5-4.5-10-10-10z" />
-            <path fill="#fff" d="M92.7 59.9c.1 1.5-1.1 2.8-2.7 2.9H10c-1.5 0-2.7-1.3-2.7-2.8V10c-.1-1.5 1.1-2.8 2.6-2.9H90c1.5 0 2.7 1.3 2.7 2.8v50z" />
-            <path fill="#f01414" d="M30.6 57.9H13.8V12.1h16.8c11.9 0 18.4 7.4 18.4 22.7 0 13.2-4.5 23-18.4 23.1zm7.3-22.2c0-9.2-1-16.4-10.9-16.4h-2.2v31.2h3.9c5.8 0 9.2-4.7 9.2-14.8zM78 33.9c4.7-1.4 7.9-5.7 8-10.7 0-1-.2-11.2-13.1-11.2H53.8v45.8H70c4.3 0 17.7 0 17.7-12.9 0-3.1-1.4-9.2-9.7-11zM64.7 19.2h3.5c4.9 0 6.9 1.7 6.9 5.5 0 3-2.2 5.5-6 5.5h-4.3v-11zm4.5 31.3h-4.5V38.7h4.8c5.7 0 7.1 3.3 7.1 5.9 0 5.9-5.6 5.9-7.4 5.9z" />
-        </svg>
-    );
-}

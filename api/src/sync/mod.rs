@@ -45,7 +45,7 @@ impl SyncManager {
         config: Config,
         schedule_cache: crate::api::schedule_cache::ScheduleCache,
     ) -> Result<Self, SyncError> {
-        let osm_client = OsmClient::new().map_err(|e| SyncError::OsmError(e.to_string()))?;
+        let osm_client = OsmClient::new()?;
 
         let gtfs_provider = GtfsProvider::new(config.gtfs_sync.clone(), pool.clone())?;
 
@@ -197,6 +197,9 @@ impl SyncManager {
                 return;
             }
         };
+
+        // Validate mappings against known-correct assignments
+        static_data::validate_mappings(self.gtfs_provider.pool()).await;
 
         // Report issues from the DB-based mapping stats
         self.report_mapping_issues(&stats).await;
@@ -462,7 +465,7 @@ impl SyncManager {
             .osm_client
             .fetch_area_features(area)
             .await
-            .map_err(|e| SyncError::OsmError(e.to_string()))?;
+            ?;
 
         // Extract platform->station mappings from stop_area relations
         let platform_station_map = OsmClient::extract_station_platform_mappings(&features.stations);
@@ -1391,7 +1394,7 @@ impl SyncManager {
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
     #[error("OSM fetch error: {0}")]
-    OsmError(String),
+    OsmError(#[from] crate::providers::osm::OsmError),
     #[error("GTFS error: {0}")]
     GtfsError(#[from] crate::providers::timetables::gtfs::error::GtfsError),
     #[error("Database error: {0}")]

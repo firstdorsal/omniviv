@@ -1218,9 +1218,7 @@ mod tests {
     #[test]
     fn test_process_trip_updates_with_matching_stops() {
         let schedule = make_test_schedule();
-        let mut relevant = HashSet::new();
-        relevant.insert("stop_A".to_string());
-        relevant.insert("stop_B".to_string());
+        let relevant = HashSet::from(["stop_A".to_string(), "stop_B".to_string()]);
 
         // Monday 2026-02-02 08:00 Berlin (CET) = 07:00 UTC
         let now = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
@@ -1272,8 +1270,7 @@ mod tests {
     #[test]
     fn test_process_trip_updates_empty_feed() {
         let schedule = make_test_schedule();
-        let mut relevant = HashSet::new();
-        relevant.insert("stop_A".to_string());
+        let relevant = HashSet::from(["stop_A".to_string()]);
 
         let now = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
             .unwrap()
@@ -1299,8 +1296,7 @@ mod tests {
     #[test]
     fn test_process_trip_updates_skipped_stop() {
         let schedule = make_test_schedule();
-        let mut relevant = HashSet::new();
-        relevant.insert("stop_A".to_string());
+        let relevant = HashSet::from(["stop_A".to_string()]);
 
         let now = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
             .unwrap()
@@ -1346,8 +1342,7 @@ mod tests {
     #[test]
     fn test_process_trip_updates_no_matching_stops() {
         let schedule = make_test_schedule();
-        let mut relevant = HashSet::new();
-        relevant.insert("non_existent_stop".to_string());
+        let relevant = HashSet::from(["non_existent_stop".to_string()]);
 
         let now = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
             .unwrap()
@@ -1371,8 +1366,7 @@ mod tests {
     #[test]
     fn test_process_trip_updates_inactive_service_day() {
         let schedule = make_test_schedule();
-        let mut relevant = HashSet::new();
-        relevant.insert("stop_A".to_string());
+        let relevant = HashSet::from(["stop_A".to_string()]);
 
         // Saturday 2026-02-07 08:00 Berlin -> weekday service should be inactive
         let now = chrono::DateTime::parse_from_rfc3339("2026-02-07T07:00:00Z")
@@ -1401,9 +1395,7 @@ mod tests {
     #[test]
     fn test_compute_schedule_departures_returns_results() {
         let schedule = make_test_schedule();
-        let mut relevant = HashSet::new();
-        relevant.insert("stop_A".to_string());
-        relevant.insert("stop_B".to_string());
+        let relevant = HashSet::from(["stop_A".to_string(), "stop_B".to_string()]);
 
         // Monday 2026-02-02 08:00 Berlin (CET) = 07:00 UTC
         let ref_time = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
@@ -1425,9 +1417,7 @@ mod tests {
     #[test]
     fn test_compute_schedule_departures_sorted_by_time() {
         let schedule = make_test_schedule();
-        let mut relevant = HashSet::new();
-        relevant.insert("stop_A".to_string());
-        relevant.insert("stop_B".to_string());
+        let relevant = HashSet::from(["stop_A".to_string(), "stop_B".to_string()]);
 
         let ref_time = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
             .unwrap()
@@ -1452,8 +1442,7 @@ mod tests {
     #[test]
     fn test_compute_schedule_departures_no_estimated_time() {
         let schedule = make_test_schedule();
-        let mut relevant = HashSet::new();
-        relevant.insert("stop_A".to_string());
+        let relevant = HashSet::from(["stop_A".to_string()]);
 
         let ref_time = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
             .unwrap()
@@ -1479,8 +1468,7 @@ mod tests {
     #[test]
     fn test_compute_schedule_departures_outside_horizon() {
         let schedule = make_test_schedule();
-        let mut relevant = HashSet::new();
-        relevant.insert("stop_A".to_string());
+        let relevant = HashSet::from(["stop_A".to_string()]);
 
         // Set reference time far from the scheduled departure (08:00 Berlin = 07:00 UTC)
         // Reference at 12:00 UTC = 13:00 Berlin, with only 30 min horizon
@@ -1645,8 +1633,7 @@ mod tests {
     #[test]
     fn test_destination_falls_back_to_last_stop_when_headsign_missing() {
         let schedule = make_test_schedule_no_headsign();
-        let mut relevant = HashSet::new();
-        relevant.insert("stop_A".to_string());
+        let relevant = HashSet::from(["stop_A".to_string()]);
 
         // Monday 2026-02-02 at 07:00 UTC = 08:00 Berlin (CET)
         let ref_time = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
@@ -1692,9 +1679,7 @@ mod tests {
     #[test]
     fn test_compute_schedule_departures_emits_arrival_and_departure_events() {
         let schedule = make_test_schedule();
-        let mut relevant = HashSet::new();
-        relevant.insert("stop_A".to_string());
-        relevant.insert("stop_B".to_string());
+        let relevant = HashSet::from(["stop_A".to_string(), "stop_B".to_string()]);
 
         // Monday 2026-02-02 08:00 Berlin (CET) = 07:00 UTC
         let ref_time = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")

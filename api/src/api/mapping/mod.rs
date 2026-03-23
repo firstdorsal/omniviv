@@ -533,12 +533,7 @@ async fn fetch_all_entries(
 const LAT_DELTA: f64 = 0.002;
 const LON_DELTA: f64 = 0.003;
 
-/// Compute the distance in meters between two coordinates (approximate)
-fn distance_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    let dlat = (lat1 - lat2) * 111_000.0;
-    let dlon = (lon1 - lon2) * 111_000.0 * lat1.to_radians().cos();
-    (dlat * dlat + dlon * dlon).sqrt()
-}
+use crate::api::utils::distance_meters;
 
 /// Fetch GTFS candidate stops for multiple coordinates in a single query.
 ///

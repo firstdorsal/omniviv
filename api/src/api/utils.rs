@@ -35,6 +35,14 @@ pub fn parse_reference_time(reference_time: &Option<String>) -> Option<DateTime<
     Some(dt)
 }
 
+/// Approximate distance in meters between two WGS84 coordinates using
+/// equirectangular projection. Accurate enough for short distances (<100 km).
+pub fn distance_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let dlat = (lat1 - lat2) * 111_000.0;
+    let dlon = (lon1 - lon2) * 111_000.0 * lat1.to_radians().cos();
+    (dlat * dlat + dlon * dlon).sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

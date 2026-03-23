@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -40,14 +41,16 @@ impl ScheduleCache {
         sorted.join(",")
     }
 
-    /// Get a cached schedule for the given stop IDs, or build one from the database.
-    pub async fn get_or_build(
+    /// Check cache, or build and insert using the provided async builder.
+    async fn get_or_build_inner<F, Fut>(
         &self,
-        pool: &PgPool,
-        relevant_ifopt_ids: &HashSet<String>,
-    ) -> Result<Arc<GtfsSchedule>, GtfsError> {
-        let key = Self::cache_key(relevant_ifopt_ids);
-
+        key: String,
+        build: F,
+    ) -> Result<Arc<GtfsSchedule>, GtfsError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<GtfsSchedule, GtfsError>>,
+    {
         // Check cache first
         {
             let entries = self.entries.read().await;
@@ -60,7 +63,7 @@ impl ScheduleCache {
         }
 
         // Cache miss — build from database
-        let schedule = static_data::build_schedule_from_db(pool, relevant_ifopt_ids).await?;
+        let schedule = build().await?;
         let arc = Arc::new(schedule);
 
         // Insert into cache, evicting expired entries and duplicates
@@ -78,6 +81,19 @@ impl ScheduleCache {
         Ok(arc)
     }
 
+    /// Get a cached schedule for the given stop IDs, or build one from the database.
+    pub async fn get_or_build(
+        &self,
+        pool: &PgPool,
+        relevant_ifopt_ids: &HashSet<String>,
+    ) -> Result<Arc<GtfsSchedule>, GtfsError> {
+        let key = Self::cache_key(relevant_ifopt_ids);
+        self.get_or_build_inner(key, || {
+            static_data::build_schedule_from_db(pool, relevant_ifopt_ids)
+        })
+        .await
+    }
+
     /// Get a cached schedule for GTFS stop IDs (bypassing IFOPT mapping).
     pub async fn get_or_build_by_gtfs_stop(
         &self,
@@ -89,35 +105,10 @@ impl ScheduleCache {
         let mut sorted: Vec<&str> = gtfs_stop_ids.iter().map(|s| s.as_str()).collect();
         sorted.sort_unstable();
         key.push_str(&sorted.join(","));
-
-        // Check cache
-        {
-            let entries = self.entries.read().await;
-            if let Some(entry) = entries
-                .iter()
-                .find(|e| e.key == key && e.inserted_at.elapsed() < self.ttl)
-            {
-                return Ok(Arc::clone(&entry.schedule));
-            }
-        }
-
-        // Build from database
-        let schedule =
-            static_data::build_schedule_from_db_by_gtfs_stop(pool, gtfs_stop_ids).await?;
-        let arc = Arc::new(schedule);
-
-        {
-            let mut entries = self.entries.write().await;
-            let ttl = self.ttl;
-            entries.retain(|e| e.key != key && e.inserted_at.elapsed() < ttl);
-            entries.push(CacheEntry {
-                key,
-                inserted_at: Instant::now(),
-                schedule: Arc::clone(&arc),
-            });
-        }
-
-        Ok(arc)
+        self.get_or_build_inner(key, || {
+            static_data::build_schedule_from_db_by_gtfs_stop(pool, gtfs_stop_ids)
+        })
+        .await
     }
 
     /// Invalidate all cached entries. Call after GTFS schedule refresh or mapping changes.

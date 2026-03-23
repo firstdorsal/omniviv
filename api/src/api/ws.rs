@@ -14,7 +14,8 @@ use tokio::sync::broadcast;
 use tracing::warn;
 
 use super::state::AppState;
-use super::vehicles::Vehicle;
+use super::utils::parse_reference_time as parse_ws_reference_time;
+use super::vehicles::{RouteInfo, RouteStopInfo, Vehicle};
 
 /// Error type for internal WebSocket data-building operations.
 /// Converts to String for WebSocket error messages while providing
@@ -345,8 +346,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     forward_task.abort();
 }
 
-use super::vehicles::{RouteInfo, RouteStopInfo};
-
 #[derive(Debug, sqlx::FromRow)]
 struct RouteInfoWithId {
     osm_id: i64,
@@ -478,6 +477,4 @@ async fn build_vehicle_data(
 
     Ok(results)
 }
-
-use super::utils::parse_reference_time as parse_ws_reference_time;
 

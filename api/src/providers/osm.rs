@@ -509,7 +509,6 @@ out skel qt;"#,
                             if role == "stop" || role == "platform" || role.is_empty() {
                                 route_stops.push(RouteStop {
                                     osm_id: member.member_ref,
-                                    osm_type: "node".to_string(),
                                     sequence: seq as i32,
                                     role,
                                 });
@@ -626,9 +625,6 @@ pub struct RouteWay {
 #[derive(Debug, Clone)]
 pub struct RouteStop {
     pub osm_id: i64,
-    /// Kept for debugging; not read after construction.
-    #[allow(dead_code)]
-    pub osm_type: String,
     pub sequence: i32,
     pub role: String,
 }

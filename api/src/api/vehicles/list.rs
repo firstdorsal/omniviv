@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use utoipa::ToSchema;
 
 use crate::api::state::AppState;
+use crate::api::utils::{ifopt_station_prefix, parse_reference_time};
 use crate::api::{ErrorResponse, error::internal_error};
-use crate::api::utils::parse_reference_time;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct VehiclesByRouteRequest {
@@ -84,8 +84,6 @@ pub struct RouteInfo {
 /// Maximum time gap (minutes) between a trip's last arrival and the next trip's
 /// first departure for them to be considered the same physical vehicle.
 const TRIP_LINK_MAX_GAP_MINUTES: i64 = 15;
-
-use crate::api::utils::ifopt_station_prefix;
 
 /// Link consecutive trips that represent the same physical vehicle looping back.
 /// Sets `next_trip_id` on a trip when the next trip on the same line starts at
