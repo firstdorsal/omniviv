@@ -335,8 +335,7 @@ pub async fn build_schedule_from_db(
 ) -> Result<GtfsSchedule, GtfsError> {
     let ifopt_list: Vec<&str> = relevant_ifopt_ids.iter().map(|s| s.as_str()).collect();
 
-    // 1. Get IFOPT -> GTFS mapping for our monitored stops
-    // Order by is_manual DESC so manual mappings take priority in reverse map
+    // Get IFOPT -> GTFS mapping for our monitored stops
     let mapping_rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT ifopt, gtfs_stop_id FROM ifopt_gtfs_mapping \
          WHERE ifopt = ANY($1::text[]) \
@@ -359,17 +358,43 @@ pub async fn build_schedule_from_db(
             .push(ifopt.clone());
     }
 
-    let gtfs_stop_ids: Vec<&str> = gtfs_to_ifopt.keys().map(|s| s.as_str()).collect();
+    let gtfs_stop_ids: Vec<String> = gtfs_to_ifopt.keys().cloned().collect();
     if gtfs_stop_ids.is_empty() {
         debug!("No GTFS mapping found for relevant stops, returning empty schedule");
         return Ok(GtfsSchedule::empty_with_mappings(ifopt_to_gtfs, gtfs_to_ifopt));
     }
 
-    // 2. Get trip IDs that visit our monitored GTFS stops
+    let gtfs_id_refs: Vec<&str> = gtfs_stop_ids.iter().map(|s| s.as_str()).collect();
+    build_schedule_from_gtfs_ids(pool, &gtfs_id_refs, ifopt_to_gtfs, gtfs_to_ifopt).await
+}
+
+/// Build a GTFS schedule from the database using GTFS stop IDs directly,
+/// bypassing the IFOPT mapping. Used for querying departures at GTFS stops
+/// that may not have an IFOPT mapping.
+pub async fn build_schedule_from_db_by_gtfs_stop(
+    pool: &PgPool,
+    gtfs_stop_ids: &HashSet<String>,
+) -> Result<GtfsSchedule, GtfsError> {
+    let gtfs_id_list: Vec<&str> = gtfs_stop_ids.iter().map(|s| s.as_str()).collect();
+    if gtfs_id_list.is_empty() {
+        return Ok(GtfsSchedule::empty_with_mappings(HashMap::new(), HashMap::new()));
+    }
+    build_schedule_from_gtfs_ids(pool, &gtfs_id_list, HashMap::new(), HashMap::new()).await
+}
+
+/// Shared implementation: load trips, stop_times, routes, calendars, and stops
+/// for the given GTFS stop IDs and assemble a GtfsSchedule.
+async fn build_schedule_from_gtfs_ids(
+    pool: &PgPool,
+    gtfs_stop_ids: &[&str],
+    ifopt_to_gtfs: HashMap<String, Vec<String>>,
+    gtfs_to_ifopt: HashMap<String, Vec<String>>,
+) -> Result<GtfsSchedule, GtfsError> {
+    // 1. Get trip IDs that visit our GTFS stops
     let trip_ids: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT trip_id FROM gtfs_stop_times WHERE stop_id = ANY($1::text[])",
     )
-    .bind(&gtfs_stop_ids)
+    .bind(gtfs_stop_ids)
     .fetch_all(pool)
     .await?;
 
@@ -381,219 +406,6 @@ pub async fn build_schedule_from_db(
 
     if trip_ids.is_empty() {
         return Ok(GtfsSchedule::empty_with_mappings(ifopt_to_gtfs, gtfs_to_ifopt));
-    }
-
-    // 3. Load trip details
-    let trip_rows: Vec<(String, String, String, Option<String>, Option<i32>)> = sqlx::query_as(
-        "SELECT trip_id, route_id, service_id, trip_headsign, direction_id \
-         FROM gtfs_trips WHERE trip_id = ANY($1::text[])",
-    )
-    .bind(&trip_ids)
-    .fetch_all(pool)
-    .await?;
-
-    let mut trips = HashMap::with_capacity(trip_rows.len());
-    let mut route_ids: HashSet<String> = HashSet::new();
-    let mut service_ids: HashSet<String> = HashSet::new();
-    for (trip_id, route_id, service_id, headsign, direction_id) in trip_rows {
-        route_ids.insert(route_id.clone());
-        service_ids.insert(service_id.clone());
-        trips.insert(
-            trip_id.clone(),
-            GtfsTrip {
-                trip_id,
-                route_id,
-                service_id,
-                trip_headsign: headsign,
-                direction_id,
-            },
-        );
-    }
-
-    // 4. Load stop_times for those trips (ordered for correct sequencing)
-    let stop_time_rows: Vec<(String, i32, String, Option<i32>, Option<i32>)> = sqlx::query_as(
-        "SELECT trip_id, stop_sequence, stop_id, arrival_time, departure_time \
-         FROM gtfs_stop_times WHERE trip_id = ANY($1::text[]) \
-         ORDER BY trip_id, stop_sequence",
-    )
-    .bind(&trip_ids)
-    .fetch_all(pool)
-    .await?;
-
-    let mut stop_times: HashMap<String, Vec<GtfsStopTime>> = HashMap::new();
-    let mut all_stop_ids: HashSet<String> = HashSet::new();
-    for (trip_id, seq, stop_id, arrival, departure) in stop_time_rows {
-        all_stop_ids.insert(stop_id.clone());
-        stop_times
-            .entry(trip_id)
-            .or_default()
-            .push(GtfsStopTime {
-                stop_sequence: seq,
-                stop_id,
-                arrival_time: arrival,
-                departure_time: departure,
-            });
-    }
-
-    // Build trips_by_stop reverse index
-    let mut trips_by_stop: HashMap<String, HashSet<String>> = HashMap::new();
-    for (trip_id, stop_time_list) in &stop_times {
-        for stop_time in stop_time_list {
-            trips_by_stop
-                .entry(stop_time.stop_id.clone())
-                .or_default()
-                .insert(trip_id.clone());
-        }
-    }
-
-    // 5. Load routes
-    let route_id_list: Vec<String> = route_ids.into_iter().collect();
-    let route_rows: Vec<(String, Option<String>, Option<String>, Option<i32>)> = sqlx::query_as(
-        "SELECT route_id, route_short_name, route_long_name, route_type \
-         FROM gtfs_routes WHERE route_id = ANY($1::text[])",
-    )
-    .bind(&route_id_list)
-    .fetch_all(pool)
-    .await?;
-
-    let mut routes = HashMap::with_capacity(route_rows.len());
-    for (route_id, short, long, rtype) in route_rows {
-        routes.insert(
-            route_id.clone(),
-            GtfsRoute {
-                route_id,
-                route_short_name: short,
-                route_long_name: long,
-                route_type: rtype,
-            },
-        );
-    }
-
-    // 6. Load calendars and calendar_dates for relevant services
-    let service_id_list: Vec<String> = service_ids.into_iter().collect();
-
-    let cal_rows: Vec<(
-        String,
-        bool,
-        bool,
-        bool,
-        bool,
-        bool,
-        bool,
-        bool,
-        NaiveDate,
-        NaiveDate,
-    )> = sqlx::query_as(
-        "SELECT service_id, monday, tuesday, wednesday, thursday, friday, saturday, sunday, \
-         start_date, end_date FROM gtfs_calendar WHERE service_id = ANY($1::text[])",
-    )
-    .bind(&service_id_list)
-    .fetch_all(pool)
-    .await?;
-
-    let mut calendars = HashMap::with_capacity(cal_rows.len());
-    for (sid, mon, tue, wed, thu, fri, sat, sun, start, end_d) in cal_rows {
-        calendars.insert(
-            sid.clone(),
-            GtfsCalendar {
-                service_id: sid,
-                days: [mon, tue, wed, thu, fri, sat, sun],
-                start_date: start,
-                end_date: end_d,
-            },
-        );
-    }
-
-    let cd_rows: Vec<(String, NaiveDate, i32)> = sqlx::query_as(
-        "SELECT service_id, date, exception_type \
-         FROM gtfs_calendar_dates WHERE service_id = ANY($1::text[])",
-    )
-    .bind(&service_id_list)
-    .fetch_all(pool)
-    .await?;
-
-    let mut calendar_dates: HashMap<String, Vec<GtfsCalendarDate>> = HashMap::new();
-    for (sid, date, exc_type) in cd_rows {
-        calendar_dates
-            .entry(sid)
-            .or_default()
-            .push(GtfsCalendarDate {
-                date,
-                exception_type: exc_type,
-            });
-    }
-
-    // 7. Load stop names (for headsign fallback — last stop name)
-    let stop_id_list: Vec<String> = all_stop_ids.into_iter().collect();
-    let stop_rows: Vec<(String, Option<String>, Option<String>, Option<f64>, Option<f64>)> =
-        sqlx::query_as(
-            "SELECT stop_id, stop_name, parent_station, lat, lon \
-             FROM gtfs_stops WHERE stop_id = ANY($1::text[])",
-        )
-        .bind(&stop_id_list)
-        .fetch_all(pool)
-        .await?;
-
-    let mut stops = HashMap::with_capacity(stop_rows.len());
-    for (stop_id, name, parent, lat, lon) in stop_rows {
-        stops.insert(
-            stop_id.clone(),
-            GtfsStop {
-                stop_id,
-                stop_name: name,
-                parent_station: parent,
-                lat,
-                lon,
-            },
-        );
-    }
-
-    info!(
-        trips = trips.len(),
-        stop_times_trips = stop_times.len(),
-        routes = routes.len(),
-        stops = stops.len(),
-        mapping = ifopt_to_gtfs.len(),
-        "Built realtime cache from PostgreSQL"
-    );
-
-    Ok(GtfsSchedule {
-        stops,
-        routes,
-        trips,
-        stop_times,
-        calendars,
-        calendar_dates,
-        trips_by_stop,
-        ifopt_to_gtfs,
-        gtfs_to_ifopt,
-        loaded_at: chrono::Utc::now(),
-    })
-}
-
-/// Build a GTFS schedule from the database using GTFS stop IDs directly,
-/// bypassing the IFOPT mapping. Used for querying departures at GTFS stops
-/// that may not have an IFOPT mapping.
-pub async fn build_schedule_from_db_by_gtfs_stop(
-    pool: &PgPool,
-    gtfs_stop_ids: &HashSet<String>,
-) -> Result<GtfsSchedule, GtfsError> {
-    let gtfs_id_list: Vec<&str> = gtfs_stop_ids.iter().map(|s| s.as_str()).collect();
-
-    if gtfs_id_list.is_empty() {
-        return Ok(GtfsSchedule::empty_with_mappings(HashMap::new(), HashMap::new()));
-    }
-
-    // 1. Get trip IDs that visit our GTFS stops
-    let trip_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT trip_id FROM gtfs_stop_times WHERE stop_id = ANY($1::text[])",
-    )
-    .bind(&gtfs_id_list)
-    .fetch_all(pool)
-    .await?;
-
-    if trip_ids.is_empty() {
-        return Ok(GtfsSchedule::empty_with_mappings(HashMap::new(), HashMap::new()));
     }
 
     // 2. Load trip details
@@ -648,6 +460,7 @@ pub async fn build_schedule_from_db_by_gtfs_stop(
             });
     }
 
+    // Build trips_by_stop reverse index
     let mut trips_by_stop: HashMap<String, HashSet<String>> = HashMap::new();
     for (trip_id, stop_time_list) in &stop_times {
         for stop_time in stop_time_list {
@@ -681,7 +494,7 @@ pub async fn build_schedule_from_db_by_gtfs_stop(
         );
     }
 
-    // 5. Load calendars
+    // 5. Load calendars and calendar_dates
     let service_id_list: Vec<String> = service_ids.into_iter().collect();
     let cal_rows: Vec<(
         String, bool, bool, bool, bool, bool, bool, bool, NaiveDate, NaiveDate,
@@ -750,6 +563,15 @@ pub async fn build_schedule_from_db_by_gtfs_stop(
         );
     }
 
+    info!(
+        trips = trips.len(),
+        stop_times_trips = stop_times.len(),
+        routes = routes.len(),
+        stops = stops.len(),
+        mapping = ifopt_to_gtfs.len(),
+        "Built realtime cache from PostgreSQL"
+    );
+
     Ok(GtfsSchedule {
         stops,
         routes,
@@ -758,8 +580,8 @@ pub async fn build_schedule_from_db_by_gtfs_stop(
         calendars,
         calendar_dates,
         trips_by_stop,
-        ifopt_to_gtfs: HashMap::new(),
-        gtfs_to_ifopt: HashMap::new(),
+        ifopt_to_gtfs,
+        gtfs_to_ifopt,
         loaded_at: chrono::Utc::now(),
     })
 }
