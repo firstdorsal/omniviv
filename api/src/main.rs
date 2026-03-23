@@ -4,18 +4,20 @@ use axum::{Router, routing::get};
 use sqlx::PgPool;
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
-
 #[cfg(feature = "dev-tools")]
 use tracing_web_console::TracingLayer;
+#[cfg(feature = "dev-tools")]
+use utoipa::OpenApi;
+#[cfg(feature = "dev-tools")]
+use utoipa_swagger_ui::SwaggerUi;
 
 use omniviv_api::{
     api,
     config::{Config, read_env_or_file},
-    sync::{self, SyncManager},
+    sync::SyncManager,
 };
 
+#[cfg(feature = "dev-tools")]
 #[derive(OpenApi)]
 #[openapi(
     info(title = "Omniviv API", version = env!("CARGO_PKG_VERSION")),
@@ -127,7 +129,13 @@ async fn main() {
         let origins: Vec<_> = config
             .cors_origins
             .iter()
-            .filter_map(|o| o.parse().ok())
+            .filter_map(|o| match o.parse() {
+                Ok(origin) => Some(origin),
+                Err(e) => {
+                    tracing::warn!(origin = %o, error = %e, "Failed to parse CORS origin, skipping");
+                    None
+                }
+            })
             .collect();
         CorsLayer::new()
             .allow_origin(origins)
@@ -185,7 +193,6 @@ async fn main() {
     let mut app = Router::new()
         .route("/", get(root))
         .nest("/api", api::router(pool.clone(), departure_store, time_horizon_minutes, timezone, issue_store, vehicle_updates_tx, admin_api_key))
-        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(cors_layer);
@@ -193,10 +200,10 @@ async fn main() {
     // Add dev tools only when feature is enabled
     #[cfg(feature = "dev-tools")]
     {
-        let tracing_layer = TracingLayer::new("/tracing");
         app = app
-            .merge(tracing_layer.into_router());
-        tracing::warn!("Dev tools enabled: Tracing Console is accessible");
+            .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+            .merge(TracingLayer::new("/tracing").into_router());
+        tracing::warn!("Dev tools enabled: Swagger UI and Tracing Console are accessible");
     }
 
     // Start server

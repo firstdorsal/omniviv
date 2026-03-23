@@ -325,8 +325,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     },
                     Err(e) => {
                         warn!("Failed to parse WebSocket message: {}", e);
-                        let error_msg = format!("Invalid message format: {}", e);
-                        let _ = sub_tx.send(SubscriptionCommand::SendError { message: error_msg }).await;
+                        let _ = sub_tx.send(SubscriptionCommand::SendError {
+                            message: "Invalid message format".to_string(),
+                        }).await;
                     }
                 }
             }

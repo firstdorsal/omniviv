@@ -93,7 +93,7 @@ struct GtfsStopRow {
 pub async fn list_gtfs_stops(
     State(state): State<GtfsStopsState>,
     axum::extract::Query(query): axum::extract::Query<GtfsStopsQuery>,
-) -> Json<GtfsStopsListResponse> {
+) -> Result<Json<GtfsStopsListResponse>, axum::http::StatusCode> {
     // Clamp limit to MAX_LIMIT
     let limit = query.limit.min(MAX_LIMIT);
     let offset = query.offset;
@@ -204,7 +204,10 @@ pub async fn list_gtfs_stops(
         .build_query_scalar()
         .fetch_one(&state.pool)
         .await
-        .unwrap_or(0);
+        .map_err(|e| {
+            tracing::error!("GTFS stops count query failed: {}", e);
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let total_count = total_count as usize;
 
     // Execute data query
@@ -212,7 +215,10 @@ pub async fn list_gtfs_stops(
         .build_query_as()
         .fetch_all(&state.pool)
         .await
-        .unwrap_or_default();
+        .map_err(|e| {
+            tracing::error!("GTFS stops data query failed: {}", e);
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let stops: Vec<GtfsStopResponse> = rows
         .into_iter()
@@ -229,13 +235,13 @@ pub async fn list_gtfs_stops(
 
     let has_more = offset + stops.len() < total_count;
 
-    Json(GtfsStopsListResponse {
+    Ok(Json(GtfsStopsListResponse {
         stops,
         total_count,
         offset,
         limit,
         has_more,
-    })
+    }))
 }
 
 pub fn router(pool: PgPool) -> Router {
