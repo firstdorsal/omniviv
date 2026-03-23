@@ -19,11 +19,20 @@ A real-time public transport visualization platform.
 -   Station and platform markers with labels
 -   Dark/light mode support
 -   Context menu (copy coordinates, measure distance)
+-   Departure pinning sidebar for quick access to favorite stops
+-   Location search with recent search history
+-   Route planner UI with MOTIS integration
+-   GTFS-RT cancellation detection
+-   Trip linking for vehicle continuity
+-   Time simulation / time control
+-   GTFS-to-OSM mapping manager
+-   ESP device flasher (browser-based firmware flashing)
 
 ### Partially Working
 
 -   **Collision avoidance**: Basic implementation exists but not fully reliable
 -   **Rendezvous blinking**: Flashes green when trams are about to depart (timing may need tuning)
+-   **Navigation routing**: Route planning UI with MOTIS backend (basic integration complete, refinements ongoing)
 -   **Offline departure boards**: GTFS bundle download and client-side departure computation (API and IndexedDB storage implemented, UI integration pending)
 
 ### Planned / Not Yet Implemented
@@ -34,9 +43,7 @@ A real-time public transport visualization platform.
 -   Dark mode for map tiles/style
 -   3D terrain with underground tunnel visualization
 -   Day/night cycle and weather visualization
--   Navigation routing between points
 -   Offline map tiles
--   Pin stations to sidebar for quick access
 -   "Leave now" traffic light indicator for optimal departure timing
 -   First-person driver's seat view for vehicles
 -   Multiple city/area support
@@ -47,6 +54,8 @@ A real-time public transport visualization platform.
 
 -   **API**: Rust-based backend using Axum
 -   **Web**: React frontend with MapLibre GL
+-   **MOTIS**: Multi-modal routing engine for trip planning
+-   **Firmware**: ESP32-S3 display firmware for physical departure boards (PlatformIO)
 -   **Deployment**: docker compose with mpm compose
 
 ## Quick Start
