@@ -1736,4 +1736,160 @@ mod tests {
             "stop_A should have at least one Departure event"
         );
     }
+
+    // --- collect_cancelled_trips_from_alerts tests ---
+
+    fn make_alert_entity(
+        entity_id: &str,
+        effect: i32,
+        trip_ids: &[&str],
+        active_period: Option<(Option<u64>, Option<u64>)>,
+    ) -> gtfs_realtime::FeedEntity {
+        let informed: Vec<gtfs_realtime::EntitySelector> = trip_ids
+            .iter()
+            .map(|tid| gtfs_realtime::EntitySelector {
+                agency_id: None,
+                route_id: None,
+                route_type: None,
+                trip: Some(gtfs_realtime::TripDescriptor {
+                    trip_id: Some(tid.to_string()),
+                    route_id: None,
+                    direction_id: None,
+                    start_time: None,
+                    start_date: None,
+                    schedule_relationship: None,
+                    modified_trip: None,
+                }),
+                stop_id: None,
+                direction_id: None,
+            })
+            .collect();
+
+        let periods = match active_period {
+            Some((start, end)) => vec![gtfs_realtime::TimeRange { start, end }],
+            None => vec![],
+        };
+
+        gtfs_realtime::FeedEntity {
+            id: entity_id.to_string(),
+            is_deleted: None,
+            trip_update: None,
+            vehicle: None,
+            alert: Some(gtfs_realtime::Alert {
+                active_period: periods,
+                informed_entity: informed,
+                cause: None,
+                effect: Some(effect),
+                url: None,
+                header_text: None,
+                description_text: None,
+                tts_header_text: None,
+                tts_description_text: None,
+                severity_level: None,
+                image: None,
+                image_alternative_text: None,
+                cause_detail: None,
+                effect_detail: None,
+            }),
+            shape: None,
+            stop: None,
+            trip_modifications: None,
+        }
+    }
+
+    #[test]
+    fn alert_no_service_cancels_trip() {
+        let schedule = make_test_schedule();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let tz = chrono_tz::Europe::Berlin;
+
+        // NO_SERVICE = effect 1
+        let feed = make_feed_message(vec![make_alert_entity("alert1", 1, &["trip_100"], None)]);
+        let cancelled = collect_cancelled_trips_from_alerts(&feed, &schedule, now, tz);
+        assert!(cancelled.contains("trip_100"));
+    }
+
+    #[test]
+    fn alert_unknown_effect_cancels_trip() {
+        let schedule = make_test_schedule();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let tz = chrono_tz::Europe::Berlin;
+
+        // UNKNOWN_EFFECT = effect 0
+        let feed = make_feed_message(vec![make_alert_entity("alert1", 0, &["trip_100"], None)]);
+        let cancelled = collect_cancelled_trips_from_alerts(&feed, &schedule, now, tz);
+        assert!(cancelled.contains("trip_100"));
+    }
+
+    #[test]
+    fn alert_other_effect_does_not_cancel() {
+        let schedule = make_test_schedule();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let tz = chrono_tz::Europe::Berlin;
+
+        // DETOUR = effect 5 — should not cancel
+        let feed = make_feed_message(vec![make_alert_entity("alert1", 5, &["trip_100"], None)]);
+        let cancelled = collect_cancelled_trips_from_alerts(&feed, &schedule, now, tz);
+        assert!(cancelled.is_empty());
+    }
+
+    #[test]
+    fn alert_outside_active_period_is_ignored() {
+        let schedule = make_test_schedule();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let now_unix = now.timestamp() as u64;
+        let tz = chrono_tz::Europe::Berlin;
+
+        // Active period ends 1 hour before now
+        let feed = make_feed_message(vec![make_alert_entity(
+            "alert1",
+            1,
+            &["trip_100"],
+            Some((Some(now_unix - 7200), Some(now_unix - 3600))),
+        )]);
+        let cancelled = collect_cancelled_trips_from_alerts(&feed, &schedule, now, tz);
+        assert!(cancelled.is_empty());
+    }
+
+    #[test]
+    fn alert_within_active_period_cancels() {
+        let schedule = make_test_schedule();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let now_unix = now.timestamp() as u64;
+        let tz = chrono_tz::Europe::Berlin;
+
+        // Active period includes now
+        let feed = make_feed_message(vec![make_alert_entity(
+            "alert1",
+            1,
+            &["trip_100"],
+            Some((Some(now_unix - 3600), Some(now_unix + 3600))),
+        )]);
+        let cancelled = collect_cancelled_trips_from_alerts(&feed, &schedule, now, tz);
+        assert!(cancelled.contains("trip_100"));
+    }
+
+    #[test]
+    fn empty_active_period_means_always_active() {
+        let schedule = make_test_schedule();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-02-02T07:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let tz = chrono_tz::Europe::Berlin;
+
+        // No active_period = always active
+        let feed = make_feed_message(vec![make_alert_entity("alert1", 1, &["trip_100"], None)]);
+        let cancelled = collect_cancelled_trips_from_alerts(&feed, &schedule, now, tz);
+        assert!(cancelled.contains("trip_100"));
+    }
 }

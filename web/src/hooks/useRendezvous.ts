@@ -40,7 +40,7 @@ interface UseRendezvousResult {
 }
 
 // Calculate if it's dark based on date (approximate sunset times for Augsburg)
-function isDark(date: Date): boolean {
+export function isDark(date: Date): boolean {
     const month = date.getMonth(); // 0-11
     const hour = date.getHours();
     const minute = date.getMinutes();
@@ -69,7 +69,7 @@ function isDark(date: Date): boolean {
  * Estimate a vehicle's current lat/lon by interpolating between its scheduled stops.
  * Returns null when the vehicle has no usable timing data.
  */
-function estimateVehiclePosition(vehicle: Vehicle, currentTime: Date): { lat: number; lon: number } | null {
+export function estimateVehiclePosition(vehicle: Vehicle, currentTime: Date): { lat: number; lon: number } | null {
     const { stops } = vehicle;
     if (stops.length === 0) return null;
 
@@ -94,8 +94,9 @@ function estimateVehiclePosition(vehicle: Vehicle, currentTime: Date): { lat: nu
             const nextArrival = nextStop.arrival_time_estimated ?? nextStop.arrival_time;
             const nextArrivalMs = nextArrival ? new Date(nextArrival).getTime() : null;
 
-            if (effectiveDeparture && nextArrivalMs && now >= effectiveDeparture && now < nextArrivalMs) {
-                const progress = (now - effectiveDeparture) / (nextArrivalMs - effectiveDeparture);
+            const segmentDuration = (nextArrivalMs ?? 0) - (effectiveDeparture ?? 0);
+            if (effectiveDeparture && nextArrivalMs && now >= effectiveDeparture && now < nextArrivalMs && segmentDuration > 0) {
+                const progress = (now - effectiveDeparture) / segmentDuration;
                 return {
                     lat: stop.lat + progress * (nextStop.lat - stop.lat),
                     lon: stop.lon + progress * (nextStop.lon - stop.lon),
@@ -123,7 +124,7 @@ function estimateVehiclePosition(vehicle: Vehicle, currentTime: Date): { lat: nu
 }
 
 // Calculate distance between two points in meters (Haversine)
-function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+export function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
     const R = 6371000;
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
