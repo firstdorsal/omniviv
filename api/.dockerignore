@@ -4,3 +4,5 @@ database/
 data/gtfs/extracted/
 *.md
 .git/
+.env
+.env.*

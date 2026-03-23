@@ -77,12 +77,12 @@ use omniviv_api::{
         api::mapping::MappingStatus,
         api::mapping::MappingFilter,
         api::mapping::CandidateStop,
-        sync::Departure,
-        sync::EventType,
-        sync::OsmIssue,
-        sync::OsmIssueType,
-        sync::IssueCategory,
-        sync::MatchCandidate,
+        omniviv_api::sync::Departure,
+        omniviv_api::sync::EventType,
+        omniviv_api::sync::OsmIssue,
+        omniviv_api::sync::OsmIssueType,
+        omniviv_api::sync::IssueCategory,
+        omniviv_api::sync::MatchCandidate,
     )),
     tags(
         (name = "areas", description = "Area management endpoints"),
@@ -224,9 +224,9 @@ async fn main() {
         .expect("Failed to bind to port 3000");
 
     tracing::info!("Server running on http://localhost:3000");
-    tracing::info!("Swagger UI: http://localhost:3000/swagger-ui");
     #[cfg(feature = "dev-tools")]
     {
+        tracing::info!("Swagger UI: http://localhost:3000/swagger-ui/");
         tracing::info!("Tracing Console: http://localhost:3000/tracing");
     }
 
