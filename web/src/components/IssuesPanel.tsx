@@ -8,14 +8,13 @@ import {
     CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { ChevronDown } from "lucide-react";
-import { getConfig } from "../config";
+import { getApiClient } from "../apiClient";
 import {
     IssueCategory,
     OsmIssue,
     OsmIssueType,
     TransportType,
     MatchCandidate,
-    IssueListResponse,
 } from "../api";
 import { MappingManager, type MappingLine, type MappingMapData } from "./MappingManager";
 
@@ -333,11 +332,8 @@ export function OsmIssuesPanel({ onMapDataChange, onFlyTo, initialTab, onTabChan
     useEffect(() => {
         const fetchIssues = async () => {
             try {
-                const response = await fetch(`${getConfig().apiUrl}/api/issues`);
-                if (response.ok) {
-                    const data: IssueListResponse = await response.json();
-                    setIssues(data.issues);
-                }
+                const response = await getApiClient().api.listIssues();
+                setIssues(response.data.issues);
             } catch (error) {
                 console.error("Failed to fetch issues:", error);
             } finally {

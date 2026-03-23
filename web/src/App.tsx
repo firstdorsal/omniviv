@@ -1,7 +1,8 @@
 import { Bug, Clock, Github, Layers, Navigation, Settings, TrainFront, Wifi, WifiOff } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TbWorldX } from "react-icons/tb";
-import { Api, Area, Route, RouteGeometry, Station } from "./api";
+import { Area, Route, RouteGeometry, Station } from "./api";
+import { getApiClient } from "./apiClient";
 import { DeparturesPanel, type PinnedStop } from "./components/DeparturesPanel";
 import { FeaturesPanel } from "./components/FeaturesPanel";
 import { OsmIssuesPanel, type MappingMapData } from "./components/IssuesPanel";
@@ -13,7 +14,6 @@ import { Button } from "./components/ui/button";
 import { Checkbox } from "./components/ui/checkbox";
 import { Slider } from "./components/ui/slider";
 import type { DebugOptions } from "./components/vehicles/VehicleRenderer";
-import { getConfig } from "./config";
 import { useRendezvous } from "./hooks/useRendezvous";
 import { useTimeSimulation } from "./hooks/useTimeSimulation";
 import { useVehicleUpdates, type RouteVehicles } from "./hooks/useVehicleUpdates";
@@ -68,14 +68,6 @@ function decodeLocation(raw: string | null): Location | null {
     };
 }
 
-let api: Api<unknown> | null = null;
-function getApi() {
-    if (!api) {
-        api = new Api({ baseUrl: getConfig().apiUrl });
-    }
-    return api;
-}
-
 // Fallback polling interval when WebSocket is not available (in milliseconds)
 const FALLBACK_REFRESH_INTERVAL = 5000;
 
@@ -89,8 +81,6 @@ export interface RouteWithGeometry extends Route {
 // Re-export for use by other components
 export type { RouteVehicles } from "./hooks/useVehicleUpdates";
 
-// Local type alias for state
-type RouteVehiclesData = RouteVehicles;
 
 interface PersistedOptions {
     showAreaOutlines: boolean;
@@ -152,7 +142,7 @@ export default function App() {
     const [areas, setAreas] = useState<Area[]>([]);
     const [stations, setStations] = useState<Station[]>([]);
     const [routes, setRoutes] = useState<RouteWithGeometry[]>([]);
-    const [vehicles, setVehicles] = useState<RouteVehiclesData[]>([]);
+    const [vehicles, setVehicles] = useState<RouteVehicles[]>([]);
     const [activePanel, setActivePanel] = useState<SidebarPanel>(getInitialPanel);
     const [pinnedStops, setPinnedStops] = useState<PinnedStop[]>(() => {
         try {
@@ -357,11 +347,8 @@ export default function App() {
     useEffect(() => {
         const fetchIssuesCount = async () => {
             try {
-                const response = await fetch(`${getConfig().apiUrl}/api/issues`);
-                if (response.ok) {
-                    const data = await response.json();
-                    setOsmIssuesCount(data.count);
-                }
+                const response = await getApiClient().api.listIssues();
+                setOsmIssuesCount(response.data.count);
             } catch (error) {
                 console.error("Failed to fetch issues count:", error);
             }
@@ -380,7 +367,7 @@ export default function App() {
         try {
             const vehiclePromises = routes.map(async (route) => {
                 try {
-                    const response = await getApi().api.getVehiclesByRoute({
+                    const response = await getApiClient().api.getVehiclesByRoute({
                         route_id: route.osm_id,
                         reference_time: refTime
                     });
@@ -406,13 +393,13 @@ export default function App() {
     }, [routes, timeSimulation.isRealTime, timeSimulation.currentTime]);
 
     // Handle full vehicle data from WebSocket (initial subscribe)
-    const handleFullVehicleData = useCallback((data: RouteVehiclesData[]) => {
+    const handleFullVehicleData = useCallback((data: RouteVehicles[]) => {
         setVehicles(data);
     }, []);
 
     // Handle incremental updates from WebSocket (only changes)
     const handleIncrementalUpdate = useCallback(
-        (updater: (current: RouteVehiclesData[]) => RouteVehiclesData[]) => {
+        (updater: (current: RouteVehicles[]) => RouteVehicles[]) => {
             setVehicles(updater);
         },
         []
@@ -423,9 +410,9 @@ export default function App() {
         const fetchData = async () => {
             try {
                 const [areasResponse, stationsResponse, routesResponse] = await Promise.all([
-                    getApi().api.listAreas(),
-                    getApi().api.listStations(),
-                    getApi().api.listRoutes()
+                    getApiClient().api.listAreas(),
+                    getApiClient().api.listStations(),
+                    getApiClient().api.listRoutes()
                 ]);
                 setAreas(areasResponse.data.areas);
                 setStations(stationsResponse.data.stations);
@@ -434,7 +421,7 @@ export default function App() {
                 const routesWithGeometry = await Promise.all(
                     routesResponse.data.routes.map(async (route) => {
                         try {
-                            const geomResponse = await getApi().api.getRouteGeometry(route.osm_id);
+                            const geomResponse = await getApiClient().api.getRouteGeometry(route.osm_id);
                             return { ...route, geometry: geomResponse.data };
                         } catch {
                             return { ...route, geometry: null };
