@@ -1,10 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sqlx::PgPool;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::providers::timetables::gtfs::error::GtfsError;
 use crate::providers::timetables::gtfs::static_data::{self, GtfsSchedule};
@@ -14,9 +14,14 @@ use crate::providers::timetables::gtfs::static_data::{self, GtfsSchedule};
 /// The underlying GTFS data in PostgreSQL only changes every 6–24 hours
 /// (when the static schedule is refreshed), so caching schedules for a few
 /// minutes dramatically reduces database load from HTTP and WebSocket handlers.
+///
+/// Uses per-key mutexes to prevent concurrent cache misses from triggering
+/// redundant database queries for the same stop set.
 #[derive(Clone)]
 pub struct ScheduleCache {
     entries: Arc<RwLock<Vec<CacheEntry>>>,
+    /// Per-key build mutexes — prevents concurrent DB queries for the same key.
+    in_flight: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     ttl: Duration,
 }
 
@@ -30,6 +35,7 @@ impl ScheduleCache {
     pub fn new(ttl: Duration) -> Self {
         Self {
             entries: Arc::new(RwLock::new(Vec::new())),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
             ttl,
         }
     }
@@ -41,7 +47,29 @@ impl ScheduleCache {
         sorted.join(",")
     }
 
+    /// Look up a cached entry by key. Returns None on miss or expiry.
+    async fn lookup(&self, key: &str) -> Option<Arc<GtfsSchedule>> {
+        let entries = self.entries.read().await;
+        entries
+            .iter()
+            .find(|e| e.key == key && e.inserted_at.elapsed() < self.ttl)
+            .map(|e| Arc::clone(&e.schedule))
+    }
+
+    /// Insert a schedule into the cache, evicting expired entries and duplicates.
+    async fn insert(&self, key: String, schedule: Arc<GtfsSchedule>) {
+        let mut entries = self.entries.write().await;
+        let ttl = self.ttl;
+        entries.retain(|e| e.key != key && e.inserted_at.elapsed() < ttl);
+        entries.push(CacheEntry {
+            key,
+            inserted_at: Instant::now(),
+            schedule,
+        });
+    }
+
     /// Check cache, or build and insert using the provided async builder.
+    /// Uses a per-key mutex to ensure only one concurrent build per key.
     async fn get_or_build_inner<F, Fut>(
         &self,
         key: String,
@@ -51,31 +79,37 @@ impl ScheduleCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<GtfsSchedule, GtfsError>>,
     {
-        // Check cache first
-        {
-            let entries = self.entries.read().await;
-            if let Some(entry) = entries
-                .iter()
-                .find(|e| e.key == key && e.inserted_at.elapsed() < self.ttl)
-            {
-                return Ok(Arc::clone(&entry.schedule));
-            }
+        // Fast path: check cache without locking the build mutex
+        if let Some(cached) = self.lookup(&key).await {
+            return Ok(cached);
         }
 
-        // Cache miss — build from database
+        // Acquire per-key build mutex to prevent concurrent DB queries
+        let build_mutex = {
+            let mut in_flight = self.in_flight.lock().await;
+            in_flight
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+
+        let _build_guard = build_mutex.lock().await;
+
+        // Re-check cache — another task may have populated it while we waited
+        if let Some(cached) = self.lookup(&key).await {
+            return Ok(cached);
+        }
+
+        // Cache miss confirmed — build from database
         let schedule = build().await?;
         let arc = Arc::new(schedule);
 
-        // Insert into cache, evicting expired entries and duplicates
+        self.insert(key.clone(), Arc::clone(&arc)).await;
+
+        // Clean up the build mutex entry
         {
-            let mut entries = self.entries.write().await;
-            let ttl = self.ttl;
-            entries.retain(|e| e.key != key && e.inserted_at.elapsed() < ttl);
-            entries.push(CacheEntry {
-                key,
-                inserted_at: Instant::now(),
-                schedule: Arc::clone(&arc),
-            });
+            let mut in_flight = self.in_flight.lock().await;
+            in_flight.remove(&key);
         }
 
         Ok(arc)
@@ -243,5 +277,45 @@ mod tests {
             .await
             .unwrap();
         assert!(rebuilt, "Should rebuild after invalidation");
+    }
+
+    #[tokio::test]
+    async fn concurrent_misses_only_build_once() {
+        let cache = ScheduleCache::new(Duration::from_secs(60));
+        let build_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        // Spawn 10 concurrent tasks that all miss the cache simultaneously
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let cache = cache.clone();
+            let count = Arc::clone(&build_count);
+            handles.push(tokio::spawn(async move {
+                cache
+                    .get_or_build_inner("same_key".to_string(), || {
+                        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        async { Ok(empty_schedule()) }
+                    })
+                    .await
+                    .unwrap()
+            }));
+        }
+
+        let results: Vec<_> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // Builder should have been called exactly once
+        assert_eq!(
+            build_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "Concurrent misses should only trigger one build"
+        );
+
+        // All tasks should get the same Arc
+        for result in &results[1..] {
+            assert!(Arc::ptr_eq(&results[0], result), "All should share same Arc");
+        }
     }
 }
