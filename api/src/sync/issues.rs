@@ -66,25 +66,6 @@ pub enum OsmIssueType {
 }
 
 impl OsmIssueType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            OsmIssueType::MissingIfopt => "missing_ifopt",
-            OsmIssueType::MissingCoordinates => "missing_coordinates",
-            OsmIssueType::OrphanedElement => "orphaned_element",
-            OsmIssueType::MissingRouteRef => "missing_route_ref",
-            OsmIssueType::MissingName => "missing_name",
-            OsmIssueType::MissingStopPosition => "missing_stop_position",
-            OsmIssueType::MissingPlatform => "missing_platform",
-            OsmIssueType::NoGtfsMatch => "no_gtfs_match",
-            OsmIssueType::AmbiguousGtfsMatch => "ambiguous_gtfs_match",
-            OsmIssueType::LowConfidenceMatch => "low_confidence_match",
-            OsmIssueType::UnmappedGtfsStop => "unmapped_gtfs_stop",
-            OsmIssueType::GtfsParseSkipped => "gtfs_parse_skipped",
-            OsmIssueType::GtfsLoadFailed => "gtfs_load_failed",
-            OsmIssueType::GtfsRtFetchFailed => "gtfs_rt_fetch_failed",
-        }
-    }
-
     /// Returns the category of this issue type for UI organization
     pub fn category(&self) -> IssueCategory {
         match self {
@@ -105,20 +86,6 @@ impl OsmIssueType {
             | OsmIssueType::GtfsLoadFailed
             | OsmIssueType::GtfsRtFetchFailed => IssueCategory::DataProcessing,
         }
-    }
-
-    /// Returns true if this issue type relates to data processing rather than OSM data quality
-    pub fn is_data_processing_issue(&self) -> bool {
-        matches!(
-            self,
-            OsmIssueType::NoGtfsMatch
-                | OsmIssueType::AmbiguousGtfsMatch
-                | OsmIssueType::LowConfidenceMatch
-                | OsmIssueType::UnmappedGtfsStop
-                | OsmIssueType::GtfsParseSkipped
-                | OsmIssueType::GtfsLoadFailed
-                | OsmIssueType::GtfsRtFetchFailed
-        )
     }
 }
 

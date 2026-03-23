@@ -624,9 +624,10 @@ pub struct RouteWay {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct RouteStop {
     pub osm_id: i64,
+    /// Kept for debugging; not read after construction.
+    #[allow(dead_code)]
     pub osm_type: String,
     pub sequence: i32,
     pub role: String,

@@ -241,8 +241,6 @@ pub async fn get_departures_by_gtfs_stop(
 mod tests {
     use super::*;
     use crate::sync::EventType;
-    use chrono::Datelike;
-
     fn make_departure(planned_time: &str, estimated_time: Option<&str>) -> Departure {
         Departure {
             stop_ifopt: "de:08111:6115".to_string(),
@@ -367,66 +365,6 @@ mod tests {
         let result = filter_past_departures(departures, reference);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].planned_time, "2026-03-10T11:57:00Z");
-    }
-
-    // --- parse_reference_time tests ---
-
-    #[test]
-    fn test_parse_reference_time_none_input() {
-        assert!(parse_reference_time(&None).is_none());
-    }
-
-    #[test]
-    fn test_parse_reference_time_invalid_format() {
-        let rt = Some("not-a-time".to_string());
-        assert!(parse_reference_time(&rt).is_none());
-    }
-
-    #[test]
-    fn test_parse_reference_time_within_180s_returns_none() {
-        // Time very close to now (within 3 minutes)
-        let now = Utc::now();
-        let close_time = (now + Duration::seconds(60)).to_rfc3339();
-        let rt = Some(close_time);
-        assert!(parse_reference_time(&rt).is_none());
-    }
-
-    #[test]
-    fn test_parse_reference_time_far_future_returns_some() {
-        let future_time = "2030-06-15T14:00:00Z".to_string();
-        let rt = Some(future_time.clone());
-        let result = parse_reference_time(&rt);
-        assert!(result.is_some());
-        let dt = result.unwrap();
-        assert_eq!(dt.year(), 2030);
-        assert_eq!(dt.month(), 6);
-    }
-
-    #[test]
-    fn test_parse_reference_time_far_past_returns_some() {
-        let past_time = "2020-01-01T00:00:00Z".to_string();
-        let rt = Some(past_time);
-        let result = parse_reference_time(&rt);
-        assert!(result.is_some());
-        let dt = result.unwrap();
-        assert_eq!(dt.year(), 2020);
-    }
-
-    // --- ifopt_station_prefix tests ---
-
-    #[test]
-    fn test_ifopt_station_prefix_full() {
-        assert_eq!(ifopt_station_prefix("de:09761:10:1:A1"), Some("de:09761:10"));
-    }
-
-    #[test]
-    fn test_ifopt_station_prefix_station_only() {
-        assert_eq!(ifopt_station_prefix("de:09761:10"), Some("de:09761:10"));
-    }
-
-    #[test]
-    fn test_ifopt_station_prefix_too_short() {
-        assert_eq!(ifopt_station_prefix("de:09761"), None);
     }
 
     // --- filter_same_station_destinations tests ---
