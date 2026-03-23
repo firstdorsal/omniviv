@@ -518,6 +518,8 @@ export interface StopDeparturesRequest {
 
 export interface StopDeparturesResponse {
   departures: Departure[];
+  /** The GTFS stop ID mapped to this IFOPT (if any) */
+  mapped_gtfs_stop_id?: string | null;
   stop_ifopt: string;
 }
 
@@ -853,7 +855,7 @@ export class HttpClient<SecurityDataType = unknown> {
 
 /**
  * @title Omniviv API
- * @version 0.1.0
+ * @version 0.2.0
  * @license
  */
 export class Api<

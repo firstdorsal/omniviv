@@ -27,6 +27,7 @@ interface DeparturesPanelProps {
 
 export function DeparturesPanel({ stop, routeColors, routeTypes, referenceTime, onUnpin }: DeparturesPanelProps) {
     const [events, setEvents] = useState<Departure[]>([]);
+    const [gtfsStopId, setGtfsStopId] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const abortRef = useRef<AbortController | null>(null);
 
@@ -43,6 +44,7 @@ export function DeparturesPanel({ stop, routeColors, routeTypes, referenceTime, 
             .then((res) => {
                 if (!controller.signal.aborted) {
                     setEvents(res.data?.departures ?? []);
+                    setGtfsStopId(res.data?.mapped_gtfs_stop_id ?? null);
                 }
             })
             .catch(() => {
@@ -71,6 +73,8 @@ export function DeparturesPanel({ stop, routeColors, routeTypes, referenceTime, 
                     {stop.stationName && (
                         <div className="text-xs text-muted-foreground">{stop.stationName}</div>
                     )}
+                    <div className="text-xs text-muted-foreground font-mono">{stop.stopIfopt}</div>
+                    {gtfsStopId && <div className="text-xs text-muted-foreground font-mono">GTFS: {gtfsStopId}</div>}
                 </div>
                 <Button
                     variant="ghost"

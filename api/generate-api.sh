@@ -25,9 +25,9 @@ cleanup() {
 
 trap cleanup EXIT
 
-echo -e "${GREEN}Building server...${NC}"
+echo -e "${GREEN}Building server with dev-tools...${NC}"
 cd "$SCRIPT_DIR"
-cargo build --release 2>&1 | tail -5
+cargo build --release --features dev-tools 2>&1 | tail -5
 
 echo -e "${GREEN}Starting server temporarily...${NC}"
 ./target/release/omniviv-api &

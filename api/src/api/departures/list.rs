@@ -1,14 +1,15 @@
 use axum::{extract::State, Json};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use std::collections::HashSet;
 use utoipa::ToSchema;
 
 use crate::api::ErrorResponse;
+use crate::api::state::AppState;
+use crate::api::utils::{ifopt_station_prefix, parse_reference_time};
 use crate::providers::timetables::gtfs::realtime;
 use crate::sync::Departure;
-
-use crate::api::state::AppState;
 
 /// How many minutes of past departures to keep so that recent arrivals remain visible.
 const PAST_GRACE_MINUTES: i64 = 5;
@@ -16,8 +17,6 @@ const PAST_GRACE_MINUTES: i64 = 5;
 /// Per-stop board queries use a longer time horizon than the main departure list
 /// so that events for the rest of the day (and into the next morning) are visible.
 const STOP_BOARD_HORIZON_MINUTES: i64 = 720; // 12 hours
-
-use crate::api::utils::ifopt_station_prefix;
 
 /// Filter out departures whose destination is the same station as the queried stop.
 /// E.g. Line 4 "towards Hauptbahnhof" should not appear at Hauptbahnhof's departure monitor.
@@ -33,6 +32,65 @@ fn filter_same_station_destinations(departures: Vec<Departure>, stop_ifopt: &str
                 Some(dest_id) => ifopt_station_prefix(dest_id) != Some(station_prefix),
                 None => true,
             }
+        })
+        .collect()
+}
+
+/// Filter departures by direction when a platform's OSM route has known destinations.
+/// This handles cases where a single GTFS stop serves both directions (e.g., Kulturstraße)
+/// but the OSM data distinguishes platforms A and E by their route direction.
+async fn filter_by_direction(
+    departures: Vec<Departure>,
+    stop_ifopt: &str,
+    pool: &PgPool,
+) -> Vec<Departure> {
+    // Load OSM route destinations for this platform (extracted from route names like
+    // "Straßenbahn 1: Göggingen => Lechhausen" → destination keywords for this platform)
+    let rows: Vec<(String,)> = match sqlx::query_as(
+        r#"
+        SELECT DISTINCT r.name
+        FROM route_stops rs
+        JOIN routes r ON r.osm_id = rs.route_id
+        LEFT JOIN platforms p ON p.osm_id = rs.platform_id
+        LEFT JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+        WHERE r.name IS NOT NULL
+          AND (p.ref_ifopt = $1 OR sp.ref_ifopt = $1)
+        "#,
+    )
+    .bind(stop_ifopt)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return departures,
+    };
+
+    // Extract destination keywords from route names ("... => Destination")
+    let mut dest_keywords: HashSet<String> = HashSet::new();
+    for (route_name,) in &rows {
+        if let Some(arrow_pos) = route_name.find("=>") {
+            let dest = route_name[arrow_pos + 2..].trim();
+            for word in dest.split_whitespace() {
+                let normalized = word
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
+                if normalized.len() >= 3 {
+                    dest_keywords.insert(normalized);
+                }
+            }
+        }
+    }
+
+    if dest_keywords.is_empty() {
+        return departures;
+    }
+
+    // Filter: keep departures whose destination contains at least one keyword
+    departures
+        .into_iter()
+        .filter(|d| {
+            let dest_lower = d.destination.to_lowercase();
+            dest_keywords.iter().any(|kw| dest_lower.contains(kw))
         })
         .collect()
 }
@@ -71,6 +129,8 @@ pub struct StopDeparturesRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct StopDeparturesResponse {
     pub stop_ifopt: String,
+    /// The GTFS stop ID mapped to this IFOPT (if any)
+    pub mapped_gtfs_stop_id: Option<String>,
     pub departures: Vec<Departure>,
 }
 
@@ -86,8 +146,6 @@ pub struct GtfsStopDeparturesResponse {
     pub gtfs_stop_id: String,
     pub departures: Vec<Departure>,
 }
-
-use crate::api::utils::parse_reference_time;
 
 /// List all departures across all stops
 #[utoipa::path(
@@ -130,8 +188,7 @@ pub async fn get_departures_by_stop(
     // Always compute schedule-based departures with the longer stop board horizon
     // so the popup shows upcoming events even when the real-time feed has no data
     // (e.g., late at night when trams have stopped running).
-    let mut stop_ids = HashSet::new();
-    stop_ids.insert(request.stop_ifopt.clone());
+    let stop_ids = HashSet::from([request.stop_ifopt.clone()]);
 
     let mut departures = if simulated_time.is_none() {
         // Start with real-time departure store (has estimated times and delays)
@@ -178,9 +235,21 @@ pub async fn get_departures_by_stop(
     departures.sort_by(|a, b| a.planned_time.cmp(&b.planned_time));
     let departures = filter_past_departures(departures, ref_time);
     let departures = filter_same_station_destinations(departures, &request.stop_ifopt);
+    let departures = filter_by_direction(departures, &request.stop_ifopt, &state.pool).await;
+
+    // Look up the mapped GTFS stop ID for this IFOPT
+    let mapped_gtfs_stop_id: Option<String> = sqlx::query_scalar(
+        "SELECT gtfs_stop_id FROM ifopt_gtfs_mapping WHERE ifopt = $1",
+    )
+    .bind(&request.stop_ifopt)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
 
     Json(StopDeparturesResponse {
         stop_ifopt: request.stop_ifopt,
+        mapped_gtfs_stop_id,
         departures,
     })
 }

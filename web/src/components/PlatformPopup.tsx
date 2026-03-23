@@ -20,6 +20,7 @@ interface PlatformPopupProps {
 
 export function PlatformPopup({ platform, stationName, routeColors, routeTypes, referenceTime, onPin, onClose }: PlatformPopupProps) {
     const [events, setEvents] = useState<Departure[]>([]);
+    const [gtfsStopId, setGtfsStopId] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const displayName = getPlatformDisplayName(platform);
     const abortRef = useRef<AbortController | null>(null);
@@ -36,7 +37,10 @@ export function PlatformPopup({ platform, stationName, routeColors, routeTypes, 
                 reference_time: referenceTime ? referenceTime.toISOString() : undefined,
             })
             .then((res) => {
-                if (!controller.signal.aborted) setEvents(res.data?.departures ?? []);
+                if (!controller.signal.aborted) {
+                    setEvents(res.data?.departures ?? []);
+                    setGtfsStopId(res.data?.mapped_gtfs_stop_id ?? null);
+                }
             })
             .catch((err) => {
                 if (!controller.signal.aborted) {
@@ -69,6 +73,8 @@ export function PlatformPopup({ platform, stationName, routeColors, routeTypes, 
                 <div className="flex-1 min-w-0">
                     <div className="font-semibold">Steig {displayName}</div>
                     {stationName && <div className="text-sm text-muted-foreground">{stationName}</div>}
+                    {platform.ref_ifopt && <div className="text-xs text-muted-foreground font-mono">{platform.ref_ifopt}</div>}
+                    {gtfsStopId && <div className="text-xs text-muted-foreground font-mono">GTFS: {gtfsStopId}</div>}
                 </div>
                 <div className="flex shrink-0 items-center gap-0.5">
                     {onPin && platform.ref_ifopt && (
