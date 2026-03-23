@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import type { Vehicle } from "../api";
 import type { RouteVehicles } from "./useVehicleUpdates";
 
 // Königsplatz coordinates (center of rendezvous area)
@@ -64,6 +65,63 @@ function isDark(date: Date): boolean {
     return timeInMinutes >= sunsetTimes[month];
 }
 
+/**
+ * Estimate a vehicle's current lat/lon by interpolating between its scheduled stops.
+ * Returns null when the vehicle has no usable timing data.
+ */
+function estimateVehiclePosition(vehicle: Vehicle, currentTime: Date): { lat: number; lon: number } | null {
+    const { stops } = vehicle;
+    if (stops.length === 0) return null;
+
+    const now = currentTime.getTime();
+
+    for (let i = 0; i < stops.length; i++) {
+        const stop = stops[i];
+        const arrival = stop.arrival_time_estimated ?? stop.arrival_time;
+        const departure = stop.departure_time_estimated ?? stop.departure_time;
+        const arrivalMs = arrival ? new Date(arrival).getTime() : null;
+        const departureMs = departure ? new Date(departure).getTime() : null;
+        const effectiveDeparture = departureMs ?? arrivalMs;
+
+        // Vehicle is dwelling at this stop
+        if (arrivalMs && effectiveDeparture && now >= arrivalMs && now <= effectiveDeparture) {
+            return { lat: stop.lat, lon: stop.lon };
+        }
+
+        // Vehicle is in transit between this stop and the next
+        if (i < stops.length - 1) {
+            const nextStop = stops[i + 1];
+            const nextArrival = nextStop.arrival_time_estimated ?? nextStop.arrival_time;
+            const nextArrivalMs = nextArrival ? new Date(nextArrival).getTime() : null;
+
+            if (effectiveDeparture && nextArrivalMs && now >= effectiveDeparture && now < nextArrivalMs) {
+                const progress = (now - effectiveDeparture) / (nextArrivalMs - effectiveDeparture);
+                return {
+                    lat: stop.lat + progress * (nextStop.lat - stop.lat),
+                    lon: stop.lon + progress * (nextStop.lon - stop.lon),
+                };
+            }
+        }
+    }
+
+    // Before first stop — show at first stop's position
+    const firstTime = stops[0].departure_time_estimated ?? stops[0].departure_time
+        ?? stops[0].arrival_time_estimated ?? stops[0].arrival_time;
+    if (firstTime && now < new Date(firstTime).getTime()) {
+        return { lat: stops[0].lat, lon: stops[0].lon };
+    }
+
+    // After last stop — show at last stop's position
+    const lastStop = stops[stops.length - 1];
+    const lastTime = lastStop.arrival_time_estimated ?? lastStop.arrival_time
+        ?? lastStop.departure_time_estimated ?? lastStop.departure_time;
+    if (lastTime && now > new Date(lastTime).getTime()) {
+        return { lat: lastStop.lat, lon: lastStop.lon };
+    }
+
+    return null;
+}
+
 // Calculate distance between two points in meters (Haversine)
 function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
     const R = 6371000;
@@ -97,16 +155,17 @@ export function useRendezvous({ enabled, currentTime, vehicles }: UseRendezvousO
             return null;
         }
 
-        // Count trams at Königsplatz
+        // Count trams at Königsplatz by estimating each vehicle's current position
         const tramsAtKoenigsplatz: { tripId: string; lineNumber: string | null }[] = [];
         for (const routeVehicles of vehicles) {
             for (const vehicle of routeVehicles.vehicles) {
-                if (vehicle.lat && vehicle.lon) {
+                const position = estimateVehiclePosition(vehicle, currentTime);
+                if (position) {
                     const dist = distanceMeters(
                         KOENIGSPLATZ_CENTER.lat,
                         KOENIGSPLATZ_CENTER.lon,
-                        vehicle.lat,
-                        vehicle.lon
+                        position.lat,
+                        position.lon
                     );
                     if (dist <= KOENIGSPLATZ_RADIUS_M) {
                         tramsAtKoenigsplatz.push({
