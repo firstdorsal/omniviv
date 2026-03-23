@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use subtle::ConstantTimeEq;
 use tracing::info;
 use utoipa::ToSchema;
 
@@ -662,7 +663,7 @@ async fn require_admin_key(
     let provided = auth_header.or(api_key_header);
 
     match provided {
-        Some(key) if key == expected_key => Ok(next.run(request).await),
+        Some(key) if key.as_bytes().ct_eq(expected_key.as_bytes()).into() => Ok(next.run(request).await),
         _ => Err(StatusCode::UNAUTHORIZED),
     }
 }

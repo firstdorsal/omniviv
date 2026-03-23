@@ -144,7 +144,11 @@ async fn main() {
                 axum::http::Method::POST,
                 axum::http::Method::OPTIONS,
             ])
-            .allow_headers([axum::http::header::CONTENT_TYPE])
+            .allow_headers([
+                axum::http::header::CONTENT_TYPE,
+                axum::http::header::AUTHORIZATION,
+                axum::http::HeaderName::from_static("x-api-key"),
+            ])
     } else {
         panic!("CORS configuration error: Either set 'cors_origins' with allowed origins, or set 'cors_permissive: true' for development");
     };
@@ -155,7 +159,11 @@ async fn main() {
 
     // Read optional ADMIN_API_KEY for mapping write endpoints (supports _FILE convention)
     let admin_api_key = read_env_or_file("ADMIN_API_KEY").ok();
-    if admin_api_key.is_none() {
+    if let Some(ref key) = admin_api_key {
+        if key.len() < 16 {
+            tracing::warn!("ADMIN_API_KEY is shorter than 16 characters — consider using a stronger key");
+        }
+    } else {
         tracing::warn!("ADMIN_API_KEY not set — mapping write endpoints will be disabled");
     }
 

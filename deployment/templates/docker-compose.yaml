@@ -46,6 +46,7 @@ services:
                 condition: service_healthy
         environment:
             DATABASE_URL: "postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/{{ .services.postgres.database }}"
+            ADMIN_API_KEY: "$ADMIN_API_KEY"
         volumes:
             - ./config/api/config.yaml:/app/config.yaml:ro
             {{- if .services.api.data.storage.volumeName }}
