@@ -336,10 +336,9 @@ COMMENT ON FUNCTION transit_routes IS 'Vector tile source for transit route geom
 -------------------------------------------------------------------------------
 
 -- Martin auto-discovers this function as a vector tile source.
--- Returns 3 MVT layers:
+-- Returns 2 MVT layers:
 --   - stations: station points with min_zoom filtering
---   - stops: stop_position points (visible at z15+)
---   - platform_ways: platform way centroids (visible at z15+)
+--   - stops: stop positions at platform_way position when available, otherwise at stop_position
 CREATE OR REPLACE FUNCTION transit_stations(z integer, x integer, y integer)
 RETURNS bytea AS $$
 DECLARE
@@ -347,13 +346,12 @@ DECLARE
     bounds_3857 geometry;
     stations_mvt bytea;
     stops_mvt bytea;
-    platform_ways_mvt bytea;
 BEGIN
     bounds_3857 := ST_TileEnvelope(z, x, y);
     bounds_4326 := ST_Transform(bounds_3857, 4326);
 
     -- Layer 1: stations (zoom-filtered by railway tag)
-    SELECT COALESCE(ST_AsMVT(tile, 'stations', 4096, 'geom'), '') INTO stations_mvt FROM (
+    SELECT COALESCE(ST_AsMVT(tile, 'stations', 4096, 'geom'), ''::bytea) INTO stations_mvt FROM (
         SELECT
             s.osm_id, s.name, s.ref_ifopt,
             CASE
@@ -378,43 +376,32 @@ BEGIN
               END
     ) AS tile WHERE geom IS NOT NULL;
 
-    -- Layer 2: stop positions (z15+)
+    -- Layer 2: stops (z15+) — position from platform_way centroid when available
     IF z >= 15 THEN
-        SELECT COALESCE(ST_AsMVT(tile, 'stops', 4096, 'geom'), '') INTO stops_mvt FROM (
-            SELECT
+        SELECT COALESCE(ST_AsMVT(tile, 'stops', 4096, 'geom'), ''::bytea) INTO stops_mvt FROM (
+            SELECT DISTINCT ON (sp.osm_id)
                 sp.osm_id, sp.name, sp.ref, sp.ref_ifopt,
                 sp.station_id,
                 ST_AsMVTGeom(
-                    ST_Transform(ST_SetSRID(ST_MakePoint(sp.lon, sp.lat), 4326), 3857),
+                    ST_Transform(ST_SetSRID(ST_MakePoint(
+                        COALESCE(pw.lon, sp.lon),
+                        COALESCE(pw.lat, sp.lat)
+                    ), 4326), 3857),
                     bounds_3857, 4096, 256, true
                 ) AS geom
             FROM stop_positions sp
+            LEFT JOIN platform_ways pw ON pw.ref_ifopt = sp.ref_ifopt AND pw.station_id = sp.station_id
             WHERE sp.lat IS NOT NULL AND sp.lon IS NOT NULL
               AND sp.station_id IS NOT NULL
               AND ST_SetSRID(ST_MakePoint(sp.lon, sp.lat), 4326) && bounds_4326
-        ) AS tile WHERE geom IS NOT NULL;
-
-        -- Layer 3: platform way centroids (z15+)
-        SELECT COALESCE(ST_AsMVT(tile, 'platform_ways', 4096, 'geom'), '') INTO platform_ways_mvt FROM (
-            SELECT
-                pw.osm_id, pw.name, pw.ref, pw.ref_ifopt,
-                pw.station_id,
-                ST_AsMVTGeom(
-                    ST_Transform(ST_SetSRID(ST_MakePoint(pw.lon, pw.lat), 4326), 3857),
-                    bounds_3857, 4096, 256, true
-                ) AS geom
-            FROM platform_ways pw
-            WHERE pw.lat IS NOT NULL AND pw.lon IS NOT NULL
-              AND pw.station_id IS NOT NULL
-              AND ST_SetSRID(ST_MakePoint(pw.lon, pw.lat), 4326) && bounds_4326
+            ORDER BY sp.osm_id, pw.osm_id NULLS LAST
         ) AS tile WHERE geom IS NOT NULL;
     ELSE
-        stops_mvt := '';
-        platform_ways_mvt := '';
+        stops_mvt := ''::bytea;
     END IF;
 
-    RETURN stations_mvt || stops_mvt || platform_ways_mvt;
+    RETURN stations_mvt || stops_mvt;
 END;
 $$ LANGUAGE plpgsql STABLE PARALLEL SAFE;
 
-COMMENT ON FUNCTION transit_stations IS 'Vector tile source for transit stations, stop positions and platform ways';
+COMMENT ON FUNCTION transit_stations IS 'Vector tile source for transit stations and stop positions (with platform-way position preference)';

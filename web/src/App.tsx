@@ -149,7 +149,9 @@ function saveOptions(options: PersistedOptions): void {
 }
 
 export default function App() {
-    const [stations, setStations] = useState<Station[]>([]);
+    // Stations are loaded via Martin vector tiles, not API.
+    // Empty array kept for backwards compat with components that still reference it.
+    const stations: Station[] = [];
     const [routes, setRoutes] = useState<RouteWithGeometry[]>([]);
     const [vehicles, setVehicles] = useState<RouteVehicles[]>([]);
     const [activePanel, setActivePanel] = useState<SidebarPanel>(getInitialPanel);
@@ -592,25 +594,11 @@ export default function App() {
     }, []);
 
     // Fetch stations for the visible viewport (debounced via AbortController)
-    const stationsAbort = useRef<AbortController | null>(null);
-    const handleViewportChange = useCallback(async (bbox: [number, number, number, number], zoom: number) => {
-        // Only load stations when zoomed in enough to see them (min_zoom 6 for rail stations)
-        if (zoom < 6) {
-            setStations([]);
-            return;
-        }
-        stationsAbort.current?.abort();
-        const controller = new AbortController();
-        stationsAbort.current = controller;
-        try {
-            const bboxStr = bbox.join(",");
-            const response = await getApiClient().api.listStations({ bbox: bboxStr }, { signal: controller.signal });
-            if (!controller.signal.aborted) {
-                setStations(response.data.stations);
-            }
-        } catch {
-            // Aborted or network error
-        }
+    // stationsAbort removed — stations come from vector tiles now
+    // Stations are now loaded via Martin vector tiles — no API bbox query needed.
+    // The handleViewportChange is kept only for future use (e.g. loading data on viewport change).
+    const handleViewportChange = useCallback(async (_bbox: [number, number, number, number], _zoom: number) => {
+        // No-op: stations come from vector tiles now
     }, []);
 
     // Initial data fetch — route color/type lookup. Stations loaded via viewport.
