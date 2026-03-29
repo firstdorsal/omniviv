@@ -3,7 +3,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import React from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { Area, Station, StationPlatform, StationStopPosition } from "../../api";
+import type { Station, StationPlatform, StationStopPosition } from "../../api";
 import type { RouteVehicles, RouteWithGeometry } from "../../App";
 import type { MappingLine, MappingGtfsStop } from "../MappingManager";
 import { getConfig } from "../../config";
@@ -44,9 +44,9 @@ async function loadMapStyle(): Promise<maplibregl.StyleSpecification> {
         style.glyphs = rebaseUrl(style.glyphs, martinUrl);
     }
 
-    if (style.sprite) {
-        style.sprite = rebaseUrl(style.sprite, martinUrl);
-    }
+    // Remove sprite reference — POI icons are loaded on-demand via styleimagemissing
+    // using the same Maki/Temaki SVGs as the route planning UI.
+    delete style.sprite;
 
     return style;
 }
@@ -67,11 +67,9 @@ interface HighlightedBuilding {
 }
 
 interface MapProps {
-    areas: Area[];
     stations: Station[];
     routes: RouteWithGeometry[];
     vehicles: RouteVehicles[];
-    showAreaOutlines: boolean;
     showStations: boolean;
     showStopPositions: boolean;
     showPlatforms: boolean;
@@ -93,7 +91,10 @@ interface MapProps {
     onHighlightBuilding?: (building: HighlightedBuilding | null) => void;
     mappingLines?: MappingLine[];
     mappingGtfsStops?: MappingGtfsStop[];
-    onPinStop?: (stopIfopt: string, displayName: string, stationName?: string) => void;
+    pinnedStopIds?: Set<string>;
+    onPinStop?: (osmId: string, displayName: string, stationName?: string, refIfopt?: string | null, lat?: number, lon?: number) => void;
+    onUnpinStop?: (id: string) => void;
+    onViewportChange?: (bbox: [number, number, number, number], zoom: number) => void;
     trackedTripId?: string | null;
     cameraFollowTripId?: string | null;
     onVehicleClick?: (tripId: string, lineNumber: string, destination: string, routeId: number) => void;
@@ -101,6 +102,8 @@ interface MapProps {
     onCameraFollowStop?: () => void;
     onTrackedTripChanged?: (oldTripId: string, newTripId: string) => void;
     onTrackedVehicleLost?: (tripId: string) => void;
+    routeColors: globalThis.Map<string, string>;
+    routeTypes: globalThis.Map<string, string>;
 }
 
 interface ContextMenuState {
@@ -123,6 +126,7 @@ interface MapState {
     measurement: MeasurementState;
     buildingHighlighted: boolean;
     bearing: number;
+    pitch: number;
     zoom: number;
     scaleWidth: number;
     scaleLabel: string;
@@ -163,6 +167,7 @@ export default class Map extends React.Component<MapProps, MapState> {
             },
             buildingHighlighted: false,
             bearing: 0,
+            pitch: 0,
             zoom: 12,
             scaleWidth: 100,
             scaleLabel: "",
@@ -196,9 +201,6 @@ export default class Map extends React.Component<MapProps, MapState> {
         }
 
         if (this.state.mapLoaded && this.layerManager) {
-            if (prevProps.showAreaOutlines !== this.props.showAreaOutlines || prevProps.areas !== this.props.areas) {
-                this.layerManager.updateAreaOutlines(this.props.areas, this.props.showAreaOutlines);
-            }
             if (prevProps.showStations !== this.props.showStations ||
                 prevProps.showStopPositions !== this.props.showStopPositions ||
                 prevProps.showPlatforms !== this.props.showPlatforms ||
@@ -210,8 +212,8 @@ export default class Map extends React.Component<MapProps, MapState> {
                     this.props.showPlatforms
                 );
             }
-            if (prevProps.showRoutes !== this.props.showRoutes || prevProps.routes !== this.props.routes) {
-                this.layerManager.updateRoutes(this.props.routes, this.props.showRoutes);
+            if (prevProps.showRoutes !== this.props.showRoutes) {
+                this.layerManager.setRoutesVisible(this.props.showRoutes);
             }
             if (prevProps.showPois !== this.props.showPois) {
                 this.setPoiVisibility(this.props.showPois);
@@ -339,14 +341,13 @@ export default class Map extends React.Component<MapProps, MapState> {
     private updateAllMapData() {
         if (!this.layerManager) return;
 
-        this.layerManager.updateAreaOutlines(this.props.areas, this.props.showAreaOutlines);
         this.layerManager.updateStations(
             this.props.stations,
             this.props.showStations,
             this.props.showStopPositions,
             this.props.showPlatforms
         );
-        this.layerManager.updateRoutes(this.props.routes, this.props.showRoutes);
+        this.layerManager.setRoutesVisible(this.props.showRoutes);
         this.layerManager.updateMappingData(this.props.mappingLines ?? [], this.props.mappingGtfsStops ?? [], this.props.stations);
         this.setPoiVisibility(this.props.showPois);
 
@@ -400,11 +401,11 @@ export default class Map extends React.Component<MapProps, MapState> {
     };
 
     private handleResetBearing = () => {
-        this.map?.resetNorth();
+        this.map?.easeTo({ bearing: 0, pitch: 0 });
     };
 
-    private handlePinStop = (stopIfopt: string, displayName: string, stationName?: string) => {
-        this.props.onPinStop?.(stopIfopt, displayName, stationName);
+    private handlePinStop = (osmId: string, displayName: string, stationName?: string, refIfopt?: string | null, lat?: number, lon?: number) => {
+        this.props.onPinStop?.(osmId, displayName, stationName, refIfopt, lat, lon);
         // Close the popup after pinning
         if (this.popup) {
             this.popup.remove();
@@ -507,6 +508,7 @@ export default class Map extends React.Component<MapProps, MapState> {
             const zoom = this.map.getZoom();
             this.setState({
                 bearing: this.map.getBearing(),
+                pitch: this.map.getPitch(),
                 zoom,
             });
             this.vehicleRenderer?.setZoom(zoom);
@@ -540,8 +542,20 @@ export default class Map extends React.Component<MapProps, MapState> {
             });
 
             // Initialize managers
-            this.layerManager = new MapLayerManager(this.map);
+            this.layerManager = new MapLayerManager(this.map, getConfig().martinUrl);
             this.layerManager.setupLayers();
+            // Pre-render all bundled Maki icons. After they're registered,
+            // force POI layers to re-evaluate by toggling their filter.
+            this.layerManager.preloadBundledIcons().then(() => {
+                if (!this.map) return;
+                for (const id of ["poi-level-1", "poi-level-2", "poi-level-3"]) {
+                    if (this.map.getLayer(id)) {
+                        const filter = this.map.getFilter(id);
+                        this.map.setFilter(id, undefined);
+                        this.map.setFilter(id, filter);
+                    }
+                }
+            });
 
             this.vehicleRenderer = new VehicleRenderer(this.layerManager, this.routeColors, this.routeGeometries);
             this.vehicleRenderer.setZoom(this.map.getZoom());
@@ -570,12 +584,46 @@ export default class Map extends React.Component<MapProps, MapState> {
             this.updateScale();
             this.updateNavigationPointsLayer();
 
-            // Re-apply highlighted building when map moves (tiles may load)
+            // Notify parent of viewport changes (for loading visible routes)
+            // Use 'move' with throttling so stations load during panning, not just after
+            let viewportThrottleTimer: ReturnType<typeof setTimeout> | null = null;
+            const fireViewportChange = () => {
+                if (!this.map) return;
+                const bounds = this.map.getBounds();
+                const zoom = Math.floor(this.map.getZoom());
+                this.props.onViewportChange?.(
+                    [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()],
+                    zoom,
+                );
+            };
+            this.map.on("move", () => {
+                if (viewportThrottleTimer) return;
+                fireViewportChange();
+                viewportThrottleTimer = setTimeout(() => {
+                    viewportThrottleTimer = null;
+                }, 200);
+            });
             this.map.on("moveend", () => {
+                if (viewportThrottleTimer) {
+                    clearTimeout(viewportThrottleTimer);
+                    viewportThrottleTimer = null;
+                }
+                fireViewportChange();
+                // Re-apply highlighted building when map moves (tiles may load)
                 if (this.props.highlightedBuilding && !this.state.buildingHighlighted) {
                     this.updateHighlightedBuilding();
                 }
             });
+
+            // Fire initial viewport change
+            {
+                const bounds = this.map.getBounds();
+                const zoom = Math.floor(this.map.getZoom());
+                this.props.onViewportChange?.(
+                    [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()],
+                    zoom,
+                );
+            }
 
             // Also try on sourcedata events when new tiles load
             this.map.on("sourcedata", (e) => {
@@ -609,7 +657,7 @@ export default class Map extends React.Component<MapProps, MapState> {
             if (station) {
                 const handlePlatformClick = (platform: StationPlatform | StationStopPosition) => {
                     const platformCoords: [number, number] = [platform.lon, platform.lat];
-                    this.showPopup(platformCoords, <PlatformPopup platform={platform} stationName={station.name ?? undefined} routeColors={this.routeColors} routeTypes={this.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} onPin={this.handlePinStop} onClose={() => this.popup?.remove()} />);
+                    this.showPopup(platformCoords, <PlatformPopup platform={platform} stationName={station.name ?? undefined} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(platform.osm_id))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} />);
                 };
                 this.showPopup(coordinates, <StationPopup station={station} onPlatformClick={handlePlatformClick} onClose={() => this.popup?.remove()} />);
             }
@@ -625,12 +673,12 @@ export default class Map extends React.Component<MapProps, MapState> {
             for (const station of this.props.stations) {
                 const platform = station.platforms.find((p) => p.osm_id === osmId);
                 if (platform) {
-                    this.showPopup(coordinates, <PlatformPopup platform={platform} stationName={stationName} routeColors={this.routeColors} routeTypes={this.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} onPin={this.handlePinStop} onClose={() => this.popup?.remove()} />);
+                    this.showPopup(coordinates, <PlatformPopup platform={platform} stationName={stationName} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(platform.osm_id))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} />);
                     return;
                 }
                 const stopPosition = station.stop_positions.find((s) => s.osm_id === osmId);
                 if (stopPosition) {
-                    this.showPopup(coordinates, <PlatformPopup platform={stopPosition} stationName={stationName} routeColors={this.routeColors} routeTypes={this.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} onPin={this.handlePinStop} onClose={() => this.popup?.remove()} />);
+                    this.showPopup(coordinates, <PlatformPopup platform={stopPosition} stationName={stationName} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(stopPosition.osm_id))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} />);
                     return;
                 }
             }
@@ -645,7 +693,7 @@ export default class Map extends React.Component<MapProps, MapState> {
             const stopName = feature.properties?.name ?? stopId;
             const ifopt = feature.properties?.ifopt || null;
             const isAssigned = feature.properties?.isAssigned === true || feature.properties?.isAssigned === "true";
-            this.showPopup(coordinates, <GtfsStopPopup stopId={stopId} stopName={stopName} ifopt={ifopt} isAssigned={isAssigned} routeColors={this.routeColors} routeTypes={this.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} onClose={() => this.popup?.remove()} />);
+            this.showPopup(coordinates, <GtfsStopPopup stopId={stopId} stopName={stopName} ifopt={ifopt} isAssigned={isAssigned} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} onClose={() => this.popup?.remove()} />);
         });
 
         // Vehicle click - open sidebar panel
@@ -1152,7 +1200,7 @@ export default class Map extends React.Component<MapProps, MapState> {
     private setPoiVisibility(visible: boolean) {
         if (!this.map) return;
         const value = visible ? "visible" : "none";
-        for (const layerId of ["poi-circle", "poi-label"]) {
+        for (const layerId of ["poi-level-1", "poi-level-2", "poi-level-3"]) {
             if (this.map.getLayer(layerId)) {
                 this.map.setLayoutProperty(layerId, "visibility", value);
             }
@@ -1196,7 +1244,7 @@ export default class Map extends React.Component<MapProps, MapState> {
     }
 
     render() {
-        const { contextMenu, bearing, scaleWidth, scaleLabel, attributionExpanded } = this.state;
+        const { contextMenu, bearing, pitch, scaleWidth, scaleLabel, attributionExpanded } = this.state;
 
         return (
             <div className="relative w-full h-full bg-black">
@@ -1232,7 +1280,7 @@ export default class Map extends React.Component<MapProps, MapState> {
                         <svg
                             className="h-4 w-4"
                             viewBox="0 0 24 24"
-                            style={{ transform: `rotate(${-bearing}deg)` }}
+                            style={{ transform: `rotateX(${pitch}deg) rotate(${-bearing}deg)` }}
                         >
                             {/* North triangle - red */}
                             <polygon points="12,2 8,12 16,12" fill="#ef4444" />

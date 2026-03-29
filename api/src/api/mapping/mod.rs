@@ -20,8 +20,10 @@ pub struct MappingState {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SetMappingRequest {
-    /// The IFOPT identifier of the OSM stop
-    pub ifopt: String,
+    /// The OSM ID of the stop (primary identifier for the new mapping system)
+    pub osm_id: Option<i64>,
+    /// The IFOPT identifier of the OSM stop (for backwards compatibility)
+    pub ifopt: Option<String>,
     /// The GTFS stop ID to map to
     pub gtfs_stop_id: String,
 }
@@ -34,8 +36,10 @@ pub struct SetMappingResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RemoveMappingRequest {
-    /// The IFOPT identifier to remove the manual mapping for
-    pub ifopt: String,
+    /// The OSM ID to remove the manual mapping for (primary identifier)
+    pub osm_id: Option<i64>,
+    /// The IFOPT identifier to remove the manual mapping for (backwards compatibility)
+    pub ifopt: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -45,7 +49,7 @@ pub struct RemoveMappingResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct MappingStatusRequest {
-    /// Only return unmapped IFOPTs
+    /// Only return unmapped OSM stops (those without a mapping in osm_gtfs_stop_mapping)
     #[serde(default)]
     pub unmapped_only: bool,
     /// Include nearby GTFS candidate stops for each entry
@@ -53,7 +57,7 @@ pub struct MappingStatusRequest {
     pub include_candidates: bool,
     /// Filter by manual-only or auto-only mappings
     pub filter: Option<MappingFilter>,
-    /// Case-insensitive search on IFOPT name or identifier
+    /// Case-insensitive search on IFOPT, name, or OSM ID
     pub search: Option<String>,
     /// Maximum number of entries to return (default: 50, max: 200)
     #[serde(default = "default_limit")]
@@ -78,15 +82,17 @@ pub enum MappingFilter {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MappingStatusResponse {
-    /// Total number of OSM stops with IFOPT identifiers
+    /// Total number of OSM stops (platforms + stop_positions)
+    pub total_osm_stop_count: usize,
+    /// Total number of OSM stops with IFOPT identifiers (subset of total)
     pub total_ifopt_count: usize,
-    /// Number of IFOPTs that have a mapping (manual or auto)
+    /// Number of OSM stops that have a mapping (manual or auto) in osm_gtfs_stop_mapping
     pub mapped_count: usize,
     /// Number of manually set mappings
     pub manual_count: usize,
     /// Number of auto-generated mappings
     pub auto_count: usize,
-    /// Number of IFOPTs without any mapping
+    /// Number of OSM stops without any mapping
     pub unmapped_count: usize,
     /// Paginated list of mapping entries
     pub entries: Vec<MappingEntry>,
@@ -96,8 +102,12 @@ pub struct MappingStatusResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MappingEntry {
-    /// IFOPT identifier
-    pub ifopt: String,
+    /// OSM ID of the stop
+    pub osm_id: i64,
+    /// OSM type (platform or stop_position)
+    pub osm_type: String,
+    /// IFOPT identifier (if available)
+    pub ifopt: Option<String>,
     /// Name of the OSM stop (from platforms or stop_positions)
     pub name: Option<String>,
     /// Latitude of the OSM stop
@@ -114,8 +124,10 @@ pub struct MappingEntry {
     pub gtfs_stop_lat: Option<f64>,
     /// Longitude of the mapped GTFS stop (if mapped)
     pub gtfs_stop_lon: Option<f64>,
-    /// Combined matching score (if auto-mapped)
-    pub combined_score: Option<f64>,
+    /// Match method used (ifopt, geographic, manual)
+    pub match_method: Option<String>,
+    /// Matching score (if auto-mapped)
+    pub match_score: Option<f64>,
     /// Nearby GTFS candidate stops (only if include_candidates is true)
     pub candidates: Vec<CandidateStop>,
 }
@@ -144,10 +156,12 @@ pub struct CandidateStop {
 
 // --- Endpoints ---
 
-/// Set a manual IFOPT-to-GTFS stop mapping
+/// Set a manual OSM-to-GTFS stop mapping
 ///
-/// Creates or replaces a mapping for the given IFOPT with a user-curated
-/// GTFS stop assignment. Manual mappings are preserved across auto-rebuild cycles.
+/// Creates or replaces a mapping for the given OSM stop (by osm_id or IFOPT)
+/// with a user-curated GTFS stop assignment. Manual mappings are preserved
+/// across auto-rebuild cycles. At least one of osm_id or ifopt must be provided.
+/// Dual-writes to both osm_gtfs_stop_mapping and the legacy ifopt_gtfs_mapping table.
 #[utoipa::path(
     post,
     path = "/api/mapping/set",
@@ -155,7 +169,7 @@ pub struct CandidateStop {
     responses(
         (status = 200, description = "Mapping set successfully", body = SetMappingResponse),
         (status = 400, description = "Invalid request"),
-        (status = 404, description = "GTFS stop not found"),
+        (status = 404, description = "GTFS stop or OSM stop not found"),
         (status = 500, description = "Internal server error")
     ),
     tag = "mapping"
@@ -164,10 +178,15 @@ pub async fn set_mapping(
     State(state): State<MappingState>,
     Json(req): Json<SetMappingRequest>,
 ) -> Result<Json<SetMappingResponse>, MappingError> {
-    let ifopt = req.ifopt.trim();
     let gtfs_stop_id = req.gtfs_stop_id.trim();
+    let ifopt = req.ifopt.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let osm_id = req.osm_id;
 
-    if ifopt.is_empty() || gtfs_stop_id.is_empty() {
+    if osm_id.is_none() && ifopt.is_none() {
+        return Err(MappingError::NoIdentifierProvided);
+    }
+
+    if gtfs_stop_id.is_empty() {
         return Err(MappingError::EmptyFields);
     }
 
@@ -183,45 +202,128 @@ pub async fn set_mapping(
         return Err(MappingError::GtfsStopNotFound(gtfs_stop_id.to_string()));
     }
 
-    // Delete any existing mapping for this IFOPT (auto or manual)
-    sqlx::query("DELETE FROM ifopt_gtfs_mapping WHERE ifopt = $1")
-        .bind(ifopt)
+    // Resolve the OSM stop: we need osm_id, osm_type, and optionally ref_ifopt
+    let (resolved_osm_id, resolved_osm_type, resolved_ifopt) = if let Some(oid) = osm_id {
+        // Look up the OSM stop by osm_id (try platforms first, then stop_positions)
+        let osm_stop: Option<(i64, String, Option<String>)> = sqlx::query_as(
+            "SELECT osm_id, 'platform' AS osm_type, ref_ifopt FROM platforms WHERE osm_id = $1 \
+             UNION ALL \
+             SELECT osm_id, 'stop_position' AS osm_type, ref_ifopt FROM stop_positions WHERE osm_id = $1 \
+             LIMIT 1",
+        )
+        .bind(oid)
+        .fetch_optional(&state.pool)
+        .await?;
+
+        match osm_stop {
+            Some((id, osm_type, ref_ifopt)) => {
+                // Use provided ifopt if given, otherwise use the one from the OSM data
+                let final_ifopt = ifopt.map(|s| s.to_string()).or(ref_ifopt);
+                (id, osm_type, final_ifopt)
+            }
+            None => {
+                // osm_id not found in platforms or stop_positions — still allow the mapping
+                // Default to "platform" type; the caller knows the OSM ID
+                let final_ifopt = ifopt.map(|s| s.to_string());
+                (oid, "platform".to_string(), final_ifopt)
+            }
+        }
+    } else {
+        // Only ifopt provided — look up the osm_id from platforms/stop_positions
+        let ifopt_val = ifopt.unwrap(); // safe: we checked at least one is provided
+        let osm_stop: Option<(i64, String, Option<String>)> = sqlx::query_as(
+            "SELECT osm_id, 'platform' AS osm_type, ref_ifopt FROM platforms WHERE ref_ifopt = $1 \
+             UNION ALL \
+             SELECT osm_id, 'stop_position' AS osm_type, ref_ifopt FROM stop_positions WHERE ref_ifopt = $1 \
+             ORDER BY osm_type LIMIT 1",
+        )
+        .bind(ifopt_val)
+        .fetch_optional(&state.pool)
+        .await?;
+
+        match osm_stop {
+            Some((id, osm_type, ref_ifopt)) => (id, osm_type, ref_ifopt),
+            None => return Err(MappingError::OsmStopNotFoundForIfopt(ifopt_val.to_string())),
+        }
+    };
+
+    // --- Write to NEW table: osm_gtfs_stop_mapping ---
+
+    // Delete any existing mapping for this OSM stop
+    sqlx::query("DELETE FROM osm_gtfs_stop_mapping WHERE osm_id = $1 AND osm_type = $2")
+        .bind(resolved_osm_id)
+        .bind(&resolved_osm_type)
         .execute(&state.pool)
         .await?;
 
-    // Evict any other IFOPT that was using this GTFS stop (enforce 1:1)
-    let evicted = sqlx::query_scalar::<_, String>(
-        "DELETE FROM ifopt_gtfs_mapping WHERE gtfs_stop_id = $1 RETURNING ifopt",
+    // Evict any other OSM stop that was using this GTFS stop (enforce 1:1)
+    let evicted_osm = sqlx::query_scalar::<_, i64>(
+        "DELETE FROM osm_gtfs_stop_mapping WHERE gtfs_stop_id = $1 RETURNING osm_id",
     )
     .bind(gtfs_stop_id)
     .fetch_optional(&state.pool)
     .await?;
 
-    if let Some(ref evicted_ifopt) = evicted {
+    if let Some(evicted_id) = evicted_osm {
         info!(
-            evicted_ifopt = %evicted_ifopt,
+            evicted_osm_id = evicted_id,
             gtfs_stop_id,
-            "Evicted existing mapping for GTFS stop"
+            "Evicted existing osm_gtfs_stop_mapping for GTFS stop"
         );
     }
 
-    // Insert the manual mapping
+    // Insert the manual mapping into the new table
     sqlx::query(
-        "INSERT INTO ifopt_gtfs_mapping (ifopt, gtfs_stop_id, combined_score, is_manual) \
-         VALUES ($1, $2, 1.0, TRUE)",
+        "INSERT INTO osm_gtfs_stop_mapping (osm_id, osm_type, gtfs_stop_id, ref_ifopt, match_method, match_score, is_manual) \
+         VALUES ($1, $2, $3, $4, 'manual', 1.0, TRUE)",
     )
-    .bind(ifopt)
+    .bind(resolved_osm_id)
+    .bind(&resolved_osm_type)
     .bind(gtfs_stop_id)
+    .bind(&resolved_ifopt)
     .execute(&state.pool)
     .await?;
 
-    info!(ifopt, gtfs_stop_id, "Manual IFOPT mapping set");
+    // --- Dual-write to OLD table: ifopt_gtfs_mapping (transition period) ---
+    if let Some(ref ifopt_val) = resolved_ifopt {
+        sqlx::query("DELETE FROM ifopt_gtfs_mapping WHERE ifopt = $1")
+            .bind(ifopt_val)
+            .execute(&state.pool)
+            .await?;
 
-    let message = match evicted {
-        Some(evicted_ifopt) => format!(
-            "Mapped {ifopt} -> {gtfs_stop_id} (evicted previous mapping from {evicted_ifopt})"
+        sqlx::query("DELETE FROM ifopt_gtfs_mapping WHERE gtfs_stop_id = $1")
+            .bind(gtfs_stop_id)
+            .execute(&state.pool)
+            .await?;
+
+        sqlx::query(
+            "INSERT INTO ifopt_gtfs_mapping (ifopt, gtfs_stop_id, combined_score, is_manual) \
+             VALUES ($1, $2, 1.0, TRUE)",
+        )
+        .bind(ifopt_val)
+        .bind(gtfs_stop_id)
+        .execute(&state.pool)
+        .await?;
+    }
+
+    info!(
+        osm_id = resolved_osm_id,
+        osm_type = %resolved_osm_type,
+        ifopt = ?resolved_ifopt,
+        gtfs_stop_id,
+        "Manual mapping set"
+    );
+
+    let identifier = resolved_ifopt
+        .as_deref()
+        .map(|i| format!("osm:{resolved_osm_id} (IFOPT: {i})"))
+        .unwrap_or_else(|| format!("osm:{resolved_osm_id}"));
+
+    let message = match evicted_osm {
+        Some(evicted_id) => format!(
+            "Mapped {identifier} -> {gtfs_stop_id} (evicted previous mapping from osm:{evicted_id})"
         ),
-        None => format!("Mapped {ifopt} -> {gtfs_stop_id}"),
+        None => format!("Mapped {identifier} -> {gtfs_stop_id}"),
     };
 
     Ok(Json(SetMappingResponse {
@@ -230,16 +332,19 @@ pub async fn set_mapping(
     }))
 }
 
-/// Remove a manual IFOPT-to-GTFS stop mapping
+/// Remove a manual OSM-to-GTFS stop mapping
 ///
-/// Only removes manual (user-curated) mappings. The IFOPT will be
+/// Only removes manual (user-curated) mappings. The stop will be
 /// re-matched automatically on the next auto-rebuild cycle.
+/// At least one of osm_id or ifopt must be provided.
+/// Removes from both osm_gtfs_stop_mapping and the legacy ifopt_gtfs_mapping table.
 #[utoipa::path(
     post,
     path = "/api/mapping/remove",
     request_body = RemoveMappingRequest,
     responses(
         (status = 200, description = "Mapping removed", body = RemoveMappingResponse),
+        (status = 400, description = "Invalid request"),
         (status = 500, description = "Internal server error")
     ),
     tag = "mapping"
@@ -248,26 +353,92 @@ pub async fn remove_mapping(
     State(state): State<MappingState>,
     Json(req): Json<RemoveMappingRequest>,
 ) -> Result<Json<RemoveMappingResponse>, MappingError> {
-    let result = sqlx::query(
-        "DELETE FROM ifopt_gtfs_mapping WHERE ifopt = $1 AND is_manual = TRUE",
-    )
-    .bind(&req.ifopt)
-    .execute(&state.pool)
-    .await?;
+    let ifopt = req.ifopt.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let osm_id = req.osm_id;
 
-    let removed_count = result.rows_affected();
-    if removed_count > 0 {
-        info!(ifopt = %req.ifopt, "Manual IFOPT mapping removed");
+    if osm_id.is_none() && ifopt.is_none() {
+        return Err(MappingError::NoIdentifierProvided);
     }
 
-    Ok(Json(RemoveMappingResponse { removed_count }))
+    let mut total_removed: u64 = 0;
+
+    if let Some(oid) = osm_id {
+        // Remove from NEW table by osm_id
+        let result = sqlx::query(
+            "DELETE FROM osm_gtfs_stop_mapping WHERE osm_id = $1 AND is_manual = TRUE",
+        )
+        .bind(oid)
+        .execute(&state.pool)
+        .await?;
+        total_removed += result.rows_affected();
+
+        if result.rows_affected() > 0 {
+            info!(osm_id = oid, "Manual mapping removed from osm_gtfs_stop_mapping");
+        }
+
+        // Also look up the ref_ifopt for this osm_id to dual-remove from legacy table
+        let legacy_ifopt: Option<String> = sqlx::query_scalar(
+            "SELECT COALESCE(ref_ifopt, '') FROM ( \
+                SELECT ref_ifopt FROM platforms WHERE osm_id = $1 \
+                UNION ALL \
+                SELECT ref_ifopt FROM stop_positions WHERE osm_id = $1 \
+                LIMIT 1 \
+             ) sub",
+        )
+        .bind(oid)
+        .fetch_optional(&state.pool)
+        .await?;
+
+        if let Some(ref legacy_ifopt_val) = legacy_ifopt {
+            if !legacy_ifopt_val.is_empty() {
+                sqlx::query(
+                    "DELETE FROM ifopt_gtfs_mapping WHERE ifopt = $1 AND is_manual = TRUE",
+                )
+                .bind(legacy_ifopt_val)
+                .execute(&state.pool)
+                .await?;
+            }
+        }
+    }
+
+    if let Some(ifopt_val) = ifopt {
+        // Remove from NEW table by ref_ifopt
+        let result = sqlx::query(
+            "DELETE FROM osm_gtfs_stop_mapping WHERE ref_ifopt = $1 AND is_manual = TRUE",
+        )
+        .bind(ifopt_val)
+        .execute(&state.pool)
+        .await?;
+        total_removed += result.rows_affected();
+
+        if result.rows_affected() > 0 {
+            info!(ifopt = %ifopt_val, "Manual mapping removed from osm_gtfs_stop_mapping by IFOPT");
+        }
+
+        // Dual-remove from OLD table
+        let legacy_result = sqlx::query(
+            "DELETE FROM ifopt_gtfs_mapping WHERE ifopt = $1 AND is_manual = TRUE",
+        )
+        .bind(ifopt_val)
+        .execute(&state.pool)
+        .await?;
+
+        if legacy_result.rows_affected() > 0 {
+            info!(ifopt = %ifopt_val, "Manual mapping removed from ifopt_gtfs_mapping");
+        }
+    }
+
+    Ok(Json(RemoveMappingResponse {
+        removed_count: total_removed,
+    }))
 }
 
 /// Get mapping status overview with optional candidates
 ///
-/// Returns a summary of IFOPT-to-GTFS mapping statistics and a paginated
+/// Returns a summary of OSM-to-GTFS mapping statistics and a paginated
 /// list of mapping entries. Each entry includes the OSM stop info, current
 /// mapping status, and optionally nearby GTFS candidate stops.
+/// Queries from `osm_gtfs_stop_mapping` as the primary source.
 #[utoipa::path(
     post,
     path = "/api/mapping/status",
@@ -284,13 +455,13 @@ pub async fn mapping_status(
 ) -> Result<Json<MappingStatusResponse>, MappingError> {
     let limit = req.limit.min(MAX_LIMIT);
 
-    // Get summary counts
+    // Get summary counts from the new osm_gtfs_stop_mapping table
     let counts: (i64, i64, i64) = sqlx::query_as(
         "SELECT \
             COALESCE(COUNT(*), 0), \
             COALESCE(SUM(CASE WHEN is_manual THEN 1 ELSE 0 END), 0), \
             COALESCE(SUM(CASE WHEN NOT is_manual THEN 1 ELSE 0 END), 0) \
-         FROM ifopt_gtfs_mapping",
+         FROM osm_gtfs_stop_mapping",
     )
     .fetch_one(&state.pool)
     .await?;
@@ -298,6 +469,19 @@ pub async fn mapping_status(
     let mapped_count = counts.0 as usize;
     let manual_count = counts.1 as usize;
     let auto_count = counts.2 as usize;
+
+    // Get total OSM stop count (all platforms + stop_positions, deduplicated by osm_id)
+    let total_osm_stop_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ( \
+            SELECT osm_id FROM platforms \
+            UNION \
+            SELECT osm_id FROM stop_positions \
+         ) sub",
+    )
+    .fetch_one(&state.pool)
+    .await?;
+
+    let total_osm_stop_count = total_osm_stop_count as usize;
 
     // Get total IFOPT count from OSM stops (platforms + stop_positions with ref_ifopt)
     let total_ifopt_count: i64 = sqlx::query_scalar(
@@ -311,10 +495,9 @@ pub async fn mapping_status(
     .await?;
 
     let total_ifopt_count = total_ifopt_count as usize;
-    let unmapped_count = total_ifopt_count.saturating_sub(mapped_count);
+    let unmapped_count = total_osm_stop_count.saturating_sub(mapped_count);
 
-    // Build main query for OSM stops with IFOPT
-    // We use platforms as the primary source, falling back to stop_positions
+    // Build main query for OSM stops
     let entries: Vec<MappingEntry> = if req.unmapped_only {
         fetch_unmapped_entries(&state.pool, &req.search, limit, req.offset, req.include_candidates).await?
     } else {
@@ -324,6 +507,7 @@ pub async fn mapping_status(
     let has_more = entries.len() == limit;
 
     Ok(Json(MappingStatusResponse {
+        total_osm_stop_count,
         total_ifopt_count,
         mapped_count,
         manual_count,
@@ -334,7 +518,7 @@ pub async fn mapping_status(
     }))
 }
 
-/// Fetch entries for unmapped IFOPTs only
+/// Fetch entries for unmapped OSM stops (those not in osm_gtfs_stop_mapping)
 async fn fetch_unmapped_entries(
     pool: &PgPool,
     search: &Option<String>,
@@ -342,20 +526,15 @@ async fn fetch_unmapped_entries(
     offset: usize,
     include_candidates: bool,
 ) -> Result<Vec<MappingEntry>, MappingError> {
-    // Get all distinct IFOPTs from OSM data that don't have a mapping
-    // Platforms are prioritized over stop_positions (source_priority=1 vs 2)
-    // TRIM() normalizes whitespace to prevent near-duplicate IFOPTs
+    // Get all OSM stops (platforms + stop_positions) that don't have a mapping
+    // in osm_gtfs_stop_mapping. Platforms are prioritized (source_priority=1).
     let mut qb = sqlx::QueryBuilder::new(
-        "SELECT sub.ref_ifopt, sub.name, sub.lat, sub.lon FROM ( \
-            SELECT DISTINCT ON (ref_ifopt) ref_ifopt, name, lat, lon \
-            FROM ( \
-                SELECT TRIM(ref_ifopt) AS ref_ifopt, name, lat, lon, 1 AS source_priority FROM platforms WHERE ref_ifopt IS NOT NULL \
-                UNION ALL \
-                SELECT TRIM(ref_ifopt) AS ref_ifopt, name, lat, lon, 2 AS source_priority FROM stop_positions WHERE ref_ifopt IS NOT NULL \
-            ) all_stops \
-            ORDER BY ref_ifopt, source_priority, name NULLS LAST \
+        "SELECT sub.osm_id, sub.osm_type, sub.ref_ifopt, sub.name, sub.lat, sub.lon FROM ( \
+            SELECT osm_id, 'platform' AS osm_type, TRIM(ref_ifopt) AS ref_ifopt, name, lat, lon, 1 AS source_priority FROM platforms \
+            UNION ALL \
+            SELECT osm_id, 'stop_position' AS osm_type, TRIM(ref_ifopt) AS ref_ifopt, name, lat, lon, 2 AS source_priority FROM stop_positions \
          ) sub \
-         WHERE sub.ref_ifopt NOT IN (SELECT ifopt FROM ifopt_gtfs_mapping)",
+         WHERE sub.osm_id NOT IN (SELECT osm_id FROM osm_gtfs_stop_mapping)",
     );
 
     if let Some(term) = search {
@@ -363,30 +542,32 @@ async fn fetch_unmapped_entries(
         qb.push_bind(format!("%{term}%"));
         qb.push(" OR sub.name ILIKE ");
         qb.push_bind(format!("%{term}%"));
+        qb.push(" OR CAST(sub.osm_id AS TEXT) ILIKE ");
+        qb.push_bind(format!("%{term}%"));
         qb.push(")");
     }
 
-    qb.push(" ORDER BY sub.name NULLS LAST, sub.ref_ifopt");
+    qb.push(" ORDER BY sub.name NULLS LAST, sub.osm_id, sub.source_priority");
     qb.push(" LIMIT ");
     qb.push_bind(limit as i64);
     qb.push(" OFFSET ");
     qb.push_bind(offset as i64);
 
-    let rows: Vec<(String, Option<String>, f64, f64)> =
+    let rows: Vec<(i64, String, Option<String>, Option<String>, f64, f64)> =
         qb.build_query_as().fetch_all(pool).await?;
 
-    // Deduplicate rows
+    // Deduplicate by osm_id (platforms take priority over stop_positions)
     let mut deduped_rows = Vec::with_capacity(rows.len());
-    let mut seen_ifopts = HashSet::new();
+    let mut seen_osm_ids = HashSet::new();
     for row in rows {
-        if seen_ifopts.insert(ifopt_dedup_key(&row.0)) {
+        if seen_osm_ids.insert(row.0) {
             deduped_rows.push(row);
         }
     }
 
     // Batch-fetch candidates in a single query instead of N+1
     let candidates_per_entry = if include_candidates {
-        let coordinates: Vec<(f64, f64)> = deduped_rows.iter().map(|(_, _, lat, lon)| (*lat, *lon)).collect();
+        let coordinates: Vec<(f64, f64)> = deduped_rows.iter().map(|(_, _, _, _, lat, lon)| (*lat, *lon)).collect();
         fetch_candidates_batch(pool, &coordinates).await?
     } else {
         (0..deduped_rows.len()).map(|_| Vec::new()).collect()
@@ -395,8 +576,10 @@ async fn fetch_unmapped_entries(
     let entries = deduped_rows
         .into_iter()
         .zip(candidates_per_entry)
-        .map(|((ifopt, name, lat, lon), candidates)| MappingEntry {
-            ifopt,
+        .map(|((osm_id, osm_type, ref_ifopt, name, lat, lon), candidates)| MappingEntry {
+            osm_id,
+            osm_type,
+            ifopt: ref_ifopt,
             name,
             lat,
             lon,
@@ -405,7 +588,8 @@ async fn fetch_unmapped_entries(
             gtfs_stop_name: None,
             gtfs_stop_lat: None,
             gtfs_stop_lon: None,
-            combined_score: None,
+            match_method: None,
+            match_score: None,
             candidates,
         })
         .collect();
@@ -422,25 +606,24 @@ async fn fetch_all_entries(
     offset: usize,
     include_candidates: bool,
 ) -> Result<Vec<MappingEntry>, MappingError> {
-    // Get all distinct IFOPTs from OSM data with optional mapping info
-    // Platforms are prioritized over stop_positions (source_priority=1 vs 2)
+    // Get all OSM stops (platforms + stop_positions) with optional mapping info
+    // from osm_gtfs_stop_mapping. Platforms are prioritized (source_priority=1)
     // so that mapping lines connect to the platform indicators shown on the map.
-    // TRIM() normalizes whitespace to prevent near-duplicate IFOPTs
     let mut qb = sqlx::QueryBuilder::new(
-        "SELECT osm.ref_ifopt, osm.name, osm.lat, osm.lon, \
+        "SELECT osm.osm_id, osm.osm_type, osm.ref_ifopt, osm.name, osm.lat, osm.lon, \
                 m.gtfs_stop_id, gs.stop_name AS gtfs_stop_name, \
                 gs.lat AS gtfs_lat, gs.lon AS gtfs_lon, \
-                m.combined_score, m.is_manual \
+                m.match_method, m.match_score, m.is_manual \
          FROM ( \
-            SELECT DISTINCT ON (ref_ifopt) ref_ifopt, name, lat, lon \
+            SELECT DISTINCT ON (osm_id) osm_id, osm_type, TRIM(ref_ifopt) AS ref_ifopt, name, lat, lon \
             FROM ( \
-                SELECT TRIM(ref_ifopt) AS ref_ifopt, name, lat, lon, 1 AS source_priority FROM platforms WHERE ref_ifopt IS NOT NULL \
+                SELECT osm_id, 'platform' AS osm_type, ref_ifopt, name, lat, lon, 1 AS source_priority FROM platforms \
                 UNION ALL \
-                SELECT TRIM(ref_ifopt) AS ref_ifopt, name, lat, lon, 2 AS source_priority FROM stop_positions WHERE ref_ifopt IS NOT NULL \
+                SELECT osm_id, 'stop_position' AS osm_type, ref_ifopt, name, lat, lon, 2 AS source_priority FROM stop_positions \
             ) all_stops \
-            ORDER BY ref_ifopt, source_priority, name NULLS LAST \
+            ORDER BY osm_id, source_priority, name NULLS LAST \
          ) osm \
-         LEFT JOIN ifopt_gtfs_mapping m ON m.ifopt = osm.ref_ifopt \
+         LEFT JOIN osm_gtfs_stop_mapping m ON m.osm_id = osm.osm_id AND m.osm_type = osm.osm_type \
          LEFT JOIN gtfs_stops gs ON gs.stop_id = m.gtfs_stop_id \
          WHERE TRUE",
     );
@@ -451,7 +634,7 @@ async fn fetch_all_entries(
             qb.push(" AND m.is_manual = TRUE");
         }
         Some(MappingFilter::Auto) => {
-            qb.push(" AND m.is_manual = FALSE AND m.ifopt IS NOT NULL");
+            qb.push(" AND m.is_manual = FALSE AND m.osm_id IS NOT NULL");
         }
         None => {}
     }
@@ -461,41 +644,48 @@ async fn fetch_all_entries(
         qb.push_bind(format!("%{term}%"));
         qb.push(" OR osm.name ILIKE ");
         qb.push_bind(format!("%{term}%"));
+        qb.push(" OR CAST(osm.osm_id AS TEXT) ILIKE ");
+        qb.push_bind(format!("%{term}%"));
         qb.push(")");
     }
 
-    qb.push(" ORDER BY osm.name NULLS LAST, osm.ref_ifopt");
+    qb.push(" ORDER BY osm.name NULLS LAST, osm.osm_id");
     qb.push(" LIMIT ");
     qb.push_bind(limit as i64);
     qb.push(" OFFSET ");
     qb.push_bind(offset as i64);
 
-    let rows: Vec<(
-        String,
-        Option<String>,
-        f64,
-        f64,
-        Option<String>,
-        Option<String>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<bool>,
-    )> = qb.build_query_as().fetch_all(pool).await?;
+    #[allow(clippy::type_complexity)]
+    type AllEntryRow = (
+        i64,            // osm_id
+        String,         // osm_type
+        Option<String>, // ref_ifopt
+        Option<String>, // name
+        f64,            // lat
+        f64,            // lon
+        Option<String>, // gtfs_stop_id
+        Option<String>, // gtfs_stop_name
+        Option<f64>,    // gtfs_lat
+        Option<f64>,    // gtfs_lon
+        Option<String>, // match_method
+        Option<f64>,    // match_score
+        Option<bool>,   // is_manual
+    );
 
-    // Deduplicate rows
-    type AllEntryRow = (String, Option<String>, f64, f64, Option<String>, Option<String>, Option<f64>, Option<f64>, Option<f64>, Option<bool>);
+    let rows: Vec<AllEntryRow> = qb.build_query_as().fetch_all(pool).await?;
+
+    // Deduplicate by osm_id (platforms take priority over stop_positions)
     let mut deduped_rows: Vec<AllEntryRow> = Vec::with_capacity(rows.len());
-    let mut seen_ifopts = HashSet::new();
+    let mut seen_osm_ids = HashSet::new();
     for row in rows {
-        if seen_ifopts.insert(ifopt_dedup_key(&row.0)) {
+        if seen_osm_ids.insert(row.0) {
             deduped_rows.push(row);
         }
     }
 
     // Batch-fetch candidates in a single query instead of N+1
     let candidates_per_entry = if include_candidates {
-        let coordinates: Vec<(f64, f64)> = deduped_rows.iter().map(|r| (r.2, r.3)).collect();
+        let coordinates: Vec<(f64, f64)> = deduped_rows.iter().map(|r| (r.4, r.5)).collect();
         fetch_candidates_batch(pool, &coordinates).await?
     } else {
         (0..deduped_rows.len()).map(|_| Vec::new()).collect()
@@ -504,14 +694,16 @@ async fn fetch_all_entries(
     let entries = deduped_rows
         .into_iter()
         .zip(candidates_per_entry)
-        .map(|((ifopt, name, lat, lon, gtfs_stop_id, gtfs_stop_name, gtfs_lat, gtfs_lon, combined_score, is_manual), candidates)| {
+        .map(|((osm_id, osm_type, ref_ifopt, name, lat, lon, gtfs_stop_id, gtfs_stop_name, gtfs_lat, gtfs_lon, match_method, match_score, is_manual), candidates)| {
             let status = match is_manual {
                 Some(true) => MappingStatus::Manual,
                 Some(false) => MappingStatus::Auto,
                 None => MappingStatus::Unmapped,
             };
             MappingEntry {
-                ifopt,
+                osm_id,
+                osm_type,
+                ifopt: ref_ifopt,
                 name,
                 lat,
                 lon,
@@ -520,7 +712,8 @@ async fn fetch_all_entries(
                 gtfs_stop_name,
                 gtfs_stop_lat: gtfs_lat,
                 gtfs_stop_lon: gtfs_lon,
-                combined_score,
+                match_method,
+                match_score,
                 candidates,
             }
         })

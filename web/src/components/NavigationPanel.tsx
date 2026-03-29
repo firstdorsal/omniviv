@@ -3,7 +3,7 @@ import { GripVertical, Plus, Trash2 } from "lucide-react";
 import { TbWalk } from "react-icons/tb";
 import { Button } from "./ui/button";
 import { DateTimePicker } from "./ui/date-time-picker";
-import type { Area, Station } from "../api";
+import type { Station } from "../api";
 import { getConfig } from "../config";
 import { Duration } from "./Duration";
 import { LineBadge } from "./LineBadge";
@@ -14,7 +14,6 @@ type PickMode = "start" | "end" | null;
 
 interface NavigationPanelProps {
     stations: Station[];
-    areas: Area[];
     routeColors: globalThis.Map<string, string>;
     routeTypes: globalThis.Map<string, string>;
     startLocation: ResolvedLocation | null;
@@ -36,6 +35,8 @@ export type { Location, PickMode };
 interface RouteLeg {
     mode: string;
     routeShortName?: string;
+    routeColor?: string;
+    agencyName?: string;
     from: { name: string };
     to: { name: string };
     duration: number;
@@ -54,7 +55,6 @@ interface RouteItinerary {
 
 export function NavigationPanel({
     stations,
-    areas,
     routeColors,
     routeTypes,
     startLocation,
@@ -315,7 +315,6 @@ export function NavigationPanel({
                                     <div className={`flex-1 min-w-0 ${dragIndex !== null ? "pointer-events-none" : ""}`}>
                                         <LocationSearch
                                             stations={stations}
-                                            areas={areas}
                                             value={location}
                                             onChange={handleChange}
                                             showGps
@@ -435,7 +434,12 @@ export function NavigationPanel({
                                                     <LineBadge
                                                         key={j}
                                                         line={leg.routeShortName || leg.mode}
-                                                        color={leg.routeShortName ? routeColors.get(leg.routeShortName) : undefined}
+                                                        color={leg.routeColor
+                                                            ? (leg.routeColor.startsWith('#') ? leg.routeColor : `#${leg.routeColor}`)
+                                                            : leg.routeShortName ? (
+                                                                routeColors.get(`${leg.mode?.toLowerCase()}:${leg.routeShortName}`)
+                                                                ?? routeColors.get(leg.routeShortName)
+                                                            ) : undefined}
                                                         mode={leg.mode || (leg.routeShortName ? routeTypes.get(leg.routeShortName) : undefined)}
                                                         className="shrink-0"
                                                     />

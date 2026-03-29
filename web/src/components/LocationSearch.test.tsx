@@ -433,7 +433,7 @@ describe("LocationSearch search", () => {
         });
     });
 
-    it("shows detail line for local station matches with area and platform count", async () => {
+    it("shows detail line for local station matches with platform count", async () => {
         const user = userEvent.setup();
         renderSearch();
         const input = screen.getByRole("combobox");
@@ -441,8 +441,8 @@ describe("LocationSearch search", () => {
         await user.type(input, "König");
         await waitFor(() => {
             expect(screen.getByText("Königsplatz")).toBeInTheDocument();
-            // Königsplatz has 2 platforms and area "Augsburg"
-            expect(screen.getByText("Haltestelle · 2 Steige · Augsburg")).toBeInTheDocument();
+            // Königsplatz has 2 platforms
+            expect(screen.getByText("Haltestelle · 2 Steige")).toBeInTheDocument();
         });
     });
 
@@ -454,8 +454,8 @@ describe("LocationSearch search", () => {
         await user.type(input, "West");
         await waitFor(() => {
             expect(screen.getByText("Augsburg West P+R")).toBeInTheDocument();
-            // No platforms, but has area
-            expect(screen.getByText("Haltestelle · Augsburg")).toBeInTheDocument();
+            // No platforms
+            expect(screen.getByText("Haltestelle")).toBeInTheDocument();
         });
     });
 

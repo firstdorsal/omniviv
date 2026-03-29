@@ -73,6 +73,7 @@ pub fn load_schedule(zip_path: &Path) -> Result<GtfsSchedule, GtfsError> {
     }
     info!(stops_indexed = trips_by_stop.len(), "Built trips-by-stop index");
 
+    #[allow(deprecated)]
     Ok(GtfsSchedule {
         stops,
         routes,
@@ -83,6 +84,8 @@ pub fn load_schedule(zip_path: &Path) -> Result<GtfsSchedule, GtfsError> {
         trips_by_stop,
         ifopt_to_gtfs: HashMap::new(),
         gtfs_to_ifopt: HashMap::new(),
+        stop_to_gtfs: HashMap::new(),
+        gtfs_to_stop: HashMap::new(),
         loaded_at: chrono::Utc::now(),
     })
 }
@@ -151,6 +154,7 @@ pub(crate) fn parse_routes(
     let idx_short = headers.iter().position(|h| h == "route_short_name");
     let idx_long = headers.iter().position(|h| h == "route_long_name");
     let idx_type = headers.iter().position(|h| h == "route_type");
+    let idx_color = headers.iter().position(|h| h == "route_color");
 
     let mut routes = HashMap::new();
     let mut skipped = 0usize;
@@ -174,6 +178,10 @@ pub(crate) fn parse_routes(
                 route_type: idx_type
                     .and_then(|i| record.get(i))
                     .and_then(|s| s.parse().ok()),
+                route_color: idx_color
+                    .and_then(|i| record.get(i))
+                    .and_then(non_empty)
+                    .map(|c| if c.starts_with('#') { c.to_string() } else { format!("#{c}") }),
             },
         );
     }

@@ -111,17 +111,24 @@ pub async fn load_schedule_to_db(pool: &PgPool, zip_path: &Path) -> Result<(), G
     }
     info!(count = stop_count, "Inserted GTFS stops");
 
+    // Populate PostGIS geometry for spatial proximity queries
+    sqlx::query(
+        "UPDATE gtfs_stops SET geom = ST_SetSRID(ST_MakePoint(lon, lat), 4326) WHERE lat IS NOT NULL AND lon IS NOT NULL AND geom IS NULL"
+    ).execute(pool).await?;
+    info!("Populated GTFS stops geometry");
+
     // --- Insert routes ---
     let route_values: Vec<_> = routes.values().collect();
     for batch in route_values.chunks(DB_BATCH_SIZE) {
         let mut qb = sqlx::QueryBuilder::new(
-            "INSERT INTO gtfs_routes (route_id, route_short_name, route_long_name, route_type) ",
+            "INSERT INTO gtfs_routes (route_id, route_short_name, route_long_name, route_type, route_color) ",
         );
         qb.push_values(batch.iter(), |mut b, route| {
             b.push_bind(&route.route_id)
                 .push_bind(&route.route_short_name)
                 .push_bind(&route.route_long_name)
-                .push_bind(route.route_type);
+                .push_bind(route.route_type)
+                .push_bind(&route.route_color);
         });
         qb.build().execute(pool).await?;
     }
@@ -322,28 +329,45 @@ pub async fn load_schedule_to_db(pool: &PgPool, zip_path: &Path) -> Result<(), G
 }
 
 /// Build a partial GtfsSchedule from PostgreSQL containing only data relevant
-/// to the given IFOPT stop IDs. Used by the realtime processing cycle to avoid
-/// holding the full schedule (~1GB) in memory.
+/// to the given stop IDs (IFOPT strings and/or `osm:{id}` identifiers).
 ///
-/// Executes 7 batch queries to load:
-/// 1. IFOPT <-> GTFS mapping for the given stops
-/// 2. Trip IDs visiting those stops
-/// 3. Trip details, stop_times, routes, calendars, stop names
+/// Queries both the legacy `ifopt_gtfs_mapping` table (for backwards compat)
+/// and the new `osm_gtfs_stop_mapping` table to populate both the old
+/// `ifopt_to_gtfs`/`gtfs_to_ifopt` fields and the new universal
+/// `stop_to_gtfs`/`gtfs_to_stop` fields.
+///
+/// Executes batch queries to load:
+/// 1. IFOPT <-> GTFS mapping for the given stops (legacy)
+/// 2. OSM <-> GTFS mapping from osm_gtfs_stop_mapping (universal)
+/// 3. Trip IDs visiting those stops
+/// 4. Trip details, stop_times, routes, calendars, stop names
+#[allow(deprecated)]
 pub async fn build_schedule_from_db(
     pool: &PgPool,
-    relevant_ifopt_ids: &HashSet<String>,
+    relevant_stop_ids: &HashSet<String>,
 ) -> Result<GtfsSchedule, GtfsError> {
-    let ifopt_list: Vec<&str> = relevant_ifopt_ids.iter().map(|s| s.as_str()).collect();
+    use crate::sync::osm_stop_id;
 
-    // Get IFOPT -> GTFS mapping for our monitored stops
-    let mapping_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT ifopt, gtfs_stop_id FROM ifopt_gtfs_mapping \
-         WHERE ifopt = ANY($1::text[]) \
-         ORDER BY is_manual DESC, combined_score DESC",
-    )
-    .bind(&ifopt_list)
-    .fetch_all(pool)
-    .await?;
+    // Separate IFOPT IDs from osm:{id} IDs for legacy query
+    let ifopt_list: Vec<&str> = relevant_stop_ids
+        .iter()
+        .filter(|s| !s.starts_with("osm:"))
+        .map(|s| s.as_str())
+        .collect();
+
+    // Legacy: Get IFOPT -> GTFS mapping for our monitored stops
+    let mapping_rows: Vec<(String, String)> = if ifopt_list.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as(
+            "SELECT ifopt, gtfs_stop_id FROM ifopt_gtfs_mapping \
+             WHERE ifopt = ANY($1::text[]) \
+             ORDER BY is_manual DESC, combined_score DESC",
+        )
+        .bind(&ifopt_list)
+        .fetch_all(pool)
+        .await?
+    };
 
     let mut ifopt_to_gtfs: HashMap<String, Vec<String>> = HashMap::new();
     let mut gtfs_to_ifopt: HashMap<String, Vec<String>> = HashMap::new();
@@ -358,14 +382,65 @@ pub async fn build_schedule_from_db(
             .push(ifopt.clone());
     }
 
-    let gtfs_stop_ids: Vec<String> = gtfs_to_ifopt.keys().cloned().collect();
+    // Universal: Get StopId -> GTFS mapping only for relevant stops
+    let osm_ids: Vec<i64> = relevant_stop_ids
+        .iter()
+        .filter_map(|s| crate::sync::parse_osm_stop_id(s))
+        .collect();
+
+    let osm_mapping_rows: Vec<(i64, Option<String>, String)> = if osm_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as(
+            "SELECT osm_id, ref_ifopt, gtfs_stop_id FROM osm_gtfs_stop_mapping WHERE osm_id = ANY($1::bigint[])",
+        )
+        .bind(&osm_ids)
+        .fetch_all(pool)
+        .await?
+    };
+
+    let mut stop_to_gtfs: HashMap<String, Vec<String>> = HashMap::new();
+    let mut gtfs_to_stop: HashMap<String, Vec<String>> = HashMap::new();
+    for (osm_id, ref_ifopt, gtfs_stop_id) in &osm_mapping_rows {
+        // Always add mapping under the osm:{id} key
+        let osm_key = osm_stop_id(*osm_id);
+        stop_to_gtfs
+            .entry(osm_key.clone())
+            .or_default()
+            .push(gtfs_stop_id.clone());
+        gtfs_to_stop
+            .entry(gtfs_stop_id.clone())
+            .or_default()
+            .push(osm_key);
+
+        // Also add mapping under the IFOPT key where available
+        if let Some(ifopt) = ref_ifopt {
+            stop_to_gtfs
+                .entry(ifopt.clone())
+                .or_default()
+                .push(gtfs_stop_id.clone());
+            gtfs_to_stop
+                .entry(gtfs_stop_id.clone())
+                .or_default()
+                .push(ifopt.clone());
+        }
+    }
+
+    // Combine GTFS stop IDs from both legacy and universal mappings
+    let mut all_gtfs_stop_ids: HashSet<String> = gtfs_to_ifopt.keys().cloned().collect();
+    all_gtfs_stop_ids.extend(gtfs_to_stop.keys().cloned());
+    let gtfs_stop_ids: Vec<String> = all_gtfs_stop_ids.into_iter().collect();
+
     if gtfs_stop_ids.is_empty() {
         debug!("No GTFS mapping found for relevant stops, returning empty schedule");
-        return Ok(GtfsSchedule::empty_with_mappings(ifopt_to_gtfs, gtfs_to_ifopt));
+        let mut schedule = GtfsSchedule::empty_with_mappings(ifopt_to_gtfs, gtfs_to_ifopt);
+        schedule.stop_to_gtfs = stop_to_gtfs;
+        schedule.gtfs_to_stop = gtfs_to_stop;
+        return Ok(schedule);
     }
 
     let gtfs_id_refs: Vec<&str> = gtfs_stop_ids.iter().map(|s| s.as_str()).collect();
-    build_schedule_from_gtfs_ids(pool, &gtfs_id_refs, ifopt_to_gtfs, gtfs_to_ifopt).await
+    build_schedule_from_gtfs_ids(pool, &gtfs_id_refs, ifopt_to_gtfs, gtfs_to_ifopt, stop_to_gtfs, gtfs_to_stop).await
 }
 
 /// Build a GTFS schedule from the database using GTFS stop IDs directly,
@@ -379,16 +454,19 @@ pub async fn build_schedule_from_db_by_gtfs_stop(
     if gtfs_id_list.is_empty() {
         return Ok(GtfsSchedule::empty_with_mappings(HashMap::new(), HashMap::new()));
     }
-    build_schedule_from_gtfs_ids(pool, &gtfs_id_list, HashMap::new(), HashMap::new()).await
+    build_schedule_from_gtfs_ids(pool, &gtfs_id_list, HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new()).await
 }
 
 /// Shared implementation: load trips, stop_times, routes, calendars, and stops
 /// for the given GTFS stop IDs and assemble a GtfsSchedule.
+#[allow(deprecated)]
 async fn build_schedule_from_gtfs_ids(
     pool: &PgPool,
     gtfs_stop_ids: &[&str],
     ifopt_to_gtfs: HashMap<String, Vec<String>>,
     gtfs_to_ifopt: HashMap<String, Vec<String>>,
+    stop_to_gtfs: HashMap<String, Vec<String>>,
+    gtfs_to_stop: HashMap<String, Vec<String>>,
 ) -> Result<GtfsSchedule, GtfsError> {
     // 1. Get trip IDs that visit our GTFS stops
     let trip_ids: Vec<String> = sqlx::query_scalar(
@@ -405,7 +483,10 @@ async fn build_schedule_from_gtfs_ids(
     );
 
     if trip_ids.is_empty() {
-        return Ok(GtfsSchedule::empty_with_mappings(ifopt_to_gtfs, gtfs_to_ifopt));
+        let mut schedule = GtfsSchedule::empty_with_mappings(ifopt_to_gtfs, gtfs_to_ifopt);
+        schedule.stop_to_gtfs = stop_to_gtfs;
+        schedule.gtfs_to_stop = gtfs_to_stop;
+        return Ok(schedule);
     }
 
     // 2. Load trip details
@@ -473,8 +554,8 @@ async fn build_schedule_from_gtfs_ids(
 
     // 4. Load routes
     let route_id_list: Vec<String> = route_ids.into_iter().collect();
-    let route_rows: Vec<(String, Option<String>, Option<String>, Option<i32>)> = sqlx::query_as(
-        "SELECT route_id, route_short_name, route_long_name, route_type \
+    let route_rows: Vec<(String, Option<String>, Option<String>, Option<i32>, Option<String>)> = sqlx::query_as(
+        "SELECT route_id, route_short_name, route_long_name, route_type, route_color \
          FROM gtfs_routes WHERE route_id = ANY($1::text[])",
     )
     .bind(&route_id_list)
@@ -482,7 +563,7 @@ async fn build_schedule_from_gtfs_ids(
     .await?;
 
     let mut routes = HashMap::with_capacity(route_rows.len());
-    for (route_id, short, long, rtype) in route_rows {
+    for (route_id, short, long, rtype, color) in route_rows {
         routes.insert(
             route_id.clone(),
             GtfsRoute {
@@ -490,6 +571,7 @@ async fn build_schedule_from_gtfs_ids(
                 route_short_name: short,
                 route_long_name: long,
                 route_type: rtype,
+                route_color: color,
             },
         );
     }
@@ -568,7 +650,8 @@ async fn build_schedule_from_gtfs_ids(
         stop_times_trips = stop_times.len(),
         routes = routes.len(),
         stops = stops.len(),
-        mapping = ifopt_to_gtfs.len(),
+        legacy_mapping = ifopt_to_gtfs.len(),
+        universal_mapping = stop_to_gtfs.len(),
         "Built realtime cache from PostgreSQL"
     );
 
@@ -582,6 +665,8 @@ async fn build_schedule_from_gtfs_ids(
         trips_by_stop,
         ifopt_to_gtfs,
         gtfs_to_ifopt,
+        stop_to_gtfs,
+        gtfs_to_stop,
         loaded_at: chrono::Utc::now(),
     })
 }

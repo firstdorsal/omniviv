@@ -5,7 +5,7 @@ use chrono_tz::Tz;
 use prost::Message;
 use tracing::{debug, info};
 
-use crate::sync::{Departure, EventType};
+use crate::sync::{is_osm_stop_id, Departure, EventType};
 
 use super::error::GtfsError;
 use super::static_data::{extract_platform_from_ifopt, station_level_ifopt, GtfsSchedule};
@@ -20,6 +20,121 @@ const SCHEDULE_PAST_WINDOW_MINUTES: i64 = 10;
 
 /// Maximum allowed protobuf response size (100 MB)
 const MAX_PROTOBUF_SIZE: usize = 100 * 1024 * 1024;
+
+/// Resolve a GTFS stop_id to all relevant stop keys that departures should be stored under.
+///
+/// Returns keys from both the old IFOPT mapping (`gtfs_to_ifopt`) and the new universal
+/// mapping (`gtfs_to_stop`), filtered to those present in `relevant_stop_ids`.
+/// During the transition period both mappings may be populated; we deduplicate the result.
+/// When neither mapping has data, falls back to direct ID matching against
+/// `relevant_stop_ids` and the station-level prefix set.
+///
+/// For IFOPT-style stop keys, also checks whether the station-level prefix of the
+/// resolved key is present in `relevant_stop_ids` (station-level matching).
+#[allow(deprecated)]
+fn resolve_relevant_stop_keys(
+    schedule: &GtfsSchedule,
+    gtfs_stop_id: &str,
+    relevant_stop_ids: &HashSet<String>,
+    station_prefixes: &HashSet<String>,
+    has_any_mapping: bool,
+) -> Vec<String> {
+    if !has_any_mapping {
+        // No mapping at all — direct ID matching (legacy fallback)
+        let id = station_level_ifopt(gtfs_stop_id);
+        if relevant_stop_ids.contains(gtfs_stop_id)
+            || station_prefixes.contains(&id)
+        {
+            return vec![gtfs_stop_id.to_string()];
+        }
+        return vec![];
+    }
+
+    let mut keys: Vec<String> = Vec::new();
+
+    // Old mapping: GTFS stop_id -> IFOPTs
+    if let Some(ifopts) = schedule.gtfs_to_ifopt.get(gtfs_stop_id) {
+        for ifopt in ifopts {
+            if relevant_stop_ids.contains(ifopt)
+                || relevant_stop_ids.contains(&station_level_ifopt(ifopt))
+            {
+                keys.push(ifopt.clone());
+            }
+        }
+    }
+
+    // New mapping: GTFS stop_id -> StopIds (may include both IFOPTs and osm:{id})
+    if let Some(stop_ids) = schedule.gtfs_to_stop.get(gtfs_stop_id) {
+        for sid in stop_ids {
+            if keys.contains(sid) {
+                continue;
+            }
+            // For IFOPT-style keys, also allow station-level prefix matching.
+            // For osm:{id} keys, only exact match.
+            if relevant_stop_ids.contains(sid) {
+                keys.push(sid.clone());
+            } else if !is_osm_stop_id(sid)
+                && relevant_stop_ids.contains(&station_level_ifopt(sid))
+            {
+                keys.push(sid.clone());
+            }
+        }
+    }
+
+    keys
+}
+
+/// Check whether a GTFS stop_id is relevant (maps to any ID in the relevant set)
+/// using both old and new mappings.
+#[allow(deprecated)]
+fn is_gtfs_stop_relevant_any(
+    schedule: &GtfsSchedule,
+    gtfs_stop_id: &str,
+    relevant_stop_ids: &HashSet<String>,
+) -> bool {
+    // Old mapping
+    if let Some(ifopts) = schedule.gtfs_to_ifopt.get(gtfs_stop_id) {
+        if ifopts.iter().any(|ifopt| relevant_stop_ids.contains(ifopt)) {
+            return true;
+        }
+    }
+    // New mapping
+    if let Some(stop_ids) = schedule.gtfs_to_stop.get(gtfs_stop_id) {
+        if stop_ids.iter().any(|sid| relevant_stop_ids.contains(sid)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Look up trip_ids for a StopId via both old and new mappings.
+///
+/// For IFOPT keys, queries `ifopt_to_gtfs`; for all keys (including `osm:{id}`),
+/// queries `stop_to_gtfs`. Returns the union of trips visiting any mapped GTFS stop.
+#[allow(deprecated)]
+fn trips_for_stop_key<'a>(schedule: &'a GtfsSchedule, stop_key: &str) -> HashSet<&'a String> {
+    let mut result = HashSet::new();
+
+    // Old mapping (IFOPT -> GTFS stop_ids)
+    if let Some(gtfs_ids) = schedule.ifopt_to_gtfs.get(stop_key) {
+        for gid in gtfs_ids {
+            if let Some(trips) = schedule.trips_by_stop.get(gid) {
+                result.extend(trips);
+            }
+        }
+    }
+
+    // New mapping (StopId -> GTFS stop_ids) — covers both IFOPT and osm:{id} keys
+    if let Some(gtfs_ids) = schedule.stop_to_gtfs.get(stop_key) {
+        for gid in gtfs_ids {
+            if let Some(trips) = schedule.trips_by_stop.get(gid) {
+                result.extend(trips);
+            }
+        }
+    }
+
+    result
+}
 
 /// Fetch and decode the GTFS-RT protobuf feed.
 pub async fn fetch_feed(
@@ -175,9 +290,10 @@ pub fn process_trip_updates(
     let mut departures: HashMap<String, Vec<Departure>> = HashMap::new();
     let cutoff = now + time_horizon;
 
-    // Build station-level prefix set for matching
+    // Build station-level prefix set for matching (only IFOPT-style IDs have station prefixes)
     let station_prefixes: HashSet<String> = relevant_stop_ids
         .iter()
+        .filter(|id| !is_osm_stop_id(id))
         .map(|id| station_level_ifopt(id))
         .collect();
 
@@ -186,7 +302,8 @@ pub fn process_trip_updates(
     // Track which trip_ids have RT data
     let mut trips_with_rt: HashSet<String> = HashSet::new();
 
-    let has_mapping = !schedule.ifopt_to_gtfs.is_empty();
+    #[allow(deprecated)]
+    let has_mapping = !schedule.ifopt_to_gtfs.is_empty() || !schedule.stop_to_gtfs.is_empty();
 
     let mut matched_trips = 0u64;
     let mut total_updates = 0u64;
@@ -214,7 +331,7 @@ pub fn process_trip_updates(
         let visits_our_stops = if has_mapping {
             stop_times
                 .iter()
-                .any(|st| schedule.is_gtfs_stop_relevant(&st.stop_id, relevant_stop_ids))
+                .any(|st| is_gtfs_stop_relevant_any(schedule, &st.stop_id, relevant_stop_ids))
         } else {
             stop_times.iter().any(|st| {
                 relevant_stop_ids.contains(&st.stop_id)
@@ -244,11 +361,12 @@ pub fn process_trip_updates(
         }
 
         // Get route info
-        let route_short_name = schedule
-            .routes
-            .get(&trip.route_id)
+        let route = schedule.routes.get(&trip.route_id);
+        let route_short_name = route
             .and_then(|r| r.route_short_name.clone())
             .unwrap_or_default();
+        let route_type = route.and_then(|r| r.route_type);
+        let route_color = route.and_then(|r| r.route_color.clone());
 
         let last_stop = schedule.last_stop_of_trip(trip_id);
         // Use trip headsign, falling back to last stop name if headsign is empty
@@ -303,37 +421,21 @@ pub fn process_trip_updates(
         // with strikethrough. Skip the normal STU processing loop.
         if trip_cancelled {
             for st in stop_times {
-                let relevant_ifopts: Vec<String> = if has_mapping {
-                    if let Some(ifopts) = schedule.gtfs_to_ifopt.get(&st.stop_id) {
-                        ifopts.iter()
-                            .filter(|ifopt| relevant_stop_ids.contains(*ifopt))
-                            .cloned()
-                            .collect()
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    let id = station_level_ifopt(&st.stop_id);
-                    if relevant_stop_ids.contains(&st.stop_id)
-                        || station_prefixes.contains(&id)
-                    {
-                        vec![st.stop_id.clone()]
-                    } else {
-                        vec![]
-                    }
-                };
-                if relevant_ifopts.is_empty() { continue; }
+                let relevant_keys = resolve_relevant_stop_keys(
+                    schedule, &st.stop_id, relevant_stop_ids, &station_prefixes, has_mapping,
+                );
+                if relevant_keys.is_empty() { continue; }
 
                 let primary_secs = st.departure_time.or(st.arrival_time);
                 let Some(primary_secs) = primary_secs else { continue; };
                 let Some(primary_dt) = schedule_time_to_utc(primary_secs, service_date, tz) else { continue; };
                 if primary_dt < now - Duration::minutes(SCHEDULE_PAST_WINDOW_MINUTES) || primary_dt > cutoff { continue; }
 
-                for ifopt_id in &relevant_ifopts {
+                for stop_key in &relevant_keys {
                     if let Some(dep_secs) = st.departure_time {
                         if let Some(dep_dt) = schedule_time_to_utc(dep_secs, service_date, tz) {
-                            departures.entry(ifopt_id.clone()).or_default().push(Departure {
-                                stop_ifopt: ifopt_id.clone(),
+                            departures.entry(stop_key.clone()).or_default().push(Departure {
+                                stop_ifopt: stop_key.clone(),
                                 event_type: EventType::Departure,
                                 line_number: route_short_name.clone(),
                                 destination: headsign.clone(),
@@ -341,16 +443,18 @@ pub fn process_trip_updates(
                                 planned_time: dep_dt,
                                 estimated_time: None,
                                 delay_minutes: None,
-                                platform: extract_platform_from_ifopt(ifopt_id),
+                                platform: extract_platform_from_ifopt(stop_key),
                                 trip_id: Some(trip_id.clone()),
                                 cancelled: true,
+                                gtfs_route_type: route_type,
+                                color: route_color.clone(),
                             });
                         }
                     }
                     if let Some(arr_secs) = st.arrival_time {
                         if let Some(arr_dt) = schedule_time_to_utc(arr_secs, service_date, tz) {
-                            departures.entry(ifopt_id.clone()).or_default().push(Departure {
-                                stop_ifopt: ifopt_id.clone(),
+                            departures.entry(stop_key.clone()).or_default().push(Departure {
+                                stop_ifopt: stop_key.clone(),
                                 event_type: EventType::Arrival,
                                 line_number: route_short_name.clone(),
                                 destination: headsign.clone(),
@@ -358,9 +462,11 @@ pub fn process_trip_updates(
                                 planned_time: arr_dt,
                                 estimated_time: None,
                                 delay_minutes: None,
-                                platform: extract_platform_from_ifopt(ifopt_id),
+                                platform: extract_platform_from_ifopt(stop_key),
                                 trip_id: Some(trip_id.clone()),
                                 cancelled: true,
+                                gtfs_route_type: route_type,
+                                color: route_color.clone(),
                             });
                         }
                     }
@@ -397,22 +503,11 @@ pub fn process_trip_updates(
                 }
             }
 
-            // Resolve to IFOPTs and check relevance (one GTFS stop can map to multiple platforms)
-            let relevant_ifopts: Vec<String> = if has_mapping {
-                if let Some(ifopts) = schedule.gtfs_to_ifopt.get(&st.stop_id) {
-                    ifopts.iter()
-                        .filter(|ifopt| relevant_stop_ids.contains(*ifopt))
-                        .cloned()
-                        .collect()
-                } else {
-                    vec![]
-                }
-            } else {
-                let relevant = relevant_stop_ids.contains(&st.stop_id)
-                    || station_prefixes.contains(&station_level_ifopt(&st.stop_id));
-                if relevant { vec![st.stop_id.clone()] } else { vec![] }
-            };
-            if relevant_ifopts.is_empty() {
+            // Resolve to stop keys and check relevance (one GTFS stop can map to multiple platforms/osm IDs)
+            let relevant_keys = resolve_relevant_stop_keys(
+                schedule, &st.stop_id, relevant_stop_ids, &station_prefixes, has_mapping,
+            );
+            if relevant_keys.is_empty() {
                 continue;
             }
 
@@ -480,11 +575,11 @@ pub fn process_trip_updates(
                 None
             };
 
-            // Emit events for each mapped IFOPT (shared stops produce events for all platforms)
-            for ifopt_id in &relevant_ifopts {
+            // Emit events for each mapped stop key (shared stops produce events for all platforms/osm IDs)
+            for stop_key in &relevant_keys {
                 if let Some((arr_planned_dt, arr_estimated_dt, arr_delay)) = &arr_event {
                     let arrival = Departure {
-                        stop_ifopt: ifopt_id.clone(),
+                        stop_ifopt: stop_key.clone(),
                         event_type: EventType::Arrival,
                         line_number: route_short_name.clone(),
                         destination: headsign.clone(),
@@ -492,19 +587,21 @@ pub fn process_trip_updates(
                         planned_time: *arr_planned_dt,
                         estimated_time: *arr_estimated_dt,
                         delay_minutes: *arr_delay,
-                        platform: extract_platform_from_ifopt(ifopt_id),
+                        platform: extract_platform_from_ifopt(stop_key),
                         trip_id: Some(trip_id.clone()),
                         cancelled: trip_cancelled,
+                        gtfs_route_type: route_type,
+                        color: route_color.clone(),
                     };
                     departures
-                        .entry(ifopt_id.clone())
+                        .entry(stop_key.clone())
                         .or_default()
                         .push(arrival);
                 }
 
                 if let Some((dep_planned_dt, dep_estimated_dt, dep_delay)) = &dep_event {
                     let departure = Departure {
-                        stop_ifopt: ifopt_id.clone(),
+                        stop_ifopt: stop_key.clone(),
                         event_type: EventType::Departure,
                         line_number: route_short_name.clone(),
                         destination: headsign.clone(),
@@ -512,12 +609,14 @@ pub fn process_trip_updates(
                         planned_time: *dep_planned_dt,
                         estimated_time: *dep_estimated_dt,
                         delay_minutes: *dep_delay,
-                        platform: extract_platform_from_ifopt(ifopt_id),
+                        platform: extract_platform_from_ifopt(stop_key),
                         trip_id: Some(trip_id.clone()),
                         cancelled: trip_cancelled,
+                        gtfs_route_type: route_type,
+                        color: route_color.clone(),
                     };
                     departures
-                        .entry(ifopt_id.clone())
+                        .entry(stop_key.clone())
                         .or_default()
                         .push(departure);
                 }
@@ -595,7 +694,8 @@ pub fn process_trip_updates(
 
 /// Add departures from the static schedule for trips that have no RT data.
 ///
-/// Uses the IFOPT <-> GTFS mapping to translate between database IFOPTs
+/// Uses both the legacy IFOPT <-> GTFS mapping and the new universal StopId <-> GTFS
+/// mapping to translate between database stop identifiers (IFOPT or `osm:{id}`)
 /// and GTFS numeric stop IDs. Falls back to direct ID matching if no mapping exists.
 #[allow(clippy::too_many_arguments)]
 fn add_scheduled_departures(
@@ -609,24 +709,34 @@ fn add_scheduled_departures(
     cutoff: DateTime<Utc>,
     tz: Tz,
 ) {
-    let has_mapping = !schedule.ifopt_to_gtfs.is_empty();
+    #[allow(deprecated)]
+    let has_mapping = !schedule.ifopt_to_gtfs.is_empty() || !schedule.stop_to_gtfs.is_empty();
+
+    // Build station-level prefix set for matching (only IFOPT-style IDs have station prefixes)
+    let station_prefixes: HashSet<String> = relevant_stop_ids
+        .iter()
+        .filter(|id| !is_osm_stop_id(id))
+        .map(|id| station_level_ifopt(id))
+        .collect();
 
     // Collect all trip_ids that visit our relevant stops
     let mut candidate_trips: HashSet<&str> = HashSet::new();
 
     if has_mapping {
-        // Use the IFOPT -> GTFS mapping to find candidate trips
-        for ifopt in relevant_stop_ids {
-            for tid in schedule.trips_for_ifopt(ifopt) {
+        // Use both old and new StopId -> GTFS mappings to find candidate trips
+        for stop_key in relevant_stop_ids {
+            for tid in trips_for_stop_key(schedule, stop_key) {
                 if !trips_with_rt.contains(tid.as_str()) {
-                    candidate_trips.insert(tid);
+                    candidate_trips.insert(tid.as_str());
                 }
             }
-            // Also try station-level IFOPT
-            let prefix = station_level_ifopt(ifopt);
-            for tid in schedule.trips_for_ifopt(&prefix) {
-                if !trips_with_rt.contains(tid.as_str()) {
-                    candidate_trips.insert(tid);
+            // Also try station-level IFOPT (only meaningful for IFOPT-style IDs)
+            if !is_osm_stop_id(stop_key) {
+                let prefix = station_level_ifopt(stop_key);
+                for tid in trips_for_stop_key(schedule, &prefix) {
+                    if !trips_with_rt.contains(tid.as_str()) {
+                        candidate_trips.insert(tid.as_str());
+                    }
                 }
             }
         }
@@ -659,11 +769,12 @@ fn add_scheduled_departures(
             continue;
         };
 
-        let route_short_name = schedule
-            .routes
-            .get(&trip.route_id)
+        let route = schedule.routes.get(&trip.route_id);
+        let route_short_name = route
             .and_then(|r| r.route_short_name.clone())
             .unwrap_or_default();
+        let route_type = route.and_then(|r| r.route_type);
+        let route_color = route.and_then(|r| r.route_color.clone());
 
         let last_stop = schedule.last_stop_of_trip(trip_id);
         // Use trip headsign, falling back to last stop name if headsign is empty
@@ -676,26 +787,12 @@ fn add_scheduled_departures(
             .unwrap_or_default();
 
         for st in stop_times {
-            // Resolve to IFOPTs and check relevance (one GTFS stop can map to multiple platforms)
-            let relevant_ifopts: Vec<String> = if has_mapping {
-                if let Some(ifopts) = schedule.gtfs_to_ifopt.get(&st.stop_id) {
-                    ifopts.iter()
-                        .filter(|ifopt| {
-                            let station_prefix = station_level_ifopt(ifopt);
-                            relevant_stop_ids.contains(*ifopt)
-                                || relevant_stop_ids.contains(&station_prefix)
-                        })
-                        .cloned()
-                        .collect()
-                } else {
-                    vec![]
-                }
-            } else {
-                let relevant = relevant_stop_ids.contains(&st.stop_id);
-                if relevant { vec![st.stop_id.clone()] } else { vec![] }
-            };
+            // Resolve to stop keys and check relevance (one GTFS stop can map to multiple platforms/osm IDs)
+            let relevant_keys = resolve_relevant_stop_keys(
+                schedule, &st.stop_id, relevant_stop_ids, &station_prefixes, has_mapping,
+            );
 
-            if relevant_ifopts.is_empty() {
+            if relevant_keys.is_empty() {
                 continue;
             }
 
@@ -719,11 +816,11 @@ fn add_scheduled_departures(
             let arr_dt = st.arrival_time.and_then(|s| schedule_time_to_utc(s, today, tz));
             let dep_dt = st.departure_time.and_then(|s| schedule_time_to_utc(s, today, tz));
 
-            // Emit events for each mapped IFOPT
-            for ifopt_id in &relevant_ifopts {
+            // Emit events for each mapped stop key
+            for stop_key in &relevant_keys {
                 if let Some(arr_dt) = arr_dt {
                     let arrival = Departure {
-                        stop_ifopt: ifopt_id.clone(),
+                        stop_ifopt: stop_key.clone(),
                         event_type: EventType::Arrival,
                         line_number: route_short_name.clone(),
                         destination: headsign.clone(),
@@ -731,19 +828,21 @@ fn add_scheduled_departures(
                         planned_time: arr_dt,
                         estimated_time: None,
                         delay_minutes: None,
-                        platform: extract_platform_from_ifopt(ifopt_id),
+                        platform: extract_platform_from_ifopt(stop_key),
                         trip_id: Some(trip_id.to_string()),
                         cancelled: is_cancelled,
+                        gtfs_route_type: route_type,
+                        color: route_color.clone(),
                     };
                     departures
-                        .entry(ifopt_id.clone())
+                        .entry(stop_key.clone())
                         .or_default()
                         .push(arrival);
                 }
 
                 if let Some(dep_dt) = dep_dt {
                     let departure = Departure {
-                        stop_ifopt: ifopt_id.clone(),
+                        stop_ifopt: stop_key.clone(),
                         event_type: EventType::Departure,
                         line_number: route_short_name.clone(),
                         destination: headsign.clone(),
@@ -751,12 +850,14 @@ fn add_scheduled_departures(
                         planned_time: dep_dt,
                         estimated_time: None,
                         delay_minutes: None,
-                        platform: extract_platform_from_ifopt(ifopt_id),
+                        platform: extract_platform_from_ifopt(stop_key),
                         trip_id: Some(trip_id.to_string()),
                         cancelled: is_cancelled,
+                        gtfs_route_type: route_type,
+                        color: route_color.clone(),
                     };
                     departures
-                        .entry(ifopt_id.clone())
+                        .entry(stop_key.clone())
                         .or_default()
                         .push(departure);
                 }
@@ -939,6 +1040,7 @@ mod tests {
                 route_short_name: Some("1".to_string()),
                 route_long_name: Some("Line 1".to_string()),
                 route_type: Some(0),
+                route_color: None,
             },
         );
 
@@ -995,6 +1097,7 @@ mod tests {
             .or_default()
             .insert("trip_100".to_string());
 
+        #[allow(deprecated)]
         GtfsSchedule {
             stops,
             routes,
@@ -1005,6 +1108,8 @@ mod tests {
             trips_by_stop,
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         }
     }
@@ -1528,6 +1633,7 @@ mod tests {
                 route_short_name: Some("4".to_string()),
                 route_long_name: Some("Line 4".to_string()),
                 route_type: Some(0),
+                route_color: None,
             },
         );
 
@@ -1621,6 +1727,7 @@ mod tests {
             .or_default()
             .insert("trip_empty_headsign".to_string());
 
+        #[allow(deprecated)]
         GtfsSchedule {
             stops,
             routes,
@@ -1631,6 +1738,8 @@ mod tests {
             trips_by_stop,
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         }
     }

@@ -17,9 +17,9 @@ services:
             POSTGRES_DB: {{ .services.postgres.database }}
         volumes:
             {{- if .services.postgres.storage.volumeName }}
-            - {{ .services.postgres.storage.volumeName }}:/var/lib/postgresql/data
+            - {{ .services.postgres.storage.volumeName }}:/var/lib/postgresql/18/docker
             {{- else if .services.postgres.storage.absolutePath }}
-            - {{ .services.postgres.storage.absolutePath }}:/var/lib/postgresql/data
+            - {{ .services.postgres.storage.absolutePath }}:/var/lib/postgresql/18/docker
             {{- end }}
         healthcheck:
             test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d {{ .services.postgres.database }}"]
@@ -54,7 +54,7 @@ services:
             {{- else if .services.api.data.storage.absolutePath }}
             - {{ .services.api.data.storage.absolutePath }}:/app/data
             {{- end }}
-        mem_limit: 1g
+        mem_limit: 4g
         healthcheck:
             test: ["CMD", "/wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
             interval: 30s
@@ -145,19 +145,28 @@ services:
         image: "{{ .services.martin.image }}"
         container_name: omniviv-martin
         restart: unless-stopped
+        depends_on:
+            postgres:
+                condition: service_healthy
         healthcheck:
             test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/health"]
             interval: 30s
             timeout: 10s
             retries: 3
             start_period: 5s
+        environment:
+            POSTGRES_USER: $POSTGRES_USER
+            POSTGRES_PASSWORD: $POSTGRES_PASSWORD
+            POSTGRES_DB: {{ .services.postgres.database }}
         volumes:
             - "{{ .services.martin.dataPath }}mbtiles:/mbtiles:ro"
             - "{{ .services.martin.dataPath }}fonts:/fonts:ro"
             - "{{ .services.martin.dataPath }}sprites:/sprites:ro"
-        command: /mbtiles --font /fonts
+            - "{{ .services.martin.dataPath }}martin/config.yaml:/config/config.yaml:ro"
+        command: --config /config/config.yaml
         networks:
             - {{ .reverseProxy.network }}
+            - internal
         labels:
             traefik:
                 docker:
@@ -187,6 +196,27 @@ services:
                             loadbalancer:
                                 server:
                                     port: "3000"
+
+    osm-import:
+        image: "{{ .services.osmImport.image }}"
+        container_name: omniviv-osm-import
+        restart: "no"
+        depends_on:
+            postgres:
+                condition: service_healthy
+        environment:
+            POSTGRES_USER: $POSTGRES_USER
+            POSTGRES_PASSWORD: $POSTGRES_PASSWORD
+            POSTGRES_DB: {{ .services.postgres.database }}
+            PBF_PATH: /data/germany-latest.osm.pbf
+            SKIP_DOWNLOAD: "{{ .services.osmImport.skipDownload }}"
+        volumes:
+            - "{{ .services.osmImport.dataPath }}:/data"
+            - ./config/scripts/osm2pgsql-transit.lua:/scripts/transit.lua:ro
+            - ./config/scripts/import-transit-routes.sh:/scripts/import.sh:ro
+        entrypoint: ["sh", "/scripts/import.sh"]
+        networks:
+            - internal
 
     motis:
         image: "{{ .services.motis.image }}"

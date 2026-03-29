@@ -7,7 +7,8 @@ export function getPlatformDisplayName(platform: StationPlatform | StationStopPo
         const lastSegment = platform.ref_ifopt.split(":").pop();
         if (lastSegment) return lastSegment.toUpperCase();
     }
-    return "?";
+    // Use last 3 digits of OSM ID as a short numeric label
+    return String(platform.osm_id % 1000);
 }
 
 // Time formatters - created lazily to use browser's locale at runtime

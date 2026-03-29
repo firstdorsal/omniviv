@@ -41,6 +41,7 @@ pub struct GtfsRoute {
     pub route_short_name: Option<String>,
     pub route_long_name: Option<String>,
     pub route_type: Option<i32>,
+    pub route_color: Option<String>,
 }
 
 /// A GTFS trip (from trips.txt).
@@ -101,14 +102,25 @@ pub struct GtfsSchedule {
     /// GTFS stop_id -> set of trip_ids visiting that stop (for fast filtering)
     pub trips_by_stop: HashMap<String, HashSet<String>>,
     /// IFOPT -> list of matching GTFS stop_ids (built after loading via spatial matching)
+    #[deprecated(note = "Use stop_to_gtfs which supports both IFOPT and osm:{id} keys")]
     pub ifopt_to_gtfs: HashMap<String, Vec<String>>,
     /// GTFS stop_id -> IFOPTs (reverse mapping, multiple IFOPTs can share a GTFS stop)
+    #[deprecated(note = "Use gtfs_to_stop which supports both IFOPT and osm:{id} values")]
     pub gtfs_to_ifopt: HashMap<String, Vec<String>>,
+    /// StopId -> list of matching GTFS stop_ids.
+    /// Keys can be either IFOPT strings or `osm:{id}` identifiers.
+    /// This is the universal replacement for `ifopt_to_gtfs`.
+    pub stop_to_gtfs: HashMap<String, Vec<String>>,
+    /// GTFS stop_id -> list of StopIds (reverse mapping).
+    /// Values can be either IFOPT strings or `osm:{id}` identifiers.
+    /// This is the universal replacement for `gtfs_to_ifopt`.
+    pub gtfs_to_stop: HashMap<String, Vec<String>>,
     pub loaded_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl GtfsSchedule {
-    /// Create an empty schedule, optionally carrying IFOPT↔GTFS mappings.
+    /// Create an empty schedule, optionally carrying IFOPT/StopId ↔ GTFS mappings.
+    #[allow(deprecated)]
     pub fn empty_with_mappings(
         ifopt_to_gtfs: HashMap<String, Vec<String>>,
         gtfs_to_ifopt: HashMap<String, Vec<String>>,
@@ -123,6 +135,8 @@ impl GtfsSchedule {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs,
             gtfs_to_ifopt,
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         }
     }
@@ -280,17 +294,18 @@ impl GtfsSchedule {
         let mut seen_ifopts: HashSet<&str> = HashSet::new();
 
         for osm_stop in osm_stops {
+            let ifopt = osm_stop.ifopt.as_deref().unwrap_or("");
             // Skip duplicate IFOPT entries (same IFOPT may appear from both platforms and stop_positions)
-            if !seen_ifopts.insert(&osm_stop.ifopt) {
+            if !seen_ifopts.insert(ifopt) {
                 continue;
             }
             let osm_routes = osm_route_sets
-                .get(&osm_stop.ifopt)
+                .get(ifopt)
                 .unwrap_or(&empty_route_set);
 
             if osm_routes.is_empty() {
                 no_route_entries.push(IfoptEntry {
-                    ifopt: &osm_stop.ifopt,
+                    ifopt,
                     name: &osm_stop.name,
                     lat: osm_stop.lat,
                     lon: osm_stop.lon,
@@ -337,7 +352,7 @@ impl GtfsSchedule {
                 .fold(f64::MAX, f64::min);
 
             pending.push(PendingMatch {
-                ifopt: &osm_stop.ifopt,
+                ifopt,
                 name: &osm_stop.name,
                 lat: osm_stop.lat,
                 lon: osm_stop.lon,
@@ -580,7 +595,9 @@ impl GtfsSchedule {
         let unmatched_osm: Vec<UnmatchedOsmStop> = all_entries
             .iter()
             .map(|entry| UnmatchedOsmStop {
-                ifopt: entry.ifopt.to_string(),
+                osm_id: 0, // Not available in test path
+                osm_type: "platform".to_string(),
+                ifopt: Some(entry.ifopt.to_string()),
                 name: entry.name.clone(),
                 lat: entry.lat,
                 lon: entry.lon,
@@ -663,11 +680,27 @@ impl GtfsSchedule {
 mod tests {
     use super::*;
     use crate::config::TransportType;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    /// Auto-incrementing counter for generating unique OSM IDs in tests.
+    static TEST_OSM_ID: AtomicI64 = AtomicI64::new(1_000_000);
 
     fn make_route(line: &str, tt: TransportType) -> RouteIdentifier {
         RouteIdentifier {
             line_ref: line.to_string(),
             transport_type: tt,
+        }
+    }
+
+    /// Create an OsmStopInfo for tests with auto-generated osm_id.
+    fn make_osm_stop(ifopt: &str, name: Option<&str>, lat: f64, lon: f64) -> OsmStopInfo {
+        OsmStopInfo {
+            osm_id: TEST_OSM_ID.fetch_add(1, Ordering::Relaxed),
+            osm_type: "platform".to_string(),
+            ifopt: Some(ifopt.to_string()),
+            name: name.map(String::from),
+            lat,
+            lon,
         }
     }
 
@@ -683,6 +716,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -730,6 +765,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -772,6 +809,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -802,6 +841,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -832,6 +873,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -863,6 +906,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -907,6 +952,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -927,12 +974,7 @@ mod tests {
             std::iter::once("trip1".to_string()).collect(),
         );
 
-        let osm_stops = vec![OsmStopInfo {
-            ifopt: "de:09761:691:0:1".to_string(),
-            name: Some("Test Stop".to_string()),
-            lat: 48.3706,
-            lon: 10.8979,
-        }];
+        let osm_stops = vec![make_osm_stop("de:09761:691:0:1", Some("Test Stop"), 48.3706, 10.8979)];
 
         // Both serve Tram 1 → definitive match
         let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
@@ -967,6 +1009,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -987,12 +1031,7 @@ mod tests {
         );
 
         // OSM stop very close but NO route data → no match
-        let osm_stops = vec![OsmStopInfo {
-            ifopt: "de:09761:691:0:1".to_string(),
-            name: Some("Test Stop".to_string()),
-            lat: 48.3706,
-            lon: 10.8979,
-        }];
+        let osm_stops = vec![make_osm_stop("de:09761:691:0:1", Some("Test Stop"), 48.3706, 10.8979)];
 
         let stats = schedule.build_ifopt_mapping(&osm_stops, &HashMap::new(), &HashMap::new());
 
@@ -1013,6 +1052,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -1032,12 +1073,7 @@ mod tests {
             std::iter::once("trip1".to_string()).collect(),
         );
 
-        let osm_stops = vec![OsmStopInfo {
-            ifopt: "de:09761:691:0:1".to_string(),
-            name: Some("Test Stop".to_string()),
-            lat: 48.37,
-            lon: 10.89,
-        }];
+        let osm_stops = vec![make_osm_stop("de:09761:691:0:1", Some("Test Stop"), 48.37, 10.89)];
 
         // Even with matching routes, too far away → no match
         let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
@@ -1071,6 +1107,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -1098,12 +1136,7 @@ mod tests {
         schedule.trips_by_stop.insert("gtfs_far".to_string(), HashSet::new());
         schedule.trips_by_stop.insert("gtfs_close".to_string(), HashSet::new());
 
-        let osm_stops = vec![OsmStopInfo {
-            ifopt: "de:09761:100".to_string(),
-            name: Some("Stop A".to_string()),
-            lat: 48.3654,
-            lon: 10.8941,
-        }];
+        let osm_stops = vec![make_osm_stop("de:09761:100", Some("Stop A"), 48.3654, 10.8941)];
 
         // Both GTFS stops and OSM stop serve the same route
         let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
@@ -1146,6 +1179,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -1181,18 +1216,8 @@ mod tests {
         // Platform A (closer to both GTFS stops)
         // Platform B (farther from both GTFS stops)
         let osm_stops = vec![
-            OsmStopInfo {
-                ifopt: "de:09761:617:0:B".to_string(),
-                name: Some("Moritzplatz".to_string()),
-                lat: 48.3670998,
-                lon: 10.8974858,
-            },
-            OsmStopInfo {
-                ifopt: "de:09761:617:0:A".to_string(),
-                name: Some("Moritzplatz".to_string()),
-                lat: 48.367171,
-                lon: 10.8979903,
-            },
+            make_osm_stop("de:09761:617:0:B", Some("Moritzplatz"), 48.3670998, 10.8974858),
+            make_osm_stop("de:09761:617:0:A", Some("Moritzplatz"), 48.367171, 10.8979903),
         ];
 
         // Both serve the same routes
@@ -1240,6 +1265,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -1272,12 +1299,7 @@ mod tests {
             .trips_by_stop
             .insert("gtfs_far".to_string(), HashSet::new());
 
-        let osm_stops = vec![OsmStopInfo {
-            ifopt: "de:09761:100".to_string(),
-            name: Some("Stop A".to_string()),
-            lat: 48.3654,
-            lon: 10.8941,
-        }];
+        let osm_stops = vec![make_osm_stop("de:09761:100", Some("Stop A"), 48.3654, 10.8941)];
 
         // OSM stop serves Tram 1 and Tram 3
         let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
@@ -1336,6 +1358,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -1356,18 +1380,8 @@ mod tests {
 
         // Two OSM platforms very close, both wanting the same GTFS stop
         let osm_stops = vec![
-            OsmStopInfo {
-                ifopt: "de:09761:101:31:A1".to_string(),
-                name: Some("Königsplatz A1".to_string()),
-                lat: 48.3655,
-                lon: 10.8943,
-            },
-            OsmStopInfo {
-                ifopt: "de:09761:101:31:A2".to_string(),
-                name: Some("Königsplatz A2".to_string()),
-                lat: 48.3656,
-                lon: 10.8942,
-            },
+            make_osm_stop("de:09761:101:31:A1", Some("Königsplatz A1"), 48.3655, 10.8943),
+            make_osm_stop("de:09761:101:31:A2", Some("Königsplatz A2"), 48.3656, 10.8942),
         ];
 
         // Both OSM stops and the GTFS stop serve the same route
@@ -1418,6 +1432,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -1588,6 +1604,8 @@ mod tests {
             trips_by_stop,
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         }
     }
@@ -1597,12 +1615,7 @@ mod tests {
         let mut schedule = make_schedule_for_mapping();
         let (osm_route_sets, gtfs_route_sets) = make_route_sets_for_mapping();
 
-        let osm_stops = vec![OsmStopInfo {
-            ifopt: "de:09761:100".to_string(),
-            name: Some("Königsplatz".to_string()),
-            lat: 48.3651,
-            lon: 10.8981,
-        }];
+        let osm_stops = vec![make_osm_stop("de:09761:100", Some("Königsplatz"), 48.3651, 10.8981)];
 
         let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
         assert_eq!(stats.matched, 1);
@@ -1619,12 +1632,7 @@ mod tests {
         let mut schedule = make_schedule_for_mapping();
 
         // Stop far from any GTFS stop (>500m away), with route data
-        let osm_stops = vec![OsmStopInfo {
-            ifopt: "de:09761:999".to_string(),
-            name: Some("Far Away".to_string()),
-            lat: 48.400,
-            lon: 10.950,
-        }];
+        let osm_stops = vec![make_osm_stop("de:09761:999", Some("Far Away"), 48.400, 10.950)];
 
         let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
         osm_route_sets.insert(
@@ -1644,12 +1652,7 @@ mod tests {
         let (osm_route_sets, gtfs_route_sets) = make_route_sets_for_mapping();
 
         // OSM stop with Königsplatz routes — should match gtfs_kp, not gtfs_mp
-        let osm_stops = vec![OsmStopInfo {
-            ifopt: "de:09761:100".to_string(),
-            name: Some("Königsplatz".to_string()),
-            lat: 48.3651,
-            lon: 10.8981,
-        }];
+        let osm_stops = vec![make_osm_stop("de:09761:100", Some("Königsplatz"), 48.3651, 10.8981)];
 
         let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
         assert_eq!(stats.matched, 1);
@@ -1665,18 +1668,8 @@ mod tests {
         let (osm_route_sets, gtfs_route_sets) = make_route_sets_for_mapping();
 
         let osm_stops = vec![
-            OsmStopInfo {
-                ifopt: "de:09761:100".to_string(),
-                name: Some("Königsplatz".to_string()),
-                lat: 48.3651,
-                lon: 10.8981,
-            },
-            OsmStopInfo {
-                ifopt: "de:09761:200".to_string(),
-                name: Some("Moritzplatz".to_string()),
-                lat: 48.3631,
-                lon: 10.8971,
-            },
+            make_osm_stop("de:09761:100", Some("Königsplatz"), 48.3651, 10.8981),
+            make_osm_stop("de:09761:200", Some("Moritzplatz"), 48.3631, 10.8971),
         ];
 
         let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
@@ -1691,12 +1684,7 @@ mod tests {
         let mut schedule = make_schedule_for_mapping();
         let (osm_route_sets, gtfs_route_sets) = make_route_sets_for_mapping();
 
-        let osm_stops = vec![OsmStopInfo {
-            ifopt: "de:09761:100".to_string(),
-            name: Some("Königsplatz".to_string()),
-            lat: 48.3651,
-            lon: 10.8981,
-        }];
+        let osm_stops = vec![make_osm_stop("de:09761:100", Some("Königsplatz"), 48.3651, 10.8981)];
 
         let stats = schedule.build_ifopt_mapping(&osm_stops, &osm_route_sets, &gtfs_route_sets);
         // In-memory matching always returns 0 manual mappings
@@ -1716,6 +1704,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -1741,12 +1731,7 @@ mod tests {
             },
         );
 
-        let osm_stops = vec![OsmStopInfo {
-            ifopt: "de:09761:100".to_string(),
-            name: Some("Stop A".to_string()),
-            lat: 48.3659,
-            lon: 10.8971,
-        }];
+        let osm_stops = vec![make_osm_stop("de:09761:100", Some("Stop A"), 48.3659, 10.8971)];
 
         // Route sets: OSM stop serves Tram 1 and Tram 3
         let mut osm_route_sets: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
@@ -1802,6 +1787,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -1825,7 +1812,9 @@ mod tests {
             // OSM stop (one per station)
             let ifopt = format!("de:09761:{}:0:1", 100 + i);
             osm_stops.push(OsmStopInfo {
-                ifopt: ifopt.clone(),
+                osm_id: TEST_OSM_ID.fetch_add(1, Ordering::Relaxed),
+                osm_type: "platform".to_string(),
+                ifopt: Some(ifopt.clone()),
                 name: Some(format!("Station {}", i)),
                 lat: base_lat,
                 lon: base_lon,
@@ -1880,6 +1869,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -1914,24 +1905,9 @@ mod tests {
 
         // Same IFOPT appears 3 times with slightly different coordinates
         let osm_stops = vec![
-            OsmStopInfo {
-                ifopt: "de:09761:131:0:a".to_string(),
-                name: Some("Barfüßerbrücke".to_string()),
-                lat: 48.3654,
-                lon: 10.89412, // closest to gtfs_correct
-            },
-            OsmStopInfo {
-                ifopt: "de:09761:131:0:a".to_string(),
-                name: Some("Barfüßerbrücke".to_string()),
-                lat: 48.3658,
-                lon: 10.8941, // slightly different coords
-            },
-            OsmStopInfo {
-                ifopt: "de:09761:131:0:a".to_string(),
-                name: Some("Barfüßerbrücke".to_string()),
-                lat: 48.3662,
-                lon: 10.8941, // even farther
-            },
+            make_osm_stop("de:09761:131:0:a", Some("Barfüßerbrücke"), 48.3654, 10.89412), // closest to gtfs_correct
+            make_osm_stop("de:09761:131:0:a", Some("Barfüßerbrücke"), 48.3658, 10.8941), // slightly different coords
+            make_osm_stop("de:09761:131:0:a", Some("Barfüßerbrücke"), 48.3662, 10.8941), // even farther
         ];
 
         let tram_routes: HashSet<RouteIdentifier> =
@@ -1973,6 +1949,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -2011,36 +1989,11 @@ mod tests {
         // Station A has 5 OSM platforms; 2 have Line 6 routes
         // Platform A is closest to gtfs_a_line6 (~5m)
         let osm_stops = vec![
-            OsmStopInfo {
-                ifopt: "de:maria:1:0:A".to_string(),
-                name: Some("Maria-Alber A".to_string()),
-                lat: 48.35654,
-                lon: 10.98504,
-            },
-            OsmStopInfo {
-                ifopt: "de:maria:1:0:B".to_string(),
-                name: Some("Maria-Alber B".to_string()),
-                lat: 48.3568,
-                lon: 10.9853,
-            },
-            OsmStopInfo {
-                ifopt: "de:maria:1:0:C".to_string(),
-                name: Some("Maria-Alber C".to_string()),
-                lat: 48.3563,
-                lon: 10.9848,
-            },
-            OsmStopInfo {
-                ifopt: "de:maria:1:0:D".to_string(),
-                name: Some("Maria-Alber D".to_string()),
-                lat: 48.3567,
-                lon: 10.9852,
-            },
-            OsmStopInfo {
-                ifopt: "de:maria:1:0:E".to_string(),
-                name: Some("Maria-Alber E".to_string()),
-                lat: 48.3565,
-                lon: 10.9853,
-            },
+            make_osm_stop("de:maria:1:0:A", Some("Maria-Alber A"), 48.35654, 10.98504),
+            make_osm_stop("de:maria:1:0:B", Some("Maria-Alber B"), 48.3568, 10.9853),
+            make_osm_stop("de:maria:1:0:C", Some("Maria-Alber C"), 48.3563, 10.9848),
+            make_osm_stop("de:maria:1:0:D", Some("Maria-Alber D"), 48.3567, 10.9852),
+            make_osm_stop("de:maria:1:0:E", Some("Maria-Alber E"), 48.3565, 10.9853),
         ];
 
         // Only platforms A and B have Line 6 routes
@@ -2108,6 +2061,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -2164,26 +2119,11 @@ mod tests {
 
         // Anchor platform: unambiguously on osm_route 1001, close to gtfs_anchor
         let osm_stops = vec![
-            OsmStopInfo {
-                ifopt: "de:anchor:1:0:X".to_string(),
-                name: Some("Anchor".to_string()),
-                lat: 48.360,
-                lon: 10.985,
-            },
+            make_osm_stop("de:anchor:1:0:X", Some("Anchor"), 48.360, 10.985),
             // Platform A: on osm_route 1001 (same as anchor)
-            OsmStopInfo {
-                ifopt: "de:maria:1:0:A".to_string(),
-                name: Some("Maria-Alber A".to_string()),
-                lat: 48.3565,
-                lon: 10.9850,
-            },
+            make_osm_stop("de:maria:1:0:A", Some("Maria-Alber A"), 48.3565, 10.9850),
             // Platform B: on osm_route 1002 (opposite direction)
-            OsmStopInfo {
-                ifopt: "de:maria:1:0:B".to_string(),
-                name: Some("Maria-Alber B".to_string()),
-                lat: 48.3565,
-                lon: 10.9850, // same position — only route differs
-            },
+            make_osm_stop("de:maria:1:0:B", Some("Maria-Alber B"), 48.3565, 10.9850),
         ];
 
         let line6_routes: HashSet<RouteIdentifier> =
@@ -2253,6 +2193,8 @@ mod tests {
             trips_by_stop: HashMap::new(),
             ifopt_to_gtfs: HashMap::new(),
             gtfs_to_ifopt: HashMap::new(),
+            stop_to_gtfs: HashMap::new(),
+            gtfs_to_stop: HashMap::new(),
             loaded_at: chrono::Utc::now(),
         };
 
@@ -2270,12 +2212,7 @@ mod tests {
             .trips_by_stop
             .insert("gtfs_1".to_string(), HashSet::from(["trip1".to_string()]));
 
-        let osm_stops = vec![OsmStopInfo {
-            ifopt: "de:test:1:0:A".to_string(),
-            name: Some("Stop A".to_string()),
-            lat: 48.3566,
-            lon: 10.9851,
-        }];
+        let osm_stops = vec![make_osm_stop("de:test:1:0:A", Some("Stop A"), 48.3566, 10.9851)];
 
         let line6: HashSet<RouteIdentifier> =
             [make_route("6", TransportType::Bus)].into_iter().collect();

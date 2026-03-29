@@ -22,7 +22,6 @@ pub struct Route {
     pub operator: Option<String>,
     pub network: Option<String>,
     pub color: Option<String>,
-    pub area_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -32,13 +31,11 @@ pub struct RouteListResponse {
 
 #[derive(Debug, Deserialize, IntoParams)]
 pub struct RouteQuery {
-    /// Filter by area ID
-    pub area_id: Option<i64>,
     /// Filter by route type (e.g., "tram", "bus")
     pub route_type: Option<String>,
 }
 
-/// List all routes, optionally filtered by area or type
+/// List all routes, optionally filtered by type
 #[utoipa::path(
     get,
     path = "/api/routes",
@@ -53,62 +50,78 @@ pub async fn list_routes(
     State(pool): State<PgPool>,
     Query(query): Query<RouteQuery>,
 ) -> Result<Json<RouteListResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let routes: Vec<Route> = match (query.area_id, query.route_type.as_deref()) {
-        (Some(area_id), Some(route_type)) => {
-            sqlx::query_as(
-                r#"
-                SELECT osm_id, osm_type, name, ref, route_type, operator, network, color, area_id
-                FROM routes
-                WHERE area_id = $1 AND route_type = $2
-                ORDER BY ref, name
-                "#,
-            )
-            .bind(area_id)
-            .bind(route_type)
-            .fetch_all(&pool)
-            .await
-        }
-        (Some(area_id), None) => {
-            sqlx::query_as(
-                r#"
-                SELECT osm_id, osm_type, name, ref, route_type, operator, network, color, area_id
-                FROM routes
-                WHERE area_id = $1
-                ORDER BY ref, name
-                "#,
-            )
-            .bind(area_id)
-            .fetch_all(&pool)
-            .await
-        }
-        (None, Some(route_type)) => {
-            sqlx::query_as(
-                r#"
-                SELECT osm_id, osm_type, name, ref, route_type, operator, network, color, area_id
-                FROM routes
-                WHERE route_type = $1
-                ORDER BY ref, name
-                "#,
-            )
-            .bind(route_type)
-            .fetch_all(&pool)
-            .await
-        }
-        (None, None) => {
-            sqlx::query_as(
-                r#"
-                SELECT osm_id, osm_type, name, ref, route_type, operator, network, color, area_id
-                FROM routes
-                ORDER BY ref, name
-                "#,
-            )
-            .fetch_all(&pool)
-            .await
-        }
+    let routes: Vec<Route> = if let Some(route_type) = query.route_type.as_deref() {
+        sqlx::query_as(
+            r#"
+            SELECT osm_id, osm_type, name, ref, route_type, operator, network, color
+            FROM routes
+            WHERE route_type = $1
+            ORDER BY ref, name
+            "#,
+        )
+        .bind(route_type)
+        .fetch_all(&pool)
+        .await
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT osm_id, osm_type, name, ref, route_type, operator, network, color
+            FROM routes
+            ORDER BY ref, name
+            "#,
+        )
+        .fetch_all(&pool)
+        .await
     }
     .map_err(internal_error)?;
 
     Ok(Json(RouteListResponse { routes }))
+}
+
+#[derive(Debug, Serialize, ToSchema, FromRow)]
+pub struct RouteColorEntry {
+    #[serde(rename = "ref")]
+    #[sqlx(rename = "ref")]
+    pub route_ref: Option<String>,
+    pub route_type: String,
+    pub color: Option<String>,
+    pub operator: Option<String>,
+    pub network: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RouteColorsResponse {
+    pub entries: Vec<RouteColorEntry>,
+}
+
+/// Get distinct route line colors and types (lightweight, for color lookups)
+#[utoipa::path(
+    get,
+    path = "/api/routes/colors",
+    responses(
+        (status = 200, description = "Route color and type lookup", body = RouteColorsResponse),
+    ),
+    tag = "routes"
+)]
+pub async fn get_route_colors(
+    State(pool): State<PgPool>,
+) -> Result<Json<RouteColorsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Return ALL distinct (route_type, ref, color) combinations.
+    // The frontend builds a type-scoped map and departures carry gtfs_route_type + color
+    // from the GTFS feed to select the right color per departure.
+    let entries: Vec<RouteColorEntry> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT ref, route_type, color, operator, network
+        FROM routes
+        WHERE ref IS NOT NULL AND color IS NOT NULL
+        ORDER BY ref, route_type
+        "#,
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(internal_error)?;
+
+    Ok(Json(RouteColorsResponse { entries }))
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -148,7 +161,7 @@ pub async fn get_route(
 ) -> Result<Json<RouteDetail>, (StatusCode, Json<ErrorResponse>)> {
     let route: Option<Route> = sqlx::query_as(
         r#"
-        SELECT osm_id, osm_type, name, ref, route_type, operator, network, color, area_id
+        SELECT osm_id, osm_type, name, ref, route_type, operator, network, color
         FROM routes
         WHERE osm_id = $1
         "#,
@@ -214,7 +227,37 @@ pub async fn get_route_geometry(
     State(pool): State<PgPool>,
     Path(route_id): Path<i64>,
 ) -> Result<Json<RouteGeometry>, (StatusCode, Json<ErrorResponse>)> {
-    // Check if route exists
+    // Try PostGIS geometry first (populated by PBF import via osm2pgsql)
+    #[derive(FromRow)]
+    struct PostgisRow {
+        geojson: Option<String>,
+    }
+
+    let postgis_row: Option<PostgisRow> = sqlx::query_as(
+        "SELECT ST_AsGeoJSON(geom)::text as geojson FROM routes WHERE osm_id = $1 AND geom IS NOT NULL",
+    )
+    .bind(route_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(internal_error)?;
+
+    if let Some(row) = postgis_row {
+        if let Some(geojson_str) = row.geojson {
+            // Parse GeoJSON MultiLineString — coordinates are Vec<Vec<[f64; 2]>>
+            if let Ok(geojson) = serde_json::from_str::<serde_json::Value>(&geojson_str) {
+                if let Some(coords) = geojson.get("coordinates") {
+                    if let Ok(segments) = serde_json::from_value::<Vec<Vec<[f64; 2]>>>(coords.clone()) {
+                        return Ok(Json(RouteGeometry {
+                            route_id,
+                            segments,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: read from route_ways JSONB (legacy Overpass-imported routes)
     let exists: Option<(i64,)> = sqlx::query_as("SELECT osm_id FROM routes WHERE osm_id = $1")
         .bind(route_id)
         .fetch_optional(&pool)
@@ -341,6 +384,117 @@ fn normalize_segment_directions(segments: Vec<Vec<[f64; 2]>>) -> Vec<Vec<[f64; 2
     }
 
     result
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct VisibleRoutesRequest {
+    /// Bounding box: [west, south, east, north] in WGS84
+    pub bbox: [f64; 4],
+    /// Current zoom level — only routes with min_zoom <= zoom are returned
+    pub zoom: i32,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VisibleRoute {
+    pub osm_id: i64,
+    pub name: Option<String>,
+    #[serde(rename = "ref")]
+    pub route_ref: Option<String>,
+    pub route_type: String,
+    pub color: Option<String>,
+    pub min_zoom: i32,
+    pub segments: Vec<Vec<[f64; 2]>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VisibleRoutesResponse {
+    pub routes: Vec<VisibleRoute>,
+}
+
+/// Get routes with geometry visible in the given viewport and zoom level
+#[utoipa::path(
+    post,
+    path = "/api/routes/visible",
+    request_body = VisibleRoutesRequest,
+    responses(
+        (status = 200, description = "Routes with geometry in viewport", body = VisibleRoutesResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "routes"
+)]
+pub async fn get_visible_routes(
+    State(pool): State<PgPool>,
+    Json(request): Json<VisibleRoutesRequest>,
+) -> Result<Json<VisibleRoutesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let [west, south, east, north] = request.bbox;
+
+    // Simplify geometry based on zoom level to reduce response size.
+    // Lower zoom = more simplification (in degrees, roughly).
+    let simplify_tolerance = match request.zoom {
+        0..=6 => 0.01,    // ~1km
+        7..=9 => 0.002,   // ~200m
+        10..=12 => 0.0005, // ~50m
+        _ => 0.0,          // full detail
+    };
+
+    #[derive(FromRow)]
+    struct Row {
+        osm_id: i64,
+        name: Option<String>,
+        #[sqlx(rename = "ref")]
+        route_ref: Option<String>,
+        route_type: String,
+        color: Option<String>,
+        min_zoom: i32,
+        geojson: Option<String>,
+    }
+
+    let rows: Vec<Row> = sqlx::query_as(
+        r#"
+        SELECT osm_id, name, ref, route_type, color, min_zoom,
+               ST_AsGeoJSON(
+                   CASE WHEN $6 > 0 THEN ST_Simplify(geom, $6) ELSE geom END
+               )::text as geojson
+        FROM routes
+        WHERE geom IS NOT NULL
+          AND min_zoom <= $5
+          AND geom && ST_MakeEnvelope($1, $2, $3, $4, 4326)
+          AND ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326))
+        "#,
+    )
+    .bind(west)
+    .bind(south)
+    .bind(east)
+    .bind(north)
+    .bind(request.zoom)
+    .bind(simplify_tolerance)
+    .fetch_all(&pool)
+    .await
+    .map_err(internal_error)?;
+
+    let routes: Vec<VisibleRoute> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let segments = row.geojson.and_then(|gj| {
+                let val: serde_json::Value = serde_json::from_str(&gj).ok()?;
+                serde_json::from_value::<Vec<Vec<[f64; 2]>>>(val.get("coordinates")?.clone()).ok()
+            }).unwrap_or_default();
+
+            if segments.is_empty() { return None; }
+
+            Some(VisibleRoute {
+                osm_id: row.osm_id,
+                name: row.name,
+                route_ref: row.route_ref,
+                route_type: row.route_type,
+                color: row.color,
+                min_zoom: row.min_zoom,
+                segments,
+            })
+        })
+        .collect();
+
+    Ok(Json(VisibleRoutesResponse { routes }))
 }
 
 /// Squared distance between two [lon, lat] coordinates (for comparison only).

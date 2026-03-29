@@ -11,7 +11,7 @@
  * Mapping from MOTIS category (underscored) to the actual icon path.
  * Only needed for categories where the name doesn't match 1:1 with Maki/Temaki files.
  */
-const categoryOverrides: Record<string, string> = {
+export const categoryOverrides: Record<string, string> = {
     hotel: "maki/lodging",
     supermarket: "maki/grocery",
     newsagent: "maki/shop",
@@ -32,13 +32,46 @@ const categoryOverrides: Record<string, string> = {
     map: "maki/marker",
     coordinates: "maki/marker",
     place: "maki/marker",
+
+    // OpenMapTiles POI class/subclass names that differ from Maki icon names
+    railway: "maki/rail",
+    college: "maki/college",
+    clothing_store: "maki/clothing-store",
+    alcohol_shop: "maki/alcohol-shop",
+    art_gallery: "maki/art-gallery",
+    ice_cream: "maki/ice-cream",
+    town_hall: "maki/town-hall",
+    fast_food: "maki/fast-food",
+    fire_station: "maki/fire-station",
+    fitness_centre: "maki/fitness-centre",
+    dog_park: "maki/dog-park",
+    drinking_water: "maki/drinking-water",
+    car_rental: "maki/car-rental",
+    car_repair: "maki/car-repair",
+    charging_station: "maki/charging-station",
+    garden_centre: "maki/garden-centre",
+    horse_riding: "maki/horse-riding",
+    hot_spring: "maki/hot-spring",
+    jewelry_store: "maki/jewelry-store",
+    mobile_phone: "maki/mobile-phone",
+    picnic_site: "maki/picnic-site",
+    place_of_worship: "maki/place-of-worship",
+    ranger_station: "maki/ranger-station",
+    waste_basket: "maki/waste-basket",
+    observation_tower: "maki/observation-tower",
+    parking_garage: "maki/parking-garage",
+    bowling_alley: "maki/bowling-alley",
+    amusement_park: "maki/amusement-park",
+    animal_shelter: "maki/animal-shelter",
+    bicycle_share: "maki/bicycle-share",
+    communications_tower: "maki/communications-tower",
 };
 
 /**
  * Resolve a category name to an icon URL path.
  * Tries in order: override map → Maki (hyphenated) → Temaki (underscored) → fallback.
  */
-function resolveIconPath(category: string): string {
+export function resolveIconPath(category: string): string {
     // Check overrides first
     const override = categoryOverrides[category];
     if (override) return `/icons/${override}.svg`;

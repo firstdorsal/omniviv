@@ -290,6 +290,8 @@ mod tests {
             platform: None,
             trip_id: Some(trip.to_string()),
             cancelled: false,
+            gtfs_route_type: None,
+            color: None,
         }
     }
 

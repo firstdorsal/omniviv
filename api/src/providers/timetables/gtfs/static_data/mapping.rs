@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use sqlx::PgPool;
-use tracing::info;
+use tracing::{debug, info};
 
 use super::super::error::GtfsError;
-use super::utils::station_level_ifopt;
 use crate::config::TransportType;
 use crate::sync::{transport_type_from_route, MatchCandidate};
 
@@ -13,9 +12,15 @@ use crate::sync::{transport_type_from_route, MatchCandidate};
 /// Maximum distance in meters for proximity pre-filter
 pub(crate) const MAX_DISTANCE_METERS: f64 = 500.0;
 
-/// OSM stop info for matching (IFOPT, name, lat, lon)
+/// OSM stop info for matching. Includes OSM identity (osm_id + osm_type),
+/// optional IFOPT, name, and coordinates.
 pub struct OsmStopInfo {
-    pub ifopt: String,
+    /// OSM node ID
+    pub osm_id: i64,
+    /// "platform" or "stop_position"
+    pub osm_type: String,
+    /// IFOPT code if available (from `ref:IFOPT` tag)
+    pub ifopt: Option<String>,
     pub name: Option<String>,
     pub lat: f64,
     pub lon: f64,
@@ -67,7 +72,9 @@ pub(crate) struct MappingStats {
 /// An OSM stop that wasn't matched to any GTFS stop
 #[derive(Debug, Clone)]
 pub(crate) struct UnmatchedOsmStop {
-    pub(crate) ifopt: String,
+    pub(crate) osm_id: i64,
+    pub(crate) osm_type: String,
+    pub(crate) ifopt: Option<String>,
     pub(crate) name: Option<String>,
     pub(crate) lat: f64,
     pub(crate) lon: f64,
@@ -97,10 +104,12 @@ pub(crate) struct UnmatchedGtfsStop {
     pub(crate) lon: f64,
 }
 
-/// Bulk-load OSM route sets from the database.
+/// Bulk-load OSM route sets from the database, keyed by IFOPT.
 /// Returns:
-/// - route_sets: IFOPT → set of RouteIdentifiers (for definitive match testing)
-/// - directional_routes: IFOPT → set of OSM route osm_ids (for direction disambiguation)
+/// - route_sets: IFOPT -> set of RouteIdentifiers (for definitive match testing)
+/// - directional_routes: IFOPT -> set of OSM route osm_ids (for direction disambiguation)
+///
+/// This is the legacy version that only returns stops with IFOPT codes.
 pub(crate) async fn load_osm_route_sets(
     pool: &PgPool,
 ) -> Result<
@@ -152,6 +161,116 @@ pub(crate) async fn load_osm_route_sets(
     Ok((route_sets, directional_routes))
 }
 
+/// Unique key for an OSM stop (osm_id + osm_type).
+/// Used as HashMap key for the universal mapping algorithm.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct OsmStopKey {
+    pub(crate) osm_id: i64,
+    pub(crate) osm_type: String,
+}
+
+impl std::fmt::Display for OsmStopKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.osm_type, self.osm_id)
+    }
+}
+
+/// Bulk-load OSM route sets from the database, keyed by OSM stop ID.
+/// Works with ALL stops (including those without IFOPT codes).
+/// Returns:
+/// - route_sets: OsmStopKey -> set of RouteIdentifiers
+/// - directional_routes: OsmStopKey -> set of OSM route osm_ids
+pub(crate) async fn load_osm_route_sets_by_osm_id(
+    pool: &PgPool,
+) -> Result<
+    (
+        HashMap<OsmStopKey, HashSet<RouteIdentifier>>,
+        HashMap<OsmStopKey, HashSet<i64>>,
+    ),
+    GtfsError,
+> {
+    // Load route sets for platforms
+    let platform_rows: Vec<(i64, String, String, i64)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT
+            p.osm_id AS stop_osm_id,
+            r.ref AS line_ref,
+            r.route_type,
+            r.osm_id AS route_osm_id
+        FROM route_stops rs
+        JOIN routes r ON r.osm_id = rs.route_id
+        JOIN platforms p ON p.osm_id = rs.platform_id
+        WHERE r.ref IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // Load route sets for stop positions
+    let stop_rows: Vec<(i64, String, String, i64)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT
+            sp.osm_id AS stop_osm_id,
+            r.ref AS line_ref,
+            r.route_type,
+            r.osm_id AS route_osm_id
+        FROM route_stops rs
+        JOIN routes r ON r.osm_id = rs.route_id
+        JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+        WHERE r.ref IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut route_sets: HashMap<OsmStopKey, HashSet<RouteIdentifier>> = HashMap::new();
+    let mut directional_routes: HashMap<OsmStopKey, HashSet<i64>> = HashMap::new();
+
+    for (stop_osm_id, line_ref, route_type, route_osm_id) in platform_rows {
+        let key = OsmStopKey {
+            osm_id: stop_osm_id,
+            osm_type: "platform".to_string(),
+        };
+        let transport_type = transport_type_from_route(&route_type);
+        route_sets
+            .entry(key.clone())
+            .or_default()
+            .insert(RouteIdentifier {
+                line_ref,
+                transport_type,
+            });
+        directional_routes
+            .entry(key)
+            .or_default()
+            .insert(route_osm_id);
+    }
+
+    for (stop_osm_id, line_ref, route_type, route_osm_id) in stop_rows {
+        let key = OsmStopKey {
+            osm_id: stop_osm_id,
+            osm_type: "stop_position".to_string(),
+        };
+        let transport_type = transport_type_from_route(&route_type);
+        route_sets
+            .entry(key.clone())
+            .or_default()
+            .insert(RouteIdentifier {
+                line_ref,
+                transport_type,
+            });
+        directional_routes
+            .entry(key)
+            .or_default()
+            .insert(route_osm_id);
+    }
+
+    info!(
+        stops_with_routes = route_sets.len(),
+        "Loaded OSM route sets by osm_id for matching"
+    );
+    Ok((route_sets, directional_routes))
+}
+
 /// Load OSM route destination names per IFOPT.
 /// Extracts the destination from OSM route names like "Straßenbahn 1: Göggingen => Lechhausen"
 /// → destination "Lechhausen" for the IFOPT on this route.
@@ -195,6 +314,81 @@ pub(crate) async fn load_osm_destinations(
     info!(
         ifopts_with_destinations = result.len(),
         "Loaded OSM route destinations for direction matching"
+    );
+    Ok(result)
+}
+
+/// Load OSM route destination names per OSM stop ID.
+/// Works with ALL stops including those without IFOPT.
+/// Returns OsmStopKey -> set of normalized destination keywords.
+pub(crate) async fn load_osm_destinations_by_osm_id(
+    pool: &PgPool,
+) -> Result<HashMap<OsmStopKey, HashSet<String>>, GtfsError> {
+    // Platforms
+    let platform_rows: Vec<(i64, String)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT
+            p.osm_id AS stop_osm_id,
+            r.name AS route_name
+        FROM route_stops rs
+        JOIN routes r ON r.osm_id = rs.route_id
+        JOIN platforms p ON p.osm_id = rs.platform_id
+        WHERE r.name IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // Stop positions
+    let stop_rows: Vec<(i64, String)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT
+            sp.osm_id AS stop_osm_id,
+            r.name AS route_name
+        FROM route_stops rs
+        JOIN routes r ON r.osm_id = rs.route_id
+        JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+        WHERE r.name IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut result: HashMap<OsmStopKey, HashSet<String>> = HashMap::new();
+
+    let process_row = |result: &mut HashMap<OsmStopKey, HashSet<String>>, key: OsmStopKey, route_name: &str| {
+        if let Some(arrow_pos) = route_name.find("=>") {
+            let dest = route_name[arrow_pos + 2..].trim();
+            for word in dest.split_whitespace() {
+                let normalized = word
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
+                if normalized.len() >= 3 {
+                    result.entry(key.clone()).or_default().insert(normalized);
+                }
+            }
+        }
+    };
+
+    for (osm_id, route_name) in &platform_rows {
+        let key = OsmStopKey {
+            osm_id: *osm_id,
+            osm_type: "platform".to_string(),
+        };
+        process_row(&mut result, key, route_name);
+    }
+
+    for (osm_id, route_name) in &stop_rows {
+        let key = OsmStopKey {
+            osm_id: *osm_id,
+            osm_type: "stop_position".to_string(),
+        };
+        process_row(&mut result, key, route_name);
+    }
+
+    info!(
+        stops_with_destinations = result.len(),
+        "Loaded OSM route destinations by osm_id for direction matching"
     );
     Ok(result)
 }
@@ -305,34 +499,49 @@ pub(crate) async fn load_gtfs_route_sets(
 ) -> Result<HashMap<String, HashSet<RouteIdentifier>>, GtfsError> {
     let mut result: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
 
-    // Process in batches of 5000
-    for batch in stop_ids.chunks(5000) {
-        let batch_vec: Vec<&str> = batch.to_vec();
-        let rows: Vec<(String, String, i32)> = sqlx::query_as(
-            r#"
-            SELECT DISTINCT st.stop_id, gr.route_short_name, gr.route_type
-            FROM gtfs_stop_times st
-            JOIN gtfs_trips gt ON gt.trip_id = st.trip_id
-            JOIN gtfs_routes gr ON gr.route_id = gt.route_id
-            WHERE st.stop_id = ANY($1::text[])
-            AND gr.route_short_name IS NOT NULL
-            "#,
-        )
-        .bind(&batch_vec)
-        .fetch_all(pool)
-        .await?;
+    // Insert proximity stop IDs into a staging table for efficient joining
+    // (not TEMP table — sqlx connection pool doesn't guarantee same connection)
+    sqlx::query("DROP TABLE IF EXISTS _proximity_stops").execute(pool).await?;
+    sqlx::query("CREATE TABLE _proximity_stops (stop_id TEXT PRIMARY KEY)")
+        .execute(pool).await?;
 
-        for (stop_id, route_short_name, route_type) in rows {
-            let transport_type = TransportType::from_gtfs_route_type(route_type);
-            result
-                .entry(stop_id)
-                .or_default()
-                .insert(RouteIdentifier {
-                    line_ref: route_short_name,
-                    transport_type,
-                });
-        }
+    for batch in stop_ids.chunks(10_000) {
+        let batch_vec: Vec<&str> = batch.to_vec();
+        sqlx::query("INSERT INTO _proximity_stops (stop_id) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING")
+            .bind(&batch_vec)
+            .execute(pool).await?;
     }
+
+    // Create index for efficient join
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_proximity_stops ON _proximity_stops(stop_id)")
+        .execute(pool).await?;
+
+    // Use a subquery with LATERAL to limit per-stop results and avoid exploding result sets
+    let rows: Vec<(String, String, i32)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT st.stop_id, gr.route_short_name, gr.route_type
+        FROM _proximity_stops ps
+        JOIN gtfs_stop_times st ON st.stop_id = ps.stop_id
+        JOIN gtfs_trips gt ON gt.trip_id = st.trip_id
+        JOIN gtfs_routes gr ON gr.route_id = gt.route_id
+        WHERE gr.route_short_name IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (stop_id, route_short_name, route_type) in rows {
+        let transport_type = TransportType::from_gtfs_route_type(route_type);
+        result
+            .entry(stop_id)
+            .or_default()
+            .insert(RouteIdentifier {
+                line_ref: route_short_name,
+                transport_type,
+            });
+    }
+
+    let _ = sqlx::query("DROP TABLE IF EXISTS _proximity_stops").execute(pool).await;
 
     info!(
         gtfs_stops_with_routes = result.len(),
@@ -341,506 +550,480 @@ pub(crate) async fn load_gtfs_route_sets(
     Ok(result)
 }
 
-/// Build the IFOPT <-> GTFS stop ID mapping and store it in PostgreSQL.
+/// A single resolved stop mapping result, used for writing to both tables.
+struct StopMappingResult {
+    osm_id: i64,
+    osm_type: String,
+    gtfs_stop_id: String,
+    ref_ifopt: Option<String>,
+    match_method: String,
+    match_score: f64,
+}
+
+/// Build the OSM <-> GTFS stop mapping and store it in PostgreSQL.
 ///
-/// Uses deterministic route-set comparison: matches only when route sets
-/// form a subset relationship with non-empty intersection, and exactly one
-/// such candidate exists. Stops without OSM route data are left unmatched.
+/// Route-based matching algorithm:
+/// 1. Load all OSM routes with their stops (from `route_stops`)
+/// 2. Find matching GTFS routes by ref + transport type
+/// 3. For each OSM route, get its GTFS route's stops
+/// 4. Match OSM stops to GTFS stops by nearest distance within the same route
 ///
-/// Fetches GTFS leaf stops from the database, runs the matching algorithm
-/// against provided OSM stops, and stores results in `ifopt_gtfs_mapping`.
+/// This is O(routes × stops_per_route) — fast because each route has few stops.
+///
+/// Results are written to:
+/// - `osm_gtfs_stop_mapping` (universal table, keyed by osm_id)
+/// - `ifopt_gtfs_mapping` (legacy table, keyed by IFOPT — for backward compatibility)
+///
 /// Returns mapping statistics for issue reporting.
 pub(crate) async fn build_ifopt_mapping_to_db(
     pool: &PgPool,
     osm_stops: &[OsmStopInfo],
 ) -> Result<MappingStats, GtfsError> {
     /// Maximum rows per batch for bulk INSERT into PostgreSQL.
-    const DB_BATCH_SIZE: usize = 10_000;
+    /// sqlx has a ~65535 parameter limit; osm_gtfs_stop_mapping has 7 columns -> max ~9000 rows.
+    const DB_BATCH_SIZE: usize = 5_000;
 
-    // Fetch GTFS leaf stops from DB: those with parent_station OR that appear in stop_times
-    let gtfs_leaf_stops: Vec<(String, Option<String>, Option<f64>, Option<f64>)> = sqlx::query_as(
+    let total_start = std::time::Instant::now();
+
+    // --- Step 0: Count GTFS leaf stops for stats ---
+    let total_gtfs_stops: i64 = sqlx::query_scalar(
         r#"
-        SELECT DISTINCT s.stop_id, s.stop_name, s.lat, s.lon
+        SELECT COUNT(DISTINCT s.stop_id)
         FROM gtfs_stops s
         WHERE (s.parent_station IS NOT NULL
                OR s.stop_id IN (SELECT DISTINCT stop_id FROM gtfs_stop_times))
-          AND s.lat IS NOT NULL
-          AND s.lon IS NOT NULL
+          AND s.lat IS NOT NULL AND s.lon IS NOT NULL
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    let total_gtfs_stops = total_gtfs_stops as usize;
+
+    info!(
+        osm_stops = osm_stops.len(),
+        total_gtfs_stops,
+        "Starting route-based IFOPT mapping"
+    );
+
+    // --- Step 1: Preserve manual mappings ---
+    let manual_ifopt_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT ifopt, gtfs_stop_id FROM ifopt_gtfs_mapping WHERE is_manual = TRUE",
+    )
+    .fetch_all(pool)
+    .await?;
+    let manual_ifopts: HashSet<String> = manual_ifopt_rows.iter().map(|(i, _)| i.clone()).collect();
+
+    let manual_osm_rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT osm_id, osm_type, gtfs_stop_id FROM osm_gtfs_stop_mapping WHERE is_manual = TRUE",
+    )
+    .fetch_all(pool)
+    .await?;
+    let manual_osm_keys: HashSet<OsmStopKey> = manual_osm_rows
+        .iter()
+        .map(|(id, tp, _)| OsmStopKey {
+            osm_id: *id,
+            osm_type: tp.clone(),
+        })
+        .collect();
+
+    let manual_count = manual_ifopts.len() + manual_osm_keys.len();
+    if manual_count > 0 {
+        info!(
+            manual_ifopt = manual_ifopts.len(),
+            manual_osm = manual_osm_keys.len(),
+            "Preserving manual mappings"
+        );
+    }
+
+    // --- Step 2: Load OSM route->stop relationships ---
+    // Each row: (osm_route_id, route_ref, route_type, stop_osm_id, stop_osm_type, stop_lat, stop_lon)
+    info!("Loading OSM route->stop relationships...");
+    let osm_route_stop_rows: Vec<(i64, String, String, i64, String, f64, f64)> = sqlx::query_as(
+        r#"
+        SELECT
+            r.osm_id AS route_osm_id,
+            r.ref AS route_ref,
+            r.route_type,
+            p.osm_id AS stop_osm_id,
+            'platform' AS stop_osm_type,
+            p.lat, p.lon
+        FROM route_stops rs
+        JOIN routes r ON r.osm_id = rs.route_id
+        JOIN platforms p ON p.osm_id = rs.platform_id
+        WHERE r.ref IS NOT NULL AND p.lat IS NOT NULL AND p.lon IS NOT NULL
+        UNION ALL
+        SELECT
+            r.osm_id AS route_osm_id,
+            r.ref AS route_ref,
+            r.route_type,
+            sp.osm_id AS stop_osm_id,
+            'stop_position' AS stop_osm_type,
+            sp.lat, sp.lon
+        FROM route_stops rs
+        JOIN routes r ON r.osm_id = rs.route_id
+        JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+        WHERE r.ref IS NOT NULL AND sp.lat IS NOT NULL AND sp.lon IS NOT NULL
         "#,
     )
     .fetch_all(pool)
     .await?;
 
+    // Group OSM stops by route key (ref, transport_type)
+    // Each entry: list of (osm_id, osm_type, lat, lon)
+    struct OsmRouteStop {
+        osm_id: i64,
+        osm_type: String,
+        lat: f64,
+        lon: f64,
+    }
+
+    let mut osm_routes_grouped: HashMap<RouteIdentifier, Vec<OsmRouteStop>> = HashMap::new();
+    let mut osm_stop_seen: HashSet<(i64, String, String, TransportType)> = HashSet::new();
+
+    for (_, route_ref, route_type, stop_osm_id, stop_osm_type, lat, lon) in &osm_route_stop_rows {
+        let transport_type = transport_type_from_route(route_type);
+        let route_key = RouteIdentifier {
+            line_ref: route_ref.clone(),
+            transport_type,
+        };
+        // Deduplicate: same stop can appear multiple times on the same logical route
+        // (e.g. from multiple OSM route relations for same line+direction)
+        if osm_stop_seen.insert((*stop_osm_id, stop_osm_type.clone(), route_ref.clone(), transport_type)) {
+            osm_routes_grouped.entry(route_key).or_default().push(OsmRouteStop {
+                osm_id: *stop_osm_id,
+                osm_type: stop_osm_type.clone(),
+                lat: *lat,
+                lon: *lon,
+            });
+        }
+    }
+
     info!(
-        gtfs_leaf_stops = gtfs_leaf_stops.len(),
-        osm_stops = osm_stops.len(),
-        "Fetched GTFS leaf stops for mapping"
+        osm_route_keys = osm_routes_grouped.len(),
+        osm_route_stop_rows = osm_route_stop_rows.len(),
+        "Loaded OSM route->stop relationships"
     );
 
-    // Build candidate list with coordinates
-    let gtfs_candidates: Vec<(&str, f64, f64, Option<&str>)> = gtfs_leaf_stops
-        .iter()
-        .filter_map(|(id, name, lat, lon)| {
-            Some((id.as_str(), (*lat)?, (*lon)?, name.as_deref()))
-        })
-        .collect();
-
-    // Fetch existing manual mappings to preserve them across rebuild
-    let manual_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT ifopt, gtfs_stop_id FROM ifopt_gtfs_mapping WHERE is_manual = TRUE",
+    // --- Step 3: Load GTFS route->stop relationships ---
+    info!("Loading GTFS route->stop relationships...");
+    let gtfs_route_stop_rows: Vec<(String, String, i32, String, Option<String>, f64, f64)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT
+            gr.route_id,
+            gr.route_short_name,
+            gr.route_type,
+            gs.stop_id,
+            gs.stop_name,
+            gs.lat,
+            gs.lon
+        FROM gtfs_stop_times st
+        JOIN gtfs_trips gt ON gt.trip_id = st.trip_id
+        JOIN gtfs_routes gr ON gr.route_id = gt.route_id
+        JOIN gtfs_stops gs ON gs.stop_id = st.stop_id
+        WHERE gr.route_short_name IS NOT NULL
+          AND gs.lat IS NOT NULL AND gs.lon IS NOT NULL
+        "#,
     )
     .fetch_all(pool)
     .await?;
 
-    let manual_ifopts: HashSet<String> = manual_rows.iter().map(|(i, _)| i.clone()).collect();
-    let manual_gtfs_ids: HashSet<String> = manual_rows.iter().map(|(_, g)| g.clone()).collect();
-
-    let manual_count = manual_ifopts.len();
-    if manual_count > 0 {
-        info!(manual_count, "Preserving manual IFOPT mappings");
-    }
-
-    // Load OSM route sets (bulk, all IFOPTs) and directional route IDs
-    let (osm_route_sets, osm_directional_routes) = load_osm_route_sets(pool).await?;
-    let osm_destinations = load_osm_destinations(pool).await?;
-
-    let max_dist_deg = MAX_DISTANCE_METERS / 111_000.0;
-    let max_dist_sq = max_dist_deg * max_dist_deg;
-    let empty_route_set: HashSet<RouteIdentifier> = HashSet::new();
-    let empty_osm_id_set: HashSet<i64> = HashSet::new();
-    let empty_trip_set: HashSet<String> = HashSet::new();
-    let empty_string_set: HashSet<String> = HashSet::new();
-
-    // Proximity pre-filter: collect all GTFS stop IDs within range of any OSM stop
-    let mut proximity_gtfs_ids: HashSet<&str> = HashSet::new();
-    for osm_stop in osm_stops {
-        if manual_ifopts.contains(&osm_stop.ifopt) {
-            continue;
-        }
-        for &(gtfs_id, glat, glon, _) in &gtfs_candidates {
-            if manual_gtfs_ids.contains(gtfs_id) {
-                continue;
-            }
-            let dlat = osm_stop.lat - glat;
-            let dlon = (osm_stop.lon - glon) * (osm_stop.lat.to_radians().cos());
-            let dist_sq = dlat * dlat + dlon * dlon;
-            if dist_sq < max_dist_sq {
-                proximity_gtfs_ids.insert(gtfs_id);
-            }
-        }
-    }
-
-    // Load GTFS route sets only for stops that passed proximity pre-filter
-    let proximity_gtfs_vec: Vec<&str> = proximity_gtfs_ids.into_iter().collect();
-    let gtfs_route_sets = load_gtfs_route_sets(pool, &proximity_gtfs_vec).await?;
-
-    // Load GTFS trip sets for direction-aware matching via trip overlap
-    let gtfs_trip_sets = load_gtfs_trip_sets(pool, &proximity_gtfs_vec).await?;
-
-    // Load GTFS direction info (last stop names) for direction-based matching
-    let gtfs_directions = load_gtfs_directions(pool, &proximity_gtfs_vec).await?;
-
-    // Build reverse index: OSM route osm_id → IFOPTs on that route
-    let mut osm_route_to_ifopts: HashMap<i64, Vec<String>> = HashMap::new();
-    for (ifopt, osm_ids) in &osm_directional_routes {
-        for &osm_id in osm_ids {
-            osm_route_to_ifopts
-                .entry(osm_id)
-                .or_default()
-                .push(ifopt.clone());
-        }
-    }
-
-    // Deterministic route-based matching
-    struct IfoptCandidates {
-        ifopt: String,
-        name: Option<String>,
+    struct GtfsRouteStop {
+        stop_id: String,
+        #[allow(dead_code)]
+        stop_name: Option<String>,
         lat: f64,
         lon: f64,
-        candidates: Vec<MatchCandidate>,
-        reason: UnmatchedReason,
     }
 
-    // Pass 1: Collect all candidates for each OSM stop
-    struct PendingDbMatch {
-        ifopt: String,
-        name: Option<String>,
-        lat: f64,
-        lon: f64,
-        candidates: Vec<MatchCandidate>,
-        best_distance: f64,
-    }
+    let mut gtfs_routes_grouped: HashMap<RouteIdentifier, Vec<GtfsRouteStop>> = HashMap::new();
+    let mut gtfs_stop_seen: HashSet<(String, String, TransportType)> = HashSet::new();
 
-    let mut no_route_entries: Vec<IfoptCandidates> = Vec::new();
-    let mut pending: Vec<PendingDbMatch> = Vec::new();
-    let mut seen_ifopts: HashSet<String> = HashSet::new();
-
-    for osm_stop in osm_stops {
-        if manual_ifopts.contains(&osm_stop.ifopt) {
-            continue;
-        }
-        // Skip duplicate IFOPT entries (same IFOPT may appear from both platforms and stop_positions)
-        if !seen_ifopts.insert(osm_stop.ifopt.clone()) {
-            continue;
-        }
-
-        let osm_routes = osm_route_sets
-            .get(&osm_stop.ifopt)
-            .unwrap_or(&empty_route_set);
-
-        if osm_routes.is_empty() {
-            no_route_entries.push(IfoptCandidates {
-                ifopt: osm_stop.ifopt.clone(),
-                name: osm_stop.name.clone(),
-                lat: osm_stop.lat,
-                lon: osm_stop.lon,
-                candidates: vec![],
-                reason: UnmatchedReason::NoRouteData,
+    for (_, route_short_name, route_type, stop_id, stop_name, lat, lon) in &gtfs_route_stop_rows {
+        let transport_type = TransportType::from_gtfs_route_type(*route_type);
+        let route_key = RouteIdentifier {
+            line_ref: route_short_name.clone(),
+            transport_type,
+        };
+        if gtfs_stop_seen.insert((stop_id.clone(), route_short_name.clone(), transport_type)) {
+            gtfs_routes_grouped.entry(route_key).or_default().push(GtfsRouteStop {
+                stop_id: stop_id.clone(),
+                stop_name: stop_name.clone(),
+                lat: *lat,
+                lon: *lon,
             });
-            continue;
         }
-
-        let mut candidates: Vec<MatchCandidate> = Vec::new();
-
-        for &(gtfs_id, glat, glon, gtfs_name) in &gtfs_candidates {
-            if manual_gtfs_ids.contains(gtfs_id) {
-                continue;
-            }
-
-            let dlat = osm_stop.lat - glat;
-            let dlon = (osm_stop.lon - glon) * (osm_stop.lat.to_radians().cos());
-            let dist_sq = dlat * dlat + dlon * dlon;
-
-            if dist_sq < max_dist_sq {
-                let distance_meters = (dist_sq.sqrt()) * 111_000.0;
-
-                let gtfs_routes = gtfs_route_sets
-                    .get(gtfs_id)
-                    .unwrap_or(&empty_route_set);
-                let (definitive, shared) = is_definitive_match(osm_routes, gtfs_routes);
-
-                let shared_routes: Vec<String> = shared
-                    .iter()
-                    .map(|r| format!("{:?} {}", r.transport_type, r.line_ref))
-                    .collect();
-
-                candidates.push(MatchCandidate {
-                    gtfs_stop_id: gtfs_id.to_string(),
-                    gtfs_stop_name: gtfs_name.map(String::from),
-                    distance_meters,
-                    shared_routes,
-                    is_definitive: definitive,
-                });
-            }
-        }
-
-        let best_distance = candidates
-            .iter()
-            .filter(|c| c.is_definitive)
-            .map(|c| c.distance_meters)
-            .fold(f64::MAX, f64::min);
-
-        pending.push(PendingDbMatch {
-            ifopt: osm_stop.ifopt.clone(),
-            name: osm_stop.name.clone(),
-            lat: osm_stop.lat,
-            lon: osm_stop.lon,
-            candidates,
-            best_distance,
-        });
     }
 
-    // Pass 2: Sort by distance to closest definitive candidate (ascending).
-    // Stops nearest their best GTFS match get first pick.
-    pending.sort_by(|a, b| {
-        a.best_distance
-            .partial_cmp(&b.best_distance)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    info!(
+        gtfs_route_keys = gtfs_routes_grouped.len(),
+        gtfs_route_stop_rows = gtfs_route_stop_rows.len(),
+        "Loaded GTFS route->stop relationships"
+    );
 
-    let mut mapping_results: HashMap<String, String> = HashMap::new();
-    let mut claimed_gtfs: HashSet<String> = HashSet::new();
-    let mut unmatched_entries: Vec<IfoptCandidates> = Vec::new();
+    // --- Step 4: Match stops within each route pair ---
+    info!("Matching OSM stops to GTFS stops per route...");
 
-    // Direction-aware matching with cascading peer propagation.
-    // Each iteration picks the platform with the most matched peers, matches it using
-    // per-peer trip overlap voting, then re-sorts. This ensures correct direction signal
-    // propagates outward from cross-line seed stations (e.g., a station on both Line 2
-    // and Line 4 gets matched via Line 2 peers, then its Line 4 neighbors benefit).
-    let mut to_process: Vec<PendingDbMatch> = pending;
+    // mapping_results: OsmStopKey -> (gtfs_stop_id, match_method, distance_meters)
+    // We store distance so that if a stop appears on multiple routes, we keep the closest match.
+    let mut mapping_results: HashMap<OsmStopKey, (String, String, f64)> = HashMap::new();
+    let mut ifopt_mapping_results: HashMap<String, String> = HashMap::new();
+    let mut matched_gtfs_ids: HashSet<String> = HashSet::new();
 
-    let peer_count_for = |ifopt: &str, results: &HashMap<String, String>| -> usize {
-        osm_directional_routes
-            .get(ifopt)
-            .unwrap_or(&empty_osm_id_set)
-            .iter()
-            .flat_map(|rid| osm_route_to_ifopts.get(rid).into_iter().flatten())
-            .filter(|peer_ifopt| results.contains_key(*peer_ifopt))
-            .count()
-    };
+    // Build OSM stop info lookup for IFOPT resolution
+    let osm_stop_info_map: HashMap<(i64, &str), &OsmStopInfo> = osm_stops
+        .iter()
+        .map(|s| ((s.osm_id, s.osm_type.as_str()), s))
+        .collect();
 
-    loop {
-        if to_process.is_empty() {
-            break;
-        }
+    let max_distance_deg = MAX_DISTANCE_METERS / 111_000.0;
+    let mut routes_matched = 0usize;
+    let mut routes_unmatched = 0usize;
 
-        // Sort: fewest unclaimed definitive candidates first (most constrained
-        // platforms get priority to avoid being blocked), then most peers
-        // (direction-seeded platforms go next), then distance.
-        to_process.sort_by(|a, b| {
-            let a_unclaimed = a.candidates.iter()
-                .filter(|c| c.is_definitive && !claimed_gtfs.contains(&c.gtfs_stop_id))
-                .count();
-            let b_unclaimed = b.candidates.iter()
-                .filter(|c| c.is_definitive && !claimed_gtfs.contains(&c.gtfs_stop_id))
-                .count();
-            let a_peers = peer_count_for(&a.ifopt, &mapping_results);
-            let b_peers = peer_count_for(&b.ifopt, &mapping_results);
-            a_unclaimed.cmp(&b_unclaimed)
-                .then_with(|| b_peers.cmp(&a_peers))
-                .then_with(|| {
-                    a.best_distance
-                        .partial_cmp(&b.best_distance)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        });
+    for (route_key, osm_stops_on_route) in &osm_routes_grouped {
+        let gtfs_stops_on_route = match gtfs_routes_grouped.get(route_key) {
+            Some(stops) => stops,
+            None => {
+                routes_unmatched += 1;
+                continue;
+            }
+        };
+        routes_matched += 1;
 
-        let entry = to_process.remove(0);
+        // For each OSM stop on this route, find the nearest GTFS stop on the same route
+        for osm_stop in osm_stops_on_route {
+            let stop_key = OsmStopKey {
+                osm_id: osm_stop.osm_id,
+                osm_type: osm_stop.osm_type.clone(),
+            };
 
-        let platform_osm_ids = osm_directional_routes
-            .get(&entry.ifopt)
-            .unwrap_or(&empty_osm_id_set);
+            // Skip manual mappings
+            if manual_osm_keys.contains(&stop_key) {
+                continue;
+            }
+            // Check IFOPT manual too
+            let osm_info = osm_stop_info_map.get(&(osm_stop.osm_id, osm_stop.osm_type.as_str()));
+            if let Some(info) = osm_info {
+                if let Some(ref ifopt) = info.ifopt {
+                    if manual_ifopts.contains(ifopt) {
+                        continue;
+                    }
+                }
+            }
 
-        let mut peer_gtfs_ids: Vec<String> = Vec::new();
-        for &route_id in platform_osm_ids {
-            if let Some(peer_ifopts) = osm_route_to_ifopts.get(&route_id) {
-                for peer_ifopt in peer_ifopts {
-                    if let Some(peer_gtfs_id) = mapping_results.get(peer_ifopt) {
-                        peer_gtfs_ids.push(peer_gtfs_id.clone());
+            // Find nearest GTFS stop within MAX_DISTANCE_METERS
+            let mut best_gtfs: Option<(&GtfsRouteStop, f64)> = None;
+            for gtfs_stop in gtfs_stops_on_route {
+                let dlat = osm_stop.lat - gtfs_stop.lat;
+                let dlon = (osm_stop.lon - gtfs_stop.lon) * osm_stop.lat.to_radians().cos();
+                let dist_deg = (dlat * dlat + dlon * dlon).sqrt();
+
+                if dist_deg > max_distance_deg {
+                    continue;
+                }
+                let distance_meters = dist_deg * 111_000.0;
+
+                if best_gtfs.is_none() || distance_meters < best_gtfs.unwrap().1 {
+                    best_gtfs = Some((gtfs_stop, distance_meters));
+                }
+            }
+
+            if let Some((gtfs_stop, distance_meters)) = best_gtfs {
+                // Only update if this is a closer match than a previous route's match
+                let should_update = match mapping_results.get(&stop_key) {
+                    Some((_, _, prev_dist)) => distance_meters < *prev_dist,
+                    None => true,
+                };
+
+                if should_update {
+                    let method = if osm_info.and_then(|i| i.ifopt.as_ref()).is_some() {
+                        "ifopt"
+                    } else {
+                        "geographic"
+                    };
+                    mapping_results.insert(
+                        stop_key.clone(),
+                        (gtfs_stop.stop_id.clone(), method.to_string(), distance_meters),
+                    );
+                    matched_gtfs_ids.insert(gtfs_stop.stop_id.clone());
+
+                    if let Some(info) = osm_info {
+                        if let Some(ref ifopt) = info.ifopt {
+                            ifopt_mapping_results.insert(ifopt.clone(), gtfs_stop.stop_id.clone());
+                        }
                     }
                 }
             }
         }
-        peer_gtfs_ids.sort();
-        peer_gtfs_ids.dedup();
-
-        let mut definitive_candidates: Vec<&MatchCandidate> = entry
-            .candidates
-            .iter()
-            .filter(|c| c.is_definitive)
-            .collect();
-
-        if !definitive_candidates.is_empty() {
-            let nearest_distance = definitive_candidates
-                .iter()
-                .map(|c| c.distance_meters)
-                .fold(f64::MAX, f64::min);
-            let max_fallback = (nearest_distance * 3.0).max(100.0).min(200.0);
-
-            // Direction overlap: how many destination keywords from the OSM route
-            // name match the GTFS stop's last-stop keywords. This is the strongest
-            // signal for matching platforms at stations like Königsplatz where all
-            // GTFS stops share the same name but serve different directions.
-            let osm_dest = osm_destinations
-                .get(&entry.ifopt)
-                .unwrap_or(&empty_string_set);
-            let direction_score_for = |c: &MatchCandidate| -> usize {
-                if osm_dest.is_empty() {
-                    return 0;
-                }
-                let gtfs_dir = gtfs_directions
-                    .get(&c.gtfs_stop_id)
-                    .unwrap_or(&empty_string_set);
-                osm_dest.intersection(gtfs_dir).count()
-            };
-
-            // Specificity: prefer GTFS stops whose route set closely matches
-            // the OSM platform's routes.
-            let specificity_for = |c: &MatchCandidate| -> f64 {
-                let gtfs_routes = gtfs_route_sets
-                    .get(&c.gtfs_stop_id)
-                    .map(|s| s.len())
-                    .unwrap_or(1)
-                    .max(1);
-                c.shared_routes.len() as f64 / gtfs_routes as f64
-            };
-
-            // Sort by: direction match (primary) → specificity → trip overlap
-            // (when peers exist) → distance → shared_routes count.
-            definitive_candidates.sort_by(|a, b| {
-                let a_dir = direction_score_for(a);
-                let b_dir = direction_score_for(b);
-                let dir_cmp = b_dir.cmp(&a_dir);
-
-                let a_spec = specificity_for(a);
-                let b_spec = specificity_for(b);
-                let spec_cmp = b_spec
-                    .partial_cmp(&a_spec)
-                    .unwrap_or(std::cmp::Ordering::Equal);
-
-                let trip_cmp = if peer_gtfs_ids.is_empty() {
-                    std::cmp::Ordering::Equal
-                } else {
-                    let a_overlap: usize = peer_gtfs_ids
-                        .iter()
-                        .map(|peer_id| {
-                            let peer_trips =
-                                gtfs_trip_sets.get(peer_id).unwrap_or(&empty_trip_set);
-                            gtfs_trip_sets
-                                .get(&a.gtfs_stop_id)
-                                .map(|candidate_trips| {
-                                    candidate_trips
-                                        .iter()
-                                        .filter(|t| peer_trips.contains(*t))
-                                        .count()
-                                })
-                                .unwrap_or(0)
-                        })
-                        .sum();
-                    let b_overlap: usize = peer_gtfs_ids
-                        .iter()
-                        .map(|peer_id| {
-                            let peer_trips =
-                                gtfs_trip_sets.get(peer_id).unwrap_or(&empty_trip_set);
-                            gtfs_trip_sets
-                                .get(&b.gtfs_stop_id)
-                                .map(|candidate_trips| {
-                                    candidate_trips
-                                        .iter()
-                                        .filter(|t| peer_trips.contains(*t))
-                                        .count()
-                                })
-                                .unwrap_or(0)
-                        })
-                        .sum();
-                    b_overlap.cmp(&a_overlap)
-                };
-                dir_cmp
-                    .then(spec_cmp)
-                    .then(trip_cmp)
-                    .then_with(|| {
-                        a.distance_meters
-                            .partial_cmp(&b.distance_meters)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .then_with(|| b.shared_routes.len().cmp(&a.shared_routes.len()))
-            });
-
-            let mut matched = false;
-            for winner in &definitive_candidates {
-                if winner.distance_meters > max_fallback {
-                    continue;
-                }
-                if !claimed_gtfs.contains(&winner.gtfs_stop_id) {
-                    mapping_results
-                        .insert(entry.ifopt.clone(), winner.gtfs_stop_id.clone());
-                    claimed_gtfs.insert(winner.gtfs_stop_id.clone());
-                    matched = true;
-                    break;
-                }
-            }
-            if matched {
-                continue; // Re-sort remaining with updated peers
-            }
-        }
-
-        let reason = if definitive_candidates.is_empty() {
-            UnmatchedReason::NoDefinitiveCandidate
-        } else {
-            UnmatchedReason::AmbiguousMatch
-        };
-
-        unmatched_entries.push(IfoptCandidates {
-            ifopt: entry.ifopt,
-            name: entry.name,
-            lat: entry.lat,
-            lon: entry.lon,
-            candidates: entry.candidates,
-            reason,
-        });
     }
 
-    // Station-level fallback: when the GTFS feed has a single stop for both
-    // directions at a station, allow unmapped sibling platforms to share it.
-    let mut station_fallback_matched = Vec::new();
-    for entry in &unmatched_entries {
-        let station = station_level_ifopt(&entry.ifopt);
-        // Find if a sibling platform at this station is already mapped
-        let sibling_gtfs: Option<String> = mapping_results
-            .iter()
-            .find(|(ifopt, _)| station_level_ifopt(ifopt) == station && *ifopt != &entry.ifopt)
-            .map(|(_, gtfs_id)| gtfs_id.clone());
-
-        if let Some(sibling_gtfs_id) = sibling_gtfs {
-            // Only allow if this GTFS stop is a definitive (route-matching) candidate
-            if entry.candidates.iter().any(|c| c.gtfs_stop_id == sibling_gtfs_id && c.is_definitive) {
-                station_fallback_matched.push((entry.ifopt.clone(), sibling_gtfs_id));
-            }
-        }
-    }
-    for (ifopt, gtfs_id) in &station_fallback_matched {
-        mapping_results.insert(ifopt.clone(), gtfs_id.clone());
-    }
-    // Remove matched entries from unmatched list
-    unmatched_entries.retain(|e| !station_fallback_matched.iter().any(|(ifopt, _)| ifopt == &e.ifopt));
-    if !station_fallback_matched.is_empty() {
-        info!(
-            count = station_fallback_matched.len(),
-            "Station-level fallback: shared GTFS stops for sibling platforms"
-        );
-    }
-
-    unmatched_entries.extend(no_route_entries);
+    info!(
+        routes_matched,
+        routes_unmatched,
+        stop_matches = mapping_results.len(),
+        elapsed_ms = total_start.elapsed().as_millis() as u64,
+        "Route-based matching complete"
+    );
 
     let matched = mapping_results.len();
 
-    // Build unmatched lists
-    let unmatched_osm: Vec<UnmatchedOsmStop> = unmatched_entries
+    // --- Step 5: Build unmatched lists ---
+    // Build set of matched OSM stop keys for quick lookup
+    let matched_osm_keys: HashSet<&OsmStopKey> = mapping_results.keys().collect();
+
+    let unmatched_osm: Vec<UnmatchedOsmStop> = osm_stops
         .iter()
-        .map(|entry| UnmatchedOsmStop {
-            ifopt: entry.ifopt.clone(),
-            name: entry.name.clone(),
-            lat: entry.lat,
-            lon: entry.lon,
-            candidates: entry.candidates.iter().take(5).cloned().collect(),
-            reason: entry.reason.clone(),
+        .filter(|s| {
+            let key = OsmStopKey {
+                osm_id: s.osm_id,
+                osm_type: s.osm_type.clone(),
+            };
+            !matched_osm_keys.contains(&key)
+                && !manual_osm_keys.contains(&key)
+                && !s.ifopt.as_ref().map_or(false, |i| manual_ifopts.contains(i))
+        })
+        .map(|s| {
+            // Determine reason: does this stop appear on any OSM route?
+            let on_route = osm_routes_grouped.values().any(|stops| {
+                stops.iter().any(|rs| rs.osm_id == s.osm_id && rs.osm_type == s.osm_type)
+            });
+            let reason = if !on_route {
+                UnmatchedReason::NoRouteData
+            } else {
+                UnmatchedReason::NoDefinitiveCandidate
+            };
+            UnmatchedOsmStop {
+                osm_id: s.osm_id,
+                osm_type: s.osm_type.clone(),
+                ifopt: s.ifopt.clone(),
+                name: s.name.clone(),
+                lat: s.lat,
+                lon: s.lon,
+                candidates: vec![],
+                reason,
+            }
         })
         .collect();
 
-    // Find unmatched GTFS stops (not claimed by auto or manual)
-    let unmatched_gtfs: Vec<UnmatchedGtfsStop> = gtfs_candidates
+    // Collect all matched GTFS IDs (auto + manual)
+    let manual_gtfs_ids: HashSet<String> = manual_ifopt_rows
         .iter()
-        .filter(|(gtfs_id, _, _, _)| {
-            !claimed_gtfs.contains(*gtfs_id) && !manual_gtfs_ids.contains(*gtfs_id)
-        })
-        .map(|(gtfs_id, lat, lon, name)| UnmatchedGtfsStop {
-            gtfs_stop_id: gtfs_id.to_string(),
-            gtfs_stop_name: name.map(String::from),
+        .map(|(_, g)| g.clone())
+        .chain(manual_osm_rows.iter().map(|(_, _, g)| g.clone()))
+        .collect();
+
+    let all_matched_gtfs: HashSet<&str> = matched_gtfs_ids
+        .iter()
+        .map(|s| s.as_str())
+        .chain(manual_gtfs_ids.iter().map(|s| s.as_str()))
+        .collect();
+
+    // For unmatched GTFS, query leaf stops that were not matched
+    let unmatched_gtfs_rows: Vec<(String, Option<String>, f64, f64)> = sqlx::query_as(
+        r#"
+        SELECT s.stop_id, s.stop_name, s.lat, s.lon
+        FROM gtfs_stops s
+        WHERE (s.parent_station IS NOT NULL
+               OR s.stop_id IN (SELECT DISTINCT stop_id FROM gtfs_stop_times))
+          AND s.lat IS NOT NULL AND s.lon IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let unmatched_gtfs: Vec<UnmatchedGtfsStop> = unmatched_gtfs_rows
+        .iter()
+        .filter(|(id, _, _, _)| !all_matched_gtfs.contains(id.as_str()))
+        .map(|(id, name, lat, lon)| UnmatchedGtfsStop {
+            gtfs_stop_id: id.clone(),
+            gtfs_stop_name: name.clone(),
             lat: *lat,
             lon: *lon,
         })
         .collect();
 
-    // Delete only auto-generated mappings (preserve manual ones)
+    // --- Step 6: Write to ifopt_gtfs_mapping (legacy) ---
     sqlx::query("DELETE FROM ifopt_gtfs_mapping WHERE is_manual = FALSE")
         .execute(pool)
         .await?;
 
-    let mapping_entries: Vec<_> = mapping_results.iter().collect();
-    for batch in mapping_entries.chunks(DB_BATCH_SIZE) {
+    let ifopt_entries: Vec<_> = ifopt_mapping_results.iter().collect();
+    for batch in ifopt_entries.chunks(DB_BATCH_SIZE) {
         let mut qb = sqlx::QueryBuilder::new(
             "INSERT INTO ifopt_gtfs_mapping (ifopt, gtfs_stop_id, combined_score, is_manual) ",
         );
         qb.push_values(batch.iter(), |mut b, (ifopt, gtfs_stop_id)| {
             b.push_bind(ifopt.as_str())
                 .push_bind(gtfs_stop_id.as_str())
-                .push_bind(1.0_f64) // Deterministic match always gets 1.0
+                .push_bind(1.0_f64)
                 .push_bind(false);
         });
         qb.build().execute(pool).await?;
     }
 
-    // Update mapping count in feed metadata (manual + auto)
+    info!(
+        ifopt_mappings = ifopt_mapping_results.len(),
+        "Written IFOPT mappings to legacy ifopt_gtfs_mapping table"
+    );
+
+    // --- Step 7: Write to osm_gtfs_stop_mapping ---
+    sqlx::query("DELETE FROM osm_gtfs_stop_mapping WHERE is_manual = FALSE")
+        .execute(pool)
+        .await?;
+
+    // Build the OSM stop -> IFOPT lookup for populating ref_ifopt
+    let osm_id_to_ifopt: HashMap<OsmStopKey, String> = osm_stops
+        .iter()
+        .filter_map(|s| {
+            s.ifopt.as_ref().map(|ifopt| {
+                (
+                    OsmStopKey {
+                        osm_id: s.osm_id,
+                        osm_type: s.osm_type.clone(),
+                    },
+                    ifopt.clone(),
+                )
+            })
+        })
+        .collect();
+
+    let osm_mapping_entries: Vec<StopMappingResult> = mapping_results
+        .iter()
+        .map(|(key, (gtfs_stop_id, method, score))| {
+            let ref_ifopt = osm_id_to_ifopt.get(key).cloned();
+            StopMappingResult {
+                osm_id: key.osm_id,
+                osm_type: key.osm_type.clone(),
+                gtfs_stop_id: gtfs_stop_id.clone(),
+                ref_ifopt,
+                match_method: method.clone(),
+                match_score: *score,
+            }
+        })
+        .collect();
+
+    for batch in osm_mapping_entries.chunks(DB_BATCH_SIZE) {
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT INTO osm_gtfs_stop_mapping (osm_id, osm_type, gtfs_stop_id, ref_ifopt, match_method, match_score, is_manual) ",
+        );
+        qb.push_values(batch.iter(), |mut b, entry| {
+            b.push_bind(entry.osm_id)
+                .push_bind(&entry.osm_type)
+                .push_bind(&entry.gtfs_stop_id)
+                .push_bind(&entry.ref_ifopt)
+                .push_bind(&entry.match_method)
+                .push_bind(entry.match_score)
+                .push_bind(false);
+        });
+        qb.push(" ON CONFLICT (osm_id, osm_type) DO UPDATE SET gtfs_stop_id = EXCLUDED.gtfs_stop_id, ref_ifopt = EXCLUDED.ref_ifopt, match_method = EXCLUDED.match_method, match_score = EXCLUDED.match_score, is_manual = EXCLUDED.is_manual");
+        qb.build().execute(pool).await?;
+    }
+
+    info!(
+        osm_mappings = osm_mapping_entries.len(),
+        "Written mappings to osm_gtfs_stop_mapping table"
+    );
+
+    // Update mapping count in feed metadata
     let total_mapping_count = mapping_results.len() + manual_count;
     sqlx::query("UPDATE gtfs_feed_meta SET mapping_count = $1 WHERE id = 1")
         .bind(total_mapping_count as i64)
@@ -849,22 +1032,246 @@ pub(crate) async fn build_ifopt_mapping_to_db(
 
     info!(
         osm_stops = osm_stops.len(),
-        gtfs_leaf_stops = gtfs_candidates.len(),
+        total_gtfs_stops,
         matched,
+        ifopt_matched = ifopt_mapping_results.len(),
         manual_preserved = manual_count,
         unmatched_osm = unmatched_osm.len(),
         unmatched_gtfs = unmatched_gtfs.len(),
-        "Built and stored IFOPT <-> GTFS stop mapping in database (deterministic route-based)"
+        elapsed_ms = total_start.elapsed().as_millis() as u64,
+        "Built and stored OSM <-> GTFS stop mapping (route-based)"
     );
 
     Ok(MappingStats {
         total_db_stops: osm_stops.len(),
-        total_gtfs_stops: gtfs_candidates.len(),
+        total_gtfs_stops,
         matched,
         manual_count,
         unmatched_osm,
         unmatched_gtfs,
     })
+}
+
+/// Build OSM route <-> GTFS route mapping and store in PostgreSQL.
+///
+/// Matches by:
+/// 1. `route_short_name = ref` (exact string match)
+/// 2. Compatible transport type (GTFS route_type maps to OSM route_type)
+/// 3. Stop overlap verification: OSM route's mapped stops overlap with GTFS route's stops
+///
+/// Writes results to `osm_gtfs_route_mapping`.
+pub(crate) async fn build_route_mapping_to_db(
+    pool: &PgPool,
+) -> Result<usize, GtfsError> {
+    /// Maximum rows per batch for bulk INSERT.
+    const DB_BATCH_SIZE: usize = 10_000;
+
+    info!("Building OSM route <-> GTFS route mapping...");
+    let route_start = std::time::Instant::now();
+
+    // Load OSM routes with their ref and route_type
+    let osm_routes: Vec<(i64, String, String)> = sqlx::query_as(
+        r#"
+        SELECT osm_id, ref, route_type
+        FROM routes
+        WHERE ref IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // Load GTFS routes
+    let gtfs_routes: Vec<(String, Option<String>, Option<i32>)> = sqlx::query_as(
+        r#"
+        SELECT route_id, route_short_name, route_type
+        FROM gtfs_routes
+        WHERE route_short_name IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    info!(
+        osm_routes = osm_routes.len(),
+        gtfs_routes = gtfs_routes.len(),
+        "Loaded routes for mapping"
+    );
+
+    // Build GTFS route lookup: (route_short_name, transport_type) -> Vec<route_id>
+    let mut gtfs_by_ref: HashMap<(String, TransportType), Vec<String>> = HashMap::new();
+    for (route_id, short_name, route_type) in &gtfs_routes {
+        if let Some(ref name) = short_name {
+            let tt = route_type.map(|rt| TransportType::from_gtfs_route_type(rt)).unwrap_or(TransportType::Unknown);
+            gtfs_by_ref
+                .entry((name.clone(), tt))
+                .or_default()
+                .push(route_id.clone());
+        }
+    }
+
+    // For each OSM route, find candidate GTFS routes by ref + transport type
+    struct RouteMatch {
+        osm_route_id: i64,
+        gtfs_route_id: String,
+        match_method: String,
+        match_score: f64,
+    }
+
+    let mut route_matches: Vec<RouteMatch> = Vec::new();
+
+    // Load the stop mapping for overlap verification
+    let stop_mapping_rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT osm_id, osm_type, gtfs_stop_id FROM osm_gtfs_stop_mapping",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // osm_stop_id -> set of gtfs_stop_ids
+    let mut osm_to_gtfs_stops: HashMap<i64, HashSet<String>> = HashMap::new();
+    for (osm_id, _osm_type, gtfs_stop_id) in &stop_mapping_rows {
+        osm_to_gtfs_stops
+            .entry(*osm_id)
+            .or_default()
+            .insert(gtfs_stop_id.clone());
+    }
+
+    // Load which OSM stops belong to each OSM route
+    let route_stop_rows: Vec<(i64, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT route_id, stop_position_id, platform_id FROM route_stops",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // osm_route_id -> set of osm_stop_ids (both platforms and stop_positions)
+    let mut route_osm_stops: HashMap<i64, HashSet<i64>> = HashMap::new();
+    for (route_id, stop_pos_id, platform_id) in &route_stop_rows {
+        let stops = route_osm_stops.entry(*route_id).or_default();
+        if let Some(sp) = stop_pos_id {
+            stops.insert(*sp);
+        }
+        if let Some(p) = platform_id {
+            stops.insert(*p);
+        }
+    }
+
+    // Load GTFS route -> set of gtfs_stop_ids
+    let gtfs_route_stop_rows: Vec<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT t.route_id, st.stop_id
+        FROM gtfs_trips t
+        JOIN gtfs_stop_times st ON st.trip_id = t.trip_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut gtfs_route_stops: HashMap<String, HashSet<String>> = HashMap::new();
+    for (route_id, stop_id) in &gtfs_route_stop_rows {
+        gtfs_route_stops
+            .entry(route_id.clone())
+            .or_default()
+            .insert(stop_id.clone());
+    }
+
+    for (osm_route_id, osm_ref, osm_route_type) in &osm_routes {
+        let osm_tt = transport_type_from_route(osm_route_type);
+
+        // Find GTFS routes with same ref and compatible transport type
+        let candidates = gtfs_by_ref.get(&(osm_ref.clone(), osm_tt));
+        let Some(candidates) = candidates else {
+            continue;
+        };
+
+        // Get OSM stop IDs on this route
+        let osm_stop_ids = match route_osm_stops.get(osm_route_id) {
+            Some(ids) => ids,
+            None => continue,
+        };
+
+        // Map OSM stop IDs to GTFS stop IDs via osm_gtfs_stop_mapping
+        let mapped_gtfs_stops: HashSet<String> = osm_stop_ids
+            .iter()
+            .flat_map(|osm_id| osm_to_gtfs_stops.get(osm_id).into_iter().flatten().cloned())
+            .collect();
+
+        if mapped_gtfs_stops.is_empty() {
+            continue;
+        }
+
+        for gtfs_route_id in candidates {
+            // Get GTFS stops on this route
+            let gtfs_stops = match gtfs_route_stops.get(gtfs_route_id) {
+                Some(stops) => stops,
+                None => continue,
+            };
+
+            // Calculate stop overlap
+            let overlap: usize = mapped_gtfs_stops.intersection(gtfs_stops).count();
+
+            if overlap == 0 {
+                continue;
+            }
+
+            // Score: fraction of mapped OSM stops that overlap with this GTFS route
+            let score = overlap as f64 / mapped_gtfs_stops.len().max(1) as f64;
+
+            // Require at least some meaningful overlap (>= 2 stops or 100% if few stops)
+            if overlap < 2 && score < 1.0 {
+                continue;
+            }
+
+            let method = if score >= 0.5 {
+                "ref_match"
+            } else {
+                "stop_overlap"
+            };
+
+            route_matches.push(RouteMatch {
+                osm_route_id: *osm_route_id,
+                gtfs_route_id: gtfs_route_id.clone(),
+                match_method: method.to_string(),
+                match_score: score,
+            });
+
+            debug!(
+                osm_route_id,
+                gtfs_route_id,
+                osm_ref,
+                overlap,
+                score,
+                "Route match"
+            );
+        }
+    }
+
+    // Write to osm_gtfs_route_mapping
+    sqlx::query("DELETE FROM osm_gtfs_route_mapping WHERE is_manual = FALSE")
+        .execute(pool)
+        .await?;
+
+    let total_matches = route_matches.len();
+    for batch in route_matches.chunks(DB_BATCH_SIZE) {
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT INTO osm_gtfs_route_mapping (osm_route_id, gtfs_route_id, match_method, match_score, is_manual) ",
+        );
+        qb.push_values(batch.iter(), |mut b, m| {
+            b.push_bind(m.osm_route_id)
+                .push_bind(&m.gtfs_route_id)
+                .push_bind(&m.match_method)
+                .push_bind(m.match_score)
+                .push_bind(false);
+        });
+        qb.push(" ON CONFLICT (osm_route_id, gtfs_route_id) DO UPDATE SET match_method = EXCLUDED.match_method, match_score = EXCLUDED.match_score, is_manual = EXCLUDED.is_manual");
+        qb.build().execute(pool).await?;
+    }
+
+    info!(
+        route_matches = total_matches,
+        elapsed_secs = route_start.elapsed().as_secs(),
+        "Built and stored OSM <-> GTFS route mapping"
+    );
+
+    Ok(total_matches)
 }
 
 /// Validate IFOPT-to-GTFS mappings against known-correct assignments.

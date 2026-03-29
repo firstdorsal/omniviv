@@ -2,6 +2,7 @@ import { X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type Departure } from "../api";
 import { getApiClient } from "../apiClient";
+import { DepartureMonitorHeader } from "./DepartureMonitorHeader";
 import { DepartureTable } from "./DepartureTable";
 
 interface GtfsStopPopupProps {
@@ -50,50 +51,53 @@ export function GtfsStopPopup({ stopId, stopName, ifopt, isAssigned, routeColors
             });
     }, [stopId, ifopt, referenceTime]);
 
-    // Initial fetch + refetch on dependency change
     useEffect(() => {
         setLoading(true);
         fetchDepartures()?.finally(() => setLoading(false));
         return () => abortRef.current?.abort();
     }, [fetchDepartures]);
 
-    // Auto-refresh every 30 seconds
     useEffect(() => {
         const interval = setInterval(fetchDepartures, 30000);
         return () => clearInterval(interval);
     }, [fetchDepartures]);
 
     return (
-        <div className="p-4 bg-popover text-popover-foreground rounded-lg">
-            <div className="flex items-start gap-2">
-                <div className="font-semibold text-foreground flex-1">{stopName}</div>
-                {onClose && (
-                    <button onClick={onClose} className="shrink-0 p-1 text-muted-foreground hover:text-foreground hover:bg-secondary rounded" title="Schließen">
-                        <X className="w-4 h-4" />
-                    </button>
-                )}
-            </div>
-            <div className="text-xs text-muted-foreground font-mono">{stopId}</div>
-            {isAssigned && ifopt && (
-                <div className="text-xs text-muted-foreground mt-0.5">
-                    Zugeordnet zu <span className="font-mono">{ifopt}</span>
-                </div>
-            )}
-            {!isAssigned && (
-                <div className="text-xs text-orange-500 mt-0.5">Nicht zugeordnet</div>
-            )}
-
-            <div className="mt-3 border-t border-border pt-2">
-                {loading ? (
-                    <div className="text-xs text-muted-foreground">Laden...</div>
-                ) : (
-                    <DepartureTable
-                        events={events}
-                        routeColors={routeColors}
-                        routeTypes={routeTypes}
-                        referenceTime={referenceTime}
+        <div className="bg-popover text-popover-foreground rounded-lg">
+            <div className="flex flex-col">
+                <div className="px-4 py-3">
+                    <DepartureMonitorHeader
+                        title={stopName}
+                        ids={[{ value: stopId }]}
+                        extra={<>
+                            {isAssigned && ifopt && (
+                                <div className="text-xs text-muted-foreground mt-0.5">
+                                    Zugeordnet zu <span className="font-mono">{ifopt}</span>
+                                </div>
+                            )}
+                            {!isAssigned && (
+                                <div className="text-xs text-orange-500 mt-0.5">Nicht zugeordnet</div>
+                            )}
+                        </>}
+                        actions={onClose && (
+                            <button onClick={onClose} className="shrink-0 p-1 text-muted-foreground hover:text-foreground hover:bg-secondary rounded" title="Schließen">
+                                <X className="w-4 h-4" />
+                            </button>
+                        )}
                     />
-                )}
+                </div>
+                <div className="border-t border-border px-4 py-2">
+                    {loading ? (
+                        <div className="text-xs text-muted-foreground">Laden...</div>
+                    ) : (
+                        <DepartureTable
+                            events={events}
+                            routeColors={routeColors}
+                            routeTypes={routeTypes}
+                            referenceTime={referenceTime}
+                        />
+                    )}
+                </div>
             </div>
         </div>
     );

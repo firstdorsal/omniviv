@@ -166,12 +166,17 @@ button {
     }
 }
 
-/* MapLibre popup customization - remove default styling */
+/* MapLibre popup customization - inherit app styles */
+.maplibregl-popup {
+    font: inherit !important;
+}
+
 .maplibregl-popup-content {
     padding: 0 !important;
     background: transparent !important;
     box-shadow: none !important;
     border-radius: 0 !important;
+    font: inherit !important;
 }
 
 /* Custom popup container styling */

@@ -42,13 +42,29 @@ struct FeedMeta {
     tag = "health"
 )]
 pub async fn health_check(State(state): State<HealthState>) -> Json<HealthResponse> {
-    let meta = sqlx::query_as::<_, FeedMeta>(
-        "SELECT stop_count, route_count, trip_count, mapping_count FROM gtfs_feed_meta WHERE id = 1",
+    // Use a short timeout so heavy background operations (GTFS mapping with
+    // Germany-wide data) don't exhaust the pool and block health checks.
+    // If the DB query times out, we still report healthy (service is up)
+    // but with unknown GTFS stats.
+    let meta = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sqlx::query_as::<_, FeedMeta>(
+            "SELECT stop_count, route_count, trip_count, mapping_count FROM gtfs_feed_meta WHERE id = 1",
+        )
+        .fetch_optional(&state.pool),
     )
-    .fetch_optional(&state.pool)
     .await
     .ok()
+    .and_then(|r| r.ok())
     .flatten();
+
+    // Also check pool health within the same timeout budget
+    let db_reachable = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        sqlx::query("SELECT 1").execute(&state.pool),
+    )
+    .await
+    .is_ok_and(|r| r.is_ok());
 
     let (loaded, stop_count, route_count, trip_count, mapping_count) = match meta {
         Some(m) => (true, m.stop_count, m.route_count, m.trip_count, m.mapping_count),
@@ -56,7 +72,7 @@ pub async fn health_check(State(state): State<HealthState>) -> Json<HealthRespon
     };
 
     Json(HealthResponse {
-        healthy: true,
+        healthy: db_reachable,
         gtfs_schedule_loaded: loaded,
         gtfs_stop_count: stop_count,
         gtfs_route_count: route_count,

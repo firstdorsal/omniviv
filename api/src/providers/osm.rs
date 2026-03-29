@@ -137,17 +137,13 @@ impl OsmClient {
         let stop_positions = self.fetch_stop_positions(bounding_box, &transport_types).await?;
         tracing::info!(count = stop_positions.len(), "Fetched stop positions");
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(INTER_QUERY_DELAY_SECS)).await;
-
-        tracing::info!("Fetching routes...");
-        let routes = self.fetch_routes(bounding_box, &transport_types).await?;
-        tracing::info!(count = routes.len(), "Fetched routes");
+        // Routes are imported Germany-wide from PBF via osm2pgsql, not per-area from Overpass.
 
         Ok(AreaFeatures {
             stations,
             platforms,
             stop_positions,
-            routes,
+            routes: vec![],
         })
     }
 

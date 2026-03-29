@@ -1,7 +1,7 @@
 import { Clock, LocateFixed, MapPinned, Star, X } from "lucide-react";
 import { PinheadIcon, getPinheadIconName } from "./PinheadIcon";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Area, Station } from "../api";
+import type { Station } from "../api";
 import { getConfig } from "../config";
 import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
 
@@ -23,8 +23,6 @@ interface LocationSearchProps {
     placeholder?: string;
     /** Known stations for local matching (instant, no network) */
     stations: Station[];
-    /** Areas for station detail lookup */
-    areas?: Area[];
     /** Currently selected location */
     value: ResolvedLocation | null;
     onChange: (location: ResolvedLocation | null) => void;
@@ -393,7 +391,6 @@ export function LocationSearch({
     showMapPick = false,
     isPickingOnMap = false,
     onPickOnMap,
-    areas = [],
     autoFocus = false,
 }: LocationSearchProps) {
     const [query, setQuery] = useState(value?.name ?? "");
@@ -450,14 +447,7 @@ export function LocationSearch({
         };
     }, []);
 
-    // Area lookup for station detail lines
-    const areaMap = useMemo(() => {
-        const m = new Map<number, string>();
-        for (const a of areas) m.set(a.id, a.name);
-        return m;
-    }, [areas]);
-
-    // Enrich bookmarks with fresh detail from station/area data so stale
+    // Enrich bookmarks with fresh detail from station data so stale
     // bookmarks (saved before detail lines existed) stay up-to-date.
     const enrichedBookmarks = useMemo(() => {
         return bookmarks.map(b => {
@@ -469,13 +459,9 @@ export function LocationSearch({
             if (!station) return b;
             const parts: string[] = ["Haltestelle"];
             if (station.platforms.length > 0) parts.push(`${station.platforms.length} Steige`);
-            if (station.area_id != null) {
-                const areaName = areaMap.get(station.area_id);
-                if (areaName) parts.push(areaName);
-            }
             return { ...b, detail: parts.join(" · ") };
         });
-    }, [bookmarks, stations, areaMap]);
+    }, [bookmarks, stations]);
 
     // Filter bookmarks that match the current query (all when query is short)
     const matchingBookmarks = enrichedBookmarks.filter(b => {
@@ -484,7 +470,7 @@ export function LocationSearch({
     });
     const showBookmarks = matchingBookmarks.length > 0;
 
-    // Enrich recents with fresh detail from station/area data (same as bookmarks)
+    // Enrich recents with fresh detail from station data (same as bookmarks)
     const enrichedRecents = useMemo(() => {
         return recents.map(r => {
             if (r.detail) return r;
@@ -494,13 +480,9 @@ export function LocationSearch({
             if (!station) return r;
             const parts: string[] = ["Haltestelle"];
             if (station.platforms.length > 0) parts.push(`${station.platforms.length} Steige`);
-            if (station.area_id != null) {
-                const areaName = areaMap.get(station.area_id);
-                if (areaName) parts.push(areaName);
-            }
             return { ...r, detail: parts.join(" · ") };
         });
-    }, [recents, stations, areaMap]);
+    }, [recents, stations]);
 
     // Filter recents: match query, exclude bookmarked locations
     const matchingRecents = enrichedRecents.filter(r => {
@@ -604,10 +586,6 @@ export function LocationSearch({
             .map(s => {
                 const parts: string[] = ["Haltestelle"];
                 if (s.platforms.length > 0) parts.push(`${s.platforms.length} Steige`);
-                if (s.area_id != null) {
-                    const areaName = areaMap.get(s.area_id);
-                    if (areaName) parts.push(areaName);
-                }
                 return {
                     name: s.name ?? "",
                     lat: s.lat,
@@ -635,7 +613,7 @@ export function LocationSearch({
             ].slice(0, 8);
             setSuggestions(merged);
         }, 300);
-    }, [stations, searchMotis, areaMap]);
+    }, [stations, searchMotis]);
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const text = e.target.value;

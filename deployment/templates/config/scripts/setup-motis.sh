@@ -51,6 +51,18 @@ else
     cp "${SCRIPT_DIR}/../templates/config/motis/config.yml" "$INPUT_DIR/config.yml"
 fi
 
+# Enrich GTFS feed with OSM route colors (requires running database)
+if [ -n "${DATABASE_URL:-}" ]; then
+    echo ""
+    echo -e "${YELLOW}Enriching GTFS feed with route colors from database...${NC}"
+    bash "${SCRIPT_DIR}/enrich-gtfs-colors.sh" "$GTFS_FILE" "$DATABASE_URL"
+else
+    echo ""
+    echo -e "${YELLOW}DATABASE_URL not set, skipping GTFS color enrichment${NC}"
+    echo -e "Run separately after the API has built route mappings:"
+    echo -e "  ${YELLOW}bash ${SCRIPT_DIR}/enrich-gtfs-colors.sh${NC}"
+fi
+
 echo ""
 echo -e "${GREEN}=== Setup complete ===${NC}"
 echo -e "Files in $INPUT_DIR:"

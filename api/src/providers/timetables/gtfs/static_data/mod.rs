@@ -19,7 +19,7 @@ pub use db::{build_schedule_from_db, build_schedule_from_db_by_gtfs_stop, load_s
 pub use download::{download_feed, DownloadResult};
 
 // mapping module: mixed visibility
-pub(crate) use mapping::{build_ifopt_mapping_to_db, MappingStats};
+pub(crate) use mapping::{build_ifopt_mapping_to_db, build_route_mapping_to_db, MappingStats};
 pub use mapping::{validate_mappings, OsmStopInfo, UnmatchedReason};
 
 // types module: all structs were `pub`

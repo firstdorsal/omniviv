@@ -13,7 +13,10 @@ pub use issues::{
     determine_transport_type, transport_type_from_route, IssueCategory, MatchCandidate, OsmIssue,
     OsmIssueStore, OsmIssueType,
 };
-pub use types::{Departure, DepartureStore, EventType, VehicleUpdate, VehicleUpdateSender};
+pub use types::{
+    Departure, DepartureStore, EventType, StopId, VehicleUpdate, VehicleUpdateSender,
+    is_osm_stop_id, osm_stop_id, parse_osm_stop_id,
+};
 
 use crate::config::{Area, Config, TransportType};
 use crate::providers::osm::{OsmClient, OsmElement, OsmRoute};
@@ -93,56 +96,285 @@ impl SyncManager {
         self.vehicle_updates_tx.clone()
     }
 
+    /// Merge osm2pgsql staging tables into application schema if they exist.
+    /// This runs on every API startup to pick up any PBF import that completed
+    /// while the API was not running.
+    /// Returns true if staging data was merged (new OSM data available).
+    async fn merge_osm_import_staging(&self) -> bool {
+        let has_staging = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '_osm_transit_routes')"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(false);
+
+        if !has_staging {
+            return false;
+        }
+
+        info!("Found osm2pgsql staging tables, merging into application schema...");
+        let merge_start = std::time::Instant::now();
+
+        // osm2pgsql flex tables use node_id/relation_id (not osm_id) and SRID 3857.
+        // We transform to 4326 and extract lat/lon for the application schema.
+        let wgs = "ST_Transform(geom, 4326)";
+
+        // --- Stations ---
+        match sqlx::query(&format!(r#"
+            INSERT INTO stations (osm_id, osm_type, name, ref_ifopt, lat, lon, tags, updated_at)
+            SELECT node_id, 'node', name, ref_ifopt, ST_Y({wgs}), ST_X({wgs}), tags, NOW()
+            FROM _osm_transit_stations
+            ON CONFLICT (osm_id) DO UPDATE SET
+                name = EXCLUDED.name, ref_ifopt = EXCLUDED.ref_ifopt,
+                lat = EXCLUDED.lat, lon = EXCLUDED.lon,
+                tags = EXCLUDED.tags, updated_at = NOW()
+        "#)).execute(&self.pool).await {
+            Ok(r) => info!(rows = r.rows_affected(), "Merged stations"),
+            Err(e) => error!("Failed to merge stations: {}", e),
+        }
+
+        // --- Platform nodes ---
+        match sqlx::query(&format!(r#"
+            INSERT INTO platforms (osm_id, osm_type, name, ref, ref_ifopt, lat, lon, tags, updated_at)
+            SELECT node_id, 'node', name, ref, ref_ifopt, ST_Y({wgs}), ST_X({wgs}), tags, NOW()
+            FROM _osm_transit_platforms
+            ON CONFLICT (osm_id) DO UPDATE SET
+                name = EXCLUDED.name, ref = EXCLUDED.ref, ref_ifopt = EXCLUDED.ref_ifopt,
+                lat = EXCLUDED.lat, lon = EXCLUDED.lon,
+                tags = EXCLUDED.tags, updated_at = NOW()
+        "#)).execute(&self.pool).await {
+            Ok(r) => info!(rows = r.rows_affected(), "Merged platforms"),
+            Err(e) => error!("Failed to merge platforms: {}", e),
+        }
+
+        // --- Platform ways (physical outlines with centroid, separate table) ---
+        match sqlx::query(&format!(r#"
+            INSERT INTO platform_ways (osm_id, name, ref, ref_ifopt, lat, lon, tags, station_id, updated_at)
+            SELECT way_id, name, ref, ref_ifopt,
+                   ST_Y(ST_Centroid({wgs})), ST_X(ST_Centroid({wgs})), tags, NULL, NOW()
+            FROM _osm_transit_platform_ways
+            ON CONFLICT (osm_id) DO UPDATE SET
+                name = EXCLUDED.name, ref = EXCLUDED.ref, ref_ifopt = EXCLUDED.ref_ifopt,
+                lat = EXCLUDED.lat, lon = EXCLUDED.lon,
+                tags = EXCLUDED.tags, updated_at = NOW()
+        "#)).execute(&self.pool).await {
+            Ok(r) => info!(rows = r.rows_affected(), "Merged platform ways"),
+            Err(e) => error!("Failed to merge platform ways: {}", e),
+        }
+
+        // --- Stop positions ---
+        match sqlx::query(&format!(r#"
+            INSERT INTO stop_positions (osm_id, osm_type, name, ref, ref_ifopt, lat, lon, tags, updated_at)
+            SELECT node_id, 'node', name, ref, ref_ifopt, ST_Y({wgs}), ST_X({wgs}), tags, NOW()
+            FROM _osm_transit_stops
+            ON CONFLICT (osm_id) DO UPDATE SET
+                name = EXCLUDED.name, ref = EXCLUDED.ref, ref_ifopt = EXCLUDED.ref_ifopt,
+                lat = EXCLUDED.lat, lon = EXCLUDED.lon,
+                tags = EXCLUDED.tags, updated_at = NOW()
+        "#)).execute(&self.pool).await {
+            Ok(r) => info!(rows = r.rows_affected(), "Merged stop positions"),
+            Err(e) => error!("Failed to merge stop positions: {}", e),
+        }
+
+        // --- Link platforms/stops to stations via stop_area membership ---
+        //
+        // For each stop_area relation, find the station it belongs to:
+        // 1. If the stop_area contains a station node → use that
+        // 2. If not → insert the stop_area itself as a station (using centroid of its members)
+        //
+        // This matches the old Overpass-based pipeline where stop_area relations
+        // were treated as stations directly.
+        let _ = sqlx::query("DROP TABLE IF EXISTS _stop_area_stations").execute(&self.pool).await;
+        match sqlx::query(r#"
+            CREATE TABLE _stop_area_stations AS
+            -- For each stop_area, find the station node if it has one
+            SELECT DISTINCT ON (m.relation_id) m.relation_id, m.member_id AS station_id
+            FROM _osm_stop_area_members m
+            WHERE m.member_type = 'node'
+              AND EXISTS (SELECT 1 FROM stations WHERE osm_id = m.member_id)
+        "#).execute(&self.pool).await {
+            Ok(_) => {
+                // For stop_areas WITHOUT a station member, create a synthetic station
+                // from the stop_area name and centroid of its stop_position members
+                match sqlx::query(r#"
+                    INSERT INTO stations (osm_id, osm_type, name, lat, lon, tags, updated_at)
+                    SELECT DISTINCT ON (sa.relation_id)
+                        sa.relation_id,
+                        'relation',
+                        sa.station_name,
+                        AVG(sp.lat),
+                        AVG(sp.lon),
+                        '{}'::jsonb,
+                        NOW()
+                    FROM (SELECT DISTINCT relation_id, station_name FROM _osm_stop_area_members) sa
+                    JOIN _osm_stop_area_members m ON m.relation_id = sa.relation_id AND m.member_type = 'node'
+                    JOIN stop_positions sp ON sp.osm_id = m.member_id
+                    WHERE NOT EXISTS (SELECT 1 FROM _stop_area_stations sas WHERE sas.relation_id = sa.relation_id)
+                      AND sa.station_name IS NOT NULL
+                    GROUP BY sa.relation_id, sa.station_name
+                    ON CONFLICT (osm_id) DO UPDATE SET
+                        name = EXCLUDED.name, lat = EXCLUDED.lat, lon = EXCLUDED.lon, updated_at = NOW()
+                "#).execute(&self.pool).await {
+                    Ok(r) => {
+                        info!(rows = r.rows_affected(), "Created synthetic stations from stop_areas without station nodes");
+                        // Add these to the lookup table
+                        let _ = sqlx::query(r#"
+                            INSERT INTO _stop_area_stations (relation_id, station_id)
+                            SELECT sa.relation_id, sa.relation_id
+                            FROM (SELECT DISTINCT relation_id FROM _osm_stop_area_members) sa
+                            WHERE NOT EXISTS (SELECT 1 FROM _stop_area_stations sas WHERE sas.relation_id = sa.relation_id)
+                              AND EXISTS (SELECT 1 FROM stations WHERE osm_id = sa.relation_id)
+                        "#).execute(&self.pool).await;
+                    }
+                    Err(e) => error!("Failed to create synthetic stations: {}", e),
+                }
+
+                // Link platforms
+                match sqlx::query(r#"
+                    UPDATE platforms p SET station_id = sas.station_id
+                    FROM _osm_stop_area_members m
+                    JOIN _stop_area_stations sas ON sas.relation_id = m.relation_id
+                    WHERE m.member_type = 'node' AND m.member_id = p.osm_id
+                      AND p.station_id IS NULL
+                "#).execute(&self.pool).await {
+                    Ok(r) => info!(rows = r.rows_affected(), "Linked platforms to stations via stop_area"),
+                    Err(e) => error!("Failed to link platforms: {}", e),
+                }
+                // Link stop positions
+                match sqlx::query(r#"
+                    UPDATE stop_positions sp SET station_id = sas.station_id
+                    FROM _osm_stop_area_members m
+                    JOIN _stop_area_stations sas ON sas.relation_id = m.relation_id
+                    WHERE m.member_type = 'node' AND m.member_id = sp.osm_id
+                      AND sp.station_id IS NULL
+                "#).execute(&self.pool).await {
+                    Ok(r) => info!(rows = r.rows_affected(), "Linked stop positions to stations via stop_area"),
+                    Err(e) => error!("Failed to link stop positions: {}", e),
+                }
+                // Link platform ways (member_type = 'way' in stop_area)
+                match sqlx::query(r#"
+                    UPDATE platform_ways pw SET station_id = sas.station_id
+                    FROM _osm_stop_area_members m
+                    JOIN _stop_area_stations sas ON sas.relation_id = m.relation_id
+                    WHERE m.member_type = 'way' AND m.member_id = pw.osm_id
+                      AND pw.station_id IS NULL
+                "#).execute(&self.pool).await {
+                    Ok(r) => info!(rows = r.rows_affected(), "Linked platform ways to stations via stop_area"),
+                    Err(e) => error!("Failed to link platform ways: {}", e),
+                }
+                let _ = sqlx::query("DROP TABLE IF EXISTS _stop_area_stations").execute(&self.pool).await;
+            }
+            Err(e) => error!("Failed to build station lookup from stop_area: {}", e),
+        }
+
+        // --- Routes (metadata first, geometry built from non-platform ways) ---
+        match sqlx::query(r#"
+            INSERT INTO routes (osm_id, osm_type, name, ref, route_type, color, operator, network, min_zoom, tags, updated_at)
+            SELECT relation_id, 'relation', name, ref, route_type, color, operator, network,
+                   min_zoom, tags, NOW()
+            FROM _osm_transit_routes
+            ON CONFLICT (osm_id) DO UPDATE SET
+                name = EXCLUDED.name, ref = EXCLUDED.ref, route_type = EXCLUDED.route_type,
+                color = EXCLUDED.color, operator = EXCLUDED.operator, network = EXCLUDED.network,
+                min_zoom = EXCLUDED.min_zoom, tags = EXCLUDED.tags,
+                updated_at = NOW()
+        "#).execute(&self.pool).await {
+            Ok(r) => info!(rows = r.rows_affected(), "Merged route metadata"),
+            Err(e) => error!("Failed to merge route metadata: {}", e),
+        }
+
+        // Build route geometry from non-platform way members only
+        info!("Building route geometry from way members (excluding platforms, this may take ~1 minute)...");
+        let geom_start = std::time::Instant::now();
+        match sqlx::query(r#"
+            UPDATE routes r SET geom = sub.geom
+            FROM (
+                SELECT m.route_id,
+                       ST_Multi(ST_Transform(ST_Collect(w.geom ORDER BY m.sequence), 4326))::geometry(MultiLineString, 4326) AS geom
+                FROM _osm_route_way_members m
+                JOIN _osm_transit_ways w ON w.way_id = m.way_id
+                WHERE m.member_role NOT IN ('platform', 'platform_entry_only', 'platform_exit_only')
+                GROUP BY m.route_id
+            ) sub
+            WHERE r.osm_id = sub.route_id
+        "#).execute(&self.pool).await {
+            Ok(r) => info!(rows = r.rows_affected(), elapsed_secs = geom_start.elapsed().as_secs(), "Built route geometry (excluding platform ways)"),
+            Err(e) => error!(elapsed_secs = geom_start.elapsed().as_secs(), "Failed to build route geometry: {}", e),
+        }
+
+        // --- Route stops (link stops/platforms to routes) ---
+        match sqlx::query(r#"
+            INSERT INTO route_stops (route_id, stop_position_id, platform_id, station_id, sequence, role)
+            SELECT
+                m.route_id,
+                CASE WHEN m.member_role = 'stop' AND EXISTS (SELECT 1 FROM stop_positions WHERE osm_id = m.member_id)
+                     THEN m.member_id END,
+                CASE WHEN m.member_role = 'platform' AND EXISTS (SELECT 1 FROM platforms WHERE osm_id = m.member_id)
+                     THEN m.member_id END,
+                COALESCE(
+                    (SELECT station_id FROM stop_positions WHERE osm_id = m.member_id),
+                    (SELECT station_id FROM platforms WHERE osm_id = m.member_id)
+                ),
+                m.sequence,
+                m.member_role
+            FROM _osm_route_stop_members m
+            WHERE EXISTS (SELECT 1 FROM routes WHERE osm_id = m.route_id)
+            ON CONFLICT DO NOTHING
+        "#).execute(&self.pool).await {
+            Ok(r) => info!(rows = r.rows_affected(), "Merged route stops"),
+            Err(e) => error!("Failed to merge route stops: {}", e),
+        }
+
+        // Spatial indexes
+        let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_routes_geom ON routes USING GIST (geom)").execute(&self.pool).await;
+        let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_routes_min_zoom ON routes (min_zoom)").execute(&self.pool).await;
+
+        // Drop all staging tables
+        for table in &[
+            "_osm_transit_routes", "_osm_transit_ways", "_osm_route_way_members",
+            "_osm_transit_stations", "_osm_transit_platforms",
+            "_osm_transit_stops", "_osm_stop_area_members", "_osm_route_stop_members",
+        ] {
+            let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {table}")).execute(&self.pool).await;
+        }
+
+        info!(elapsed_secs = merge_start.elapsed().as_secs(), "PBF import merge complete");
+        true
+    }
+
     /// Start the background sync loops
     pub async fn start(self: Arc<Self>) {
         info!("Starting sync manager");
 
-        // Spawn OSM sync (initial + periodic refresh every 6 hours)
-        let osm_self = self.clone();
-        let osm_handle = tokio::spawn(async move {
-            // Initial sync on startup
-            osm_self.sync_all_areas().await;
+        // Merge any pending osm2pgsql PBF import data (stations, platforms, stops, routes)
+        let pbf_merged = self.merge_osm_import_staging().await;
 
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(6 * 60 * 60));
-            // Skip the first tick which fires immediately (we already synced above)
-            interval.tick().await;
-
-            loop {
-                interval.tick().await;
-                osm_self.sync_all_areas().await;
-            }
-        });
-
-        // Spawn GTFS sync loop (runs concurrently with OSM sync)
+        // Spawn GTFS sync as a background task so the API can serve requests immediately.
+        // The GTFS mapping with Germany-wide data can take minutes.
         let gtfs_self = self.clone();
-        let gtfs_handle = tokio::spawn(async move {
-            // Brief delay so that if OSM sync is fast, stops are populated
-            // before the GTFS mapping step. If OSM is slow, GTFS still starts
-            // independently — the mapping will be rebuilt on the next refresh.
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            gtfs_self.run_gtfs_sync_loop().await;
+        tokio::spawn(async move {
+            gtfs_self.run_gtfs_sync_loop(pbf_merged).await;
         });
-
-        // Wait for both loops (they run forever)
-        let _ = tokio::join!(osm_handle, gtfs_handle);
     }
 
-    /// Load all stop IFOPTs with names and coordinates from the database for GTFS mapping.
-    /// Prioritizes platforms over stop_positions since platforms represent the passenger
-    /// waiting area and are more authoritative for departure display.
+    /// Load all platforms and stop_positions from the database for GTFS mapping.
+    /// Includes ALL stops (not just those with `ref:IFOPT`), using OSM ID as the
+    /// primary key. Platforms are preferred over stop_positions when both exist
+    /// for the same OSM node.
     async fn load_stop_info(&self) -> Vec<OsmStopInfo> {
-        // First, get all platforms (preferred source)
-        // Then, only add stop_positions for IFOPTs that don't have a platform
-        let rows: Vec<(String, Option<String>, f64, f64)> = match sqlx::query_as(
+        // Load all platforms and stop_positions. Use UNION ALL with a priority
+        // column so DISTINCT ON (osm_id) picks platforms first.
+        let rows: Vec<(i64, String, Option<String>, Option<String>, f64, f64)> = match sqlx::query_as(
             r#"
-            SELECT DISTINCT ON (ref_ifopt) ref_ifopt, name, lat, lon
+            SELECT DISTINCT ON (osm_id) osm_id, osm_type, ref_ifopt, name, lat, lon
             FROM (
-                SELECT ref_ifopt, name, lat, lon, 1 AS priority FROM platforms WHERE ref_ifopt IS NOT NULL
+                SELECT osm_id, 'platform' AS osm_type, ref_ifopt, name, lat, lon, 1 AS priority
+                FROM platforms
                 UNION ALL
-                SELECT ref_ifopt, name, lat, lon, 2 AS priority FROM stop_positions WHERE ref_ifopt IS NOT NULL
+                SELECT osm_id, 'stop_position' AS osm_type, ref_ifopt, name, lat, lon, 2 AS priority
+                FROM stop_positions
             ) combined
-            ORDER BY ref_ifopt, priority, lat, lon
+            ORDER BY osm_id, priority, lat, lon
             "#,
         )
         .fetch_all(&self.pool)
@@ -156,7 +388,9 @@ impl SyncManager {
         };
 
         rows.into_iter()
-            .map(|(ifopt, name, lat, lon)| OsmStopInfo {
+            .map(|(osm_id, osm_type, ifopt, name, lat, lon)| OsmStopInfo {
+                osm_id,
+                osm_type,
                 ifopt,
                 name,
                 lat,
@@ -165,10 +399,11 @@ impl SyncManager {
             .collect()
     }
 
-    /// Build the IFOPT <-> GTFS stop ID mapping after schedule load.
+    /// Build the OSM <-> GTFS stop and route mappings after schedule load.
     ///
-    /// Stores the mapping in PostgreSQL via `build_ifopt_mapping_to_db`, then
-    /// also populates the in-memory schedule's mapping for realtime processing.
+    /// Stores stop mapping in PostgreSQL via `build_ifopt_mapping_to_db` (writes
+    /// to both `ifopt_gtfs_mapping` and `osm_gtfs_stop_mapping`), then builds
+    /// route-level mapping via `build_route_mapping_to_db`.
     async fn build_gtfs_mapping(&self) {
         use crate::providers::timetables::gtfs::static_data;
 
@@ -184,7 +419,7 @@ impl SyncManager {
             return;
         }
 
-        // Build mapping and store in PostgreSQL
+        // Build stop mapping and store in PostgreSQL
         let stats = match static_data::build_ifopt_mapping_to_db(
             self.gtfs_provider.pool(),
             &osm_stops,
@@ -193,13 +428,21 @@ impl SyncManager {
         {
             Ok(stats) => stats,
             Err(e) => {
-                error!(error = %e, "Failed to build GTFS mapping in DB");
+                error!(error = %e, "Failed to build GTFS stop mapping in DB");
                 return;
             }
         };
 
         // Validate mappings against known-correct assignments
         static_data::validate_mappings(self.gtfs_provider.pool()).await;
+
+        // TODO: Route-level mapping disabled — the query joining gtfs_trips × gtfs_stop_times
+        // is too heavy for the initial implementation. The stop-level mapping is sufficient
+        // for departures. Route mapping + color injection can be done as a separate offline step.
+        // match static_data::build_route_mapping_to_db(self.gtfs_provider.pool()).await { ... }
+
+        // TODO: Color injection disabled until route-level mapping is optimized.
+        // Colors are still served via the per-departure fill_osm_route_colors fallback.
 
         // Report issues from the DB-based mapping stats
         self.report_mapping_issues(&stats).await;
@@ -222,39 +465,45 @@ impl SyncManager {
         // Report OSM stops that couldn't be matched
         use crate::providers::timetables::gtfs::static_data::UnmatchedReason;
         for osm_stop in stats.unmatched_osm.iter().take(100) {
+            let osm_id_label = format!("osm:{}", osm_stop.osm_id);
+            let stop_label = osm_stop
+                .name
+                .as_deref()
+                .or(osm_stop.ifopt.as_deref())
+                .unwrap_or(&osm_id_label);
             let (issue_type, description) = match &osm_stop.reason {
                 UnmatchedReason::NoRouteData => (
                     OsmIssueType::NoGtfsMatch,
                     format!(
                         "No route data available for {} — cannot match automatically",
-                        osm_stop.name.as_deref().unwrap_or(&osm_stop.ifopt)
+                        stop_label
                     ),
                 ),
                 UnmatchedReason::NoDefinitiveCandidate => (
                     OsmIssueType::NoGtfsMatch,
                     format!(
                         "No definitive route-based match for {}",
-                        osm_stop.name.as_deref().unwrap_or(&osm_stop.ifopt)
+                        stop_label
                     ),
                 ),
                 UnmatchedReason::AmbiguousMatch => (
                     OsmIssueType::AmbiguousGtfsMatch,
                     format!(
                         "Multiple definitive route-based matches for {} — ambiguous",
-                        osm_stop.name.as_deref().unwrap_or(&osm_stop.ifopt)
+                        stop_label
                     ),
                 ),
             };
 
             let mut issue = OsmIssue::new(
-                0,
-                "osm",
+                osm_stop.osm_id,
+                &osm_stop.osm_type,
                 "stop",
                 issue_type,
                 TransportType::Unknown,
                 description,
                 osm_stop.name.clone(),
-                Some(osm_stop.ifopt.clone()),
+                osm_stop.ifopt.clone(),
                 Some(osm_stop.lat),
                 Some(osm_stop.lon),
             );
@@ -304,9 +553,10 @@ impl SyncManager {
     }
 
     /// Run the GTFS departure sync loop
-    async fn run_gtfs_sync_loop(&self) {
+    async fn run_gtfs_sync_loop(&self, osm_data_changed: bool) {
         // Step 1: Load static GTFS schedule
         info!("Loading static GTFS schedule...");
+        let mut gtfs_feed_changed = false;
         let mut retries = 0u64;
         loop {
             match self.gtfs_provider.refresh_static_schedule().await {
@@ -325,8 +575,34 @@ impl SyncManager {
             }
         }
 
-        // Step 1b: Build IFOPT <-> GTFS stop mapping
-        self.build_gtfs_mapping().await;
+        // Check if the GTFS feed was actually updated (not just "unchanged, skipping")
+        // The provider logs "skipping reload" when unchanged — we detect this by checking
+        // if the schedule was freshly loaded into the DB
+        gtfs_feed_changed = retries == 0; // If no retries needed, the feed loaded (may or may not have changed)
+
+        // Step 1b: Build IFOPT <-> GTFS stop mapping — only if data changed
+        if osm_data_changed || gtfs_feed_changed {
+            // Check if mapping already exists and neither data source changed
+            let mapping_count = sqlx::query_scalar::<_, i64>(
+                "SELECT COALESCE(mapping_count, 0) FROM gtfs_feed_meta WHERE id = 1"
+            )
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(-1);
+
+            // Only skip if mapping already has matches AND no data changed.
+            // mapping_count = 0 means previous run found nothing — always retry.
+            if mapping_count > 0 && !osm_data_changed {
+                info!(mapping_count, "GTFS mapping already exists and OSM data unchanged, skipping rebuild");
+            } else {
+                info!(osm_data_changed, "Building IFOPT <-> GTFS stop mapping (this may take a few minutes with Germany-wide data)...");
+                let mapping_start = std::time::Instant::now();
+                self.build_gtfs_mapping().await;
+                info!(elapsed_secs = mapping_start.elapsed().as_secs(), "GTFS mapping complete");
+            }
+        } else {
+            info!("Neither GTFS feed nor OSM data changed, skipping mapping rebuild");
+        }
 
         let config = self.config.read().await;
         let rt_interval_secs = config.gtfs_sync.realtime_interval_secs;
@@ -405,21 +681,51 @@ impl SyncManager {
         }
     }
 
-    /// Load all unique stop IFOPTs from the database
+    /// Load relevant stop IDs for realtime departure monitoring.
+    ///
+    /// Only loads stops from configured areas (by bounding box from config).
+    /// Monitoring ALL mapped stops across Germany would overload the realtime sync.
+    /// Non-monitored stops get departures on-demand via the schedule cache.
     async fn load_relevant_stop_ids(&self) -> Result<HashSet<String>, SyncError> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            r#"
-            SELECT DISTINCT ref_ifopt FROM stations WHERE ref_ifopt IS NOT NULL
-            UNION
-            SELECT DISTINCT ref_ifopt FROM platforms WHERE ref_ifopt IS NOT NULL
-            UNION
-            SELECT DISTINCT ref_ifopt FROM stop_positions WHERE ref_ifopt IS NOT NULL
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let config = self.config.read().await;
+        let areas = &config.areas;
 
-        Ok(rows.into_iter().map(|(ifopt,)| ifopt).collect())
+        // Monitor IFOPT-bearing stops (platforms + stop_positions) in configured areas.
+        let mut rows: Vec<(i64, Option<String>)> = Vec::new();
+        for area in areas {
+            let area_rows: Vec<(i64, Option<String>)> = sqlx::query_as(
+                r#"
+                SELECT m.osm_id, m.ref_ifopt
+                FROM osm_gtfs_stop_mapping m
+                WHERE m.ref_ifopt IS NOT NULL
+                  AND (
+                    EXISTS (SELECT 1 FROM platforms p WHERE p.osm_id = m.osm_id
+                            AND p.lat BETWEEN $1 AND $2 AND p.lon BETWEEN $3 AND $4)
+                    OR EXISTS (SELECT 1 FROM stop_positions sp WHERE sp.osm_id = m.osm_id
+                            AND sp.lat BETWEEN $1 AND $2 AND sp.lon BETWEEN $3 AND $4)
+                  )
+                "#,
+            )
+            .bind(area.bounding_box.south)
+            .bind(area.bounding_box.north)
+            .bind(area.bounding_box.west)
+            .bind(area.bounding_box.east)
+            .fetch_all(&self.pool)
+            .await?;
+            rows.extend(area_rows);
+        }
+        drop(config);
+
+        let mut stop_ids = HashSet::with_capacity(rows.len() * 2);
+        for (osm_id, ref_ifopt) in rows {
+            stop_ids.insert(osm_stop_id(osm_id));
+            if let Some(ifopt) = ref_ifopt {
+                stop_ids.insert(ifopt);
+            }
+        }
+        info!(relevant_stops = stop_ids.len(), "Loaded relevant stop IDs from configured areas");
+
+        Ok(stop_ids)
     }
 
     /// Sync all areas from config
@@ -491,16 +797,13 @@ impl SyncManager {
         let area_id = self.upsert_area(&mut tx, area).await?;
 
         // Store features in database
+        // Routes are imported Germany-wide from PBF via osm2pgsql, not per-area from Overpass.
         self.store_stations(&mut tx, &features.stations, area_id).await?;
         self.store_platforms(&mut tx, &features.platforms, area_id, &platform_station_map).await?;
         self.store_stop_positions(&mut tx, &features.stop_positions, area_id, &platform_station_map).await?;
-        self.store_routes(&mut tx, &features.routes, area_id).await?;
 
         // Resolve remaining relations (fallback for unmapped platforms)
         self.resolve_relations(&mut tx, area_id).await?;
-
-        // Apply platform way overrides from OSM route membership data
-        self.apply_platform_way_overrides(&mut tx, &features.routes).await?;
 
         // Check for missing platform/stop_position pairs
         self.check_platform_stop_pairs(&mut tx, area_id).await?;

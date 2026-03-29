@@ -3,18 +3,28 @@
  */
 
 import type maplibregl from "maplibre-gl";
-import type { Area, Station, StationPlatform, StationStopPosition } from "../../api";
-import type { RouteWithGeometry } from "../../App";
+import type { Station, StationPlatform, StationStopPosition } from "../../api";
+import { makiIcons } from "../../generated/maki-icons";
 import type { MappingLine, MappingGtfsStop } from "../MappingManager";
+import { categoryOverrides, resolveIconPath } from "../PinheadIcon";
 import { VEHICLE_ICON_SCALE } from "../vehicles/VehicleIconFactory";
 import { getPlatformDisplayName } from "./mapUtils";
 
+const POI_ICON_SIZE = 24;
+
+/**
+ * OpenMapTiles POI class values that appear in the poi layer.
+ * Each name is used as the icon-image ID in the style.
+ */
+
 export class MapLayerManager {
     private map: maplibregl.Map;
+    private martinUrl: string;
     private vehicleModelsSourceAdded = false;
 
-    constructor(map: maplibregl.Map) {
+    constructor(map: maplibregl.Map, martinUrl: string) {
         this.map = map;
+        this.martinUrl = martinUrl;
     }
 
     /**
@@ -22,7 +32,10 @@ export class MapLayerManager {
      */
     setupLayers(): void {
         // Guard against duplicate setup (e.g. style reload, hot module reload)
-        if (this.map.getSource("area-outlines")) return;
+        if (this.map.getSource("stations")) return;
+
+        // Set up on-demand handler for subclass names not in the Maki bundle
+        this.setupPoiIconHandler();
 
         // 3D buildings
         this.map.addLayer({
@@ -39,32 +52,45 @@ export class MapLayerManager {
             },
         });
 
-        // Area outlines
-        this.map.addSource("area-outlines", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-        this.map.addLayer({ id: "area-fill", type: "fill", source: "area-outlines", paint: { "fill-color": "#3b82f6", "fill-opacity": 0.1 } });
-        this.map.addLayer({ id: "area-outline", type: "line", source: "area-outlines", paint: { "line-color": "#3b82f6", "line-width": 2, "line-dasharray": [2, 2] } });
-        this.map.addLayer({ id: "area-labels", type: "symbol", source: "area-outlines", layout: { "text-field": ["get", "name"], "text-font": ["Open Sans Regular"], "text-size": 14, "text-anchor": "center" }, paint: { "text-color": "#1e40af", "text-halo-color": "#ffffff", "text-halo-width": 2 } });
+        // Routes — vector tiles from Martin (PostGIS), platform ways excluded from geometry
+        this.map.addSource("transit-routes", {
+            type: "vector",
+            tiles: [`${this.martinUrl}/transit_routes/{z}/{x}/{y}`],
+        });
+        this.map.addLayer({
+            id: "routes-line",
+            type: "line",
+            source: "transit-routes",
+            "source-layer": "transit_routes",
+            paint: {
+                "line-color": ["coalesce", ["get", "color"], "#888888"],
+                "line-width": ["interpolate", ["linear"], ["zoom"], 6, 1, 10, 2, 14, 4],
+                "line-opacity": 0.8,
+            },
+            layout: { "line-cap": "round", "line-join": "round" },
+        }, "3d-buildings");
 
-        // Routes
-        this.map.addSource("routes", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-        this.map.addLayer({ id: "routes-line", type: "line", source: "routes", paint: { "line-color": ["coalesce", ["get", "color"], "#888888"], "line-width": 4, "line-opacity": 0.8 }, layout: { "line-cap": "round", "line-join": "round" } }, "3d-buildings");
-
-        // Platform connections
+        // Platform connections (only visible when very zoomed in)
         this.map.addSource("platform-connections", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-        this.map.addLayer({ id: "platform-connections-line", type: "line", source: "platform-connections", paint: { "line-color": "#888", "line-width": 1, "line-opacity": 0.5 } });
+        this.map.addLayer({ id: "platform-connections-line", type: "line", source: "platform-connections", minzoom: 15, paint: { "line-color": "#888", "line-width": 1, "line-opacity": 0.5 } });
 
-        // Platforms (grey circles)
+        // Platforms (grey circles) — only when very zoomed in
         this.map.addSource("platforms", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-        this.map.addLayer({ id: "platforms-circle", type: "circle", source: "platforms", paint: { "circle-radius": 5, "circle-color": "#666", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" } });
+        this.map.addLayer({ id: "platforms-circle", type: "circle", source: "platforms", minzoom: 15, paint: { "circle-radius": 5, "circle-color": "#666", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" } });
         this.map.addLayer({ id: "platforms-label", type: "symbol", source: "platforms", minzoom: 16, layout: { "text-field": ["get", "name"], "text-font": ["Open Sans Regular"], "text-size": 10, "text-offset": [0, 0.9], "text-anchor": "top" }, paint: { "text-color": "#333", "text-halo-color": "#ffffff", "text-halo-width": 1.5 } });
 
-        // Stop positions (blue squares) - additional layer
+        // Stop positions (blue squares) — only when very zoomed in
         this.map.addSource("stop-positions", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-        this.map.addLayer({ id: "stop-positions-marker", type: "circle", source: "stop-positions", paint: { "circle-radius": 4, "circle-color": "#3b82f6", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" } });
+        this.map.addLayer({ id: "stop-positions-marker", type: "circle", source: "stop-positions", minzoom: 15, paint: { "circle-radius": 4, "circle-color": "#3b82f6", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" } });
 
-        // Platform elements (orange squares) - additional layer
+        // Platform elements (orange squares) — only when very zoomed in
         this.map.addSource("platform-elements", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-        this.map.addLayer({ id: "platform-elements-marker", type: "circle", source: "platform-elements", paint: { "circle-radius": 4, "circle-color": "#f97316", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" } });
+        this.map.addLayer({ id: "platform-elements-marker", type: "circle", source: "platform-elements", minzoom: 15, paint: { "circle-radius": 4, "circle-color": "#f97316", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" } });
+
+        // Hide the base map's rail layer — our transit route tiles replace it
+        if (this.map.getLayer("rail")) {
+            this.map.setLayoutProperty("rail", "visibility", "none");
+        }
 
         // IFOPT-GTFS mapping connection lines (sources added here, layers moved to top later)
         this.map.addSource("mapping-lines", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
@@ -83,10 +109,10 @@ export class MapLayerManager {
             paint: { "text-color": "#ef4444", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
         });
 
-        // Stations
+        // Stations — filtered by min_zoom property (rail=6, tram=10, bus=13)
         this.map.addSource("stations", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-        this.map.addLayer({ id: "stations-circle", type: "circle", source: "stations", paint: { "circle-radius": 6, "circle-color": "#525252", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" } });
-        this.map.addLayer({ id: "stations-label", type: "symbol", source: "stations", layout: { "text-field": ["get", "name"], "text-font": ["Open Sans Regular"], "text-size": 12, "text-offset": [0, 1.5], "text-anchor": "top" }, paint: { "text-color": "#065f46", "text-halo-color": "#ffffff", "text-halo-width": 2 } });
+        this.map.addLayer({ id: "stations-circle", type: "circle", source: "stations", filter: ["<=", ["get", "min_zoom"], ["zoom"]], paint: { "circle-radius": 6, "circle-color": "#525252", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" } });
+        this.map.addLayer({ id: "stations-label", type: "symbol", source: "stations", minzoom: 8, filter: ["<=", ["get", "min_zoom"], ["zoom"]], layout: { "text-field": ["get", "name"], "text-font": ["Open Sans Regular"], "text-size": 12, "text-offset": [0, 1.5], "text-anchor": "top" }, paint: { "text-color": "#065f46", "text-halo-color": "#ffffff", "text-halo-width": 2 } });
 
         // Debug: route segments visualization (ahead=green, behind=red) - added before 3D models so it renders underneath
         this.map.addSource("debug-segments", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
@@ -117,6 +143,15 @@ export class MapLayerManager {
         // Move debug segments below vehicle models but above buildings
         this.map.moveLayer("debug-segments-line", "vehicle-models-3d");
 
+        // Move POI layers above 3D buildings (fill-extrusion overlaps 2D symbol layers)
+        for (const poiLayer of [
+            "poi-level-3", "poi-level-2", "poi-level-1",
+        ]) {
+            if (this.map.getLayer(poiLayer)) {
+                this.map.moveLayer(poiLayer);
+            }
+        }
+
         // Move mapping layers to render on top of stations/platforms
         this.map.moveLayer("mapping-lines-line");
         this.map.moveLayer("mapping-gtfs-circle");
@@ -128,29 +163,6 @@ export class MapLayerManager {
      */
     isVehicleModelsSourceAdded(): boolean {
         return this.vehicleModelsSourceAdded;
-    }
-
-    /**
-     * Update area outlines on the map
-     */
-    updateAreaOutlines(areas: Area[], show: boolean): void {
-        const source = this.map.getSource("area-outlines") as maplibregl.GeoJSONSource;
-        if (!source) return;
-
-        if (!show) {
-            source.setData({ type: "FeatureCollection", features: [] });
-            return;
-        }
-
-        const features = areas.map((area) => ({
-            type: "Feature" as const,
-            properties: { name: area.name, id: area.id },
-            geometry: {
-                type: "Polygon" as const,
-                coordinates: [[[area.west, area.south], [area.east, area.south], [area.east, area.north], [area.west, area.north], [area.west, area.south]]],
-            },
-        }));
-        source.setData({ type: "FeatureCollection", features });
     }
 
     /**
@@ -175,7 +187,7 @@ export class MapLayerManager {
 
         const stationFeatures = stations.map((station) => ({
             type: "Feature" as const,
-            properties: { name: station.name, osm_id: station.osm_id },
+            properties: { name: station.name, osm_id: station.osm_id, min_zoom: (station as { min_zoom?: number }).min_zoom ?? 10 },
             geometry: { type: "Point" as const, coordinates: [station.lon, station.lat] },
         }));
 
@@ -203,7 +215,10 @@ export class MapLayerManager {
                 });
             };
 
-            // Original behavior: show deduplicated platforms and stop positions
+            // Show deduplicated platforms and stop positions at their original coordinates.
+            // Platform ways (physical outlines) are available for future map rendering
+            // but their centroids are not suitable as marker positions (they cluster together
+            // for parallel platforms like Königsplatz A1-A4).
             for (const platform of station.platforms) {
                 const name = getPlatformDisplayName(platform);
                 if (!addedNames.has(name)) {
@@ -250,30 +265,12 @@ export class MapLayerManager {
     }
 
     /**
-     * Update routes on the map
+     * Toggle route layer visibility (routes served via vector tiles)
      */
-    updateRoutes(routes: RouteWithGeometry[], show: boolean): void {
-        const source = this.map.getSource("routes") as maplibregl.GeoJSONSource;
-        if (!source) return;
-
-        if (!show) {
-            source.setData({ type: "FeatureCollection", features: [] });
-            return;
+    setRoutesVisible(show: boolean): void {
+        if (this.map.getLayer("routes-line")) {
+            this.map.setLayoutProperty("routes-line", "visibility", show ? "visible" : "none");
         }
-
-        const features: GeoJSON.Feature[] = [];
-        for (const route of routes) {
-            if (!route.geometry?.segments) continue;
-            for (const segment of route.geometry.segments) {
-                if (segment.length < 2) continue;
-                features.push({
-                    type: "Feature",
-                    properties: { route_id: route.osm_id, name: route.name, ref: route.ref, color: route.color || "#888888" },
-                    geometry: { type: "LineString", coordinates: segment },
-                });
-            }
-        }
-        source.setData({ type: "FeatureCollection", features });
     }
 
     /**
@@ -404,6 +401,120 @@ export class MapLayerManager {
 
         lineSource.setData({ type: "FeatureCollection", features: lineFeatures });
         gtfsSource.setData({ type: "FeatureCollection", features: gtfsFeatures });
+    }
+
+    /**
+     * Render an SVG string to an ImageData with white circle background.
+     */
+    private renderPoiIcon(svgText: string): Promise<ImageData> {
+        const dpr = window.devicePixelRatio || 1;
+        const renderSize = Math.round(POI_ICON_SIZE * dpr);
+        const blob = new Blob([svgText], { type: "image/svg+xml" });
+        const blobUrl = URL.createObjectURL(blob);
+
+        return new Promise((resolve, reject) => {
+            const img = new Image(renderSize, renderSize);
+            img.onload = () => {
+                URL.revokeObjectURL(blobUrl);
+                const canvas = document.createElement("canvas");
+                canvas.width = renderSize;
+                canvas.height = renderSize;
+                const ctx = canvas.getContext("2d")!;
+
+                // White circle background
+                const center = renderSize / 2;
+                const radius = renderSize / 2 - dpr;
+                ctx.beginPath();
+                ctx.arc(center, center, radius, 0, Math.PI * 2);
+                ctx.fillStyle = "#ffffff";
+                ctx.fill();
+                ctx.strokeStyle = "#cccccc";
+                ctx.lineWidth = dpr;
+                ctx.stroke();
+
+                // Draw SVG icon centered with padding
+                const padding = Math.round(5 * dpr);
+                const iconArea = renderSize - padding * 2;
+                ctx.drawImage(img, padding, padding, iconArea, iconArea);
+                resolve(ctx.getImageData(0, 0, renderSize, renderSize));
+            };
+            img.onerror = () => { URL.revokeObjectURL(blobUrl); reject(); };
+            img.src = blobUrl;
+        });
+    }
+
+    /**
+     * Set up on-demand POI icon loading via styleimagemissing.
+     * Icons are resolved from the bundled Maki SVGs (zero network requests)
+     * via resolveIconPath + PinheadIcon's category overrides, ensuring the
+     * same icons appear on the map and in route planning.
+     */
+    setupPoiIconHandler(): void {
+        const dpr = window.devicePixelRatio || 1;
+        const loading = new Set<string>();
+
+        this.map.on("styleimagemissing", (e: { id: string }) => {
+            const id = e.id;
+            if (loading.has(id) || this.map.hasImage(id)) return;
+            loading.add(id);
+
+            // Resolve the icon path to find which Maki icon to use
+            const path = resolveIconPath(id);
+            const match = path.match(/\/icons\/maki\/(.+)\.svg$/);
+            const makiName = match?.[1];
+            const svgText = makiName ? makiIcons[makiName] : undefined;
+
+            if (!svgText) return; // No bundled icon available
+
+            this.renderPoiIcon(svgText)
+                .then((imageData) => {
+                    if (!this.map.hasImage(id)) {
+                        this.map.addImage(id, imageData, { pixelRatio: dpr });
+                    }
+                })
+                .catch(() => { /* render failed */ });
+        });
+    }
+
+    /**
+     * Pre-render all bundled Maki icons so they're available before tiles parse.
+     * SVG data is already in memory (bundled at build time), so no network requests.
+     * Returns a promise that resolves when all icons are registered.
+     */
+    preloadBundledIcons(): Promise<void> {
+        const dpr = window.devicePixelRatio || 1;
+
+        // Render each unique Maki SVG once and cache the ImageData
+        const renderCache = new Map<string, Promise<ImageData>>();
+        for (const [makiName, svgText] of Object.entries(makiIcons)) {
+            renderCache.set(makiName, this.renderPoiIcon(svgText));
+        }
+
+        // Build a list of all (id, makiName) pairs to register.
+        // Each Maki icon is registered under its own name.
+        const registrations: { id: string; makiName: string }[] = [];
+        for (const makiName of Object.keys(makiIcons)) {
+            registrations.push({ id: makiName, makiName });
+        }
+        // Category overrides map alias names (e.g. "tram_stop") to Maki icons
+        // (e.g. "maki/rail-light" → makiName "rail-light"). Register these too.
+        for (const [alias, target] of Object.entries(categoryOverrides)) {
+            const match = target.match(/^maki\/(.+)$/);
+            if (match && makiIcons[match[1]]) {
+                registrations.push({ id: alias, makiName: match[1] });
+            }
+        }
+
+        return Promise.all(
+            registrations.map(async ({ id, makiName }) => {
+                try {
+                    const imageData = await renderCache.get(makiName)!;
+                    if (!this.map.hasImage(id)) {
+                        this.map.addImage(id, imageData, { pixelRatio: dpr });
+                    }
+                } catch { /* render failed */ }
+            })
+        ).then(() => {});
     }
 
     /**

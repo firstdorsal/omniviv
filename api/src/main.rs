@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{Router, extract::DefaultBodyLimit, routing::get};
-use sqlx::PgPool;
+
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[cfg(feature = "dev-tools")]
@@ -102,7 +102,7 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,tower_http=info,sqlx=warn".into()),
+                .unwrap_or_else(|_| "info,tower_http=info,sqlx=warn,sqlx::query=error".into()),
         )
         .init();
 
@@ -169,7 +169,9 @@ async fn main() {
     }
 
     // Connect to PostgreSQL
-    let pool = PgPool::connect(&database_url)
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(20)
+        .connect(&database_url)
         .await
         .expect("Failed to connect to PostgreSQL database");
     tracing::info!("Connected to PostgreSQL");

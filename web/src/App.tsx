@@ -1,7 +1,7 @@
 import { Bug, Clock, Github, Layers, Navigation, Settings, TrainFront, Wifi, WifiOff } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TbWorldX } from "react-icons/tb";
-import { Area, Route, RouteGeometry, Station } from "./api";
+import { Route, RouteGeometry, Station } from "./api";
 import { getApiClient } from "./apiClient";
 import { DeparturesPanel, type PinnedStop } from "./components/DeparturesPanel";
 import { FeaturesPanel } from "./components/FeaturesPanel";
@@ -93,7 +93,6 @@ export type { RouteVehicles } from "./hooks/useVehicleUpdates";
 
 
 interface PersistedOptions {
-    showAreaOutlines: boolean;
     showStations: boolean;
     showStopPositions: boolean;
     showPlatforms: boolean;
@@ -105,7 +104,6 @@ interface PersistedOptions {
 }
 
 const DEFAULT_OPTIONS: PersistedOptions = {
-    showAreaOutlines: false,
     showStations: true,
     showStopPositions: false,
     showPlatforms: false,
@@ -151,7 +149,6 @@ function saveOptions(options: PersistedOptions): void {
 }
 
 export default function App() {
-    const [areas, setAreas] = useState<Area[]>([]);
     const [stations, setStations] = useState<Station[]>([]);
     const [routes, setRoutes] = useState<RouteWithGeometry[]>([]);
     const [vehicles, setVehicles] = useState<RouteVehicles[]>([]);
@@ -246,7 +243,6 @@ export default function App() {
 
     // Destructure for easier access
     const {
-        showAreaOutlines,
         showStations,
         showStopPositions,
         showPlatforms,
@@ -299,12 +295,12 @@ export default function App() {
     };
 
     // Pin a stop to the sidebar
-    const handlePinStop = useCallback((stopIfopt: string, displayName: string, stationName?: string) => {
+    const handlePinStop = useCallback((osmId: string, displayName: string, stationName?: string, refIfopt?: string | null, lat?: number, lon?: number) => {
         setPinnedStops((prev) => {
-            if (prev.some((s) => s.stopIfopt === stopIfopt)) return prev;
-            return [...prev, { id: stopIfopt, stopIfopt, displayName, stationName }];
+            if (prev.some((s) => s.id === osmId)) return prev;
+            return [...prev, { id: osmId, osmId: Number(osmId), displayName, stationName, refIfopt, lat, lon }];
         });
-        setActivePanel(`departures:${stopIfopt}`);
+        setActivePanel(`departures:${osmId}`);
     }, []);
 
     const handlePanelResizeStart = useCallback((e: React.MouseEvent) => {
@@ -322,6 +318,8 @@ export default function App() {
         window.addEventListener("mousemove", onMove);
         window.addEventListener("mouseup", onUp);
     }, [panelWidth]);
+
+    const pinnedStopIds = useMemo(() => new Set(pinnedStops.map((s) => s.id)), [pinnedStops]);
 
     const handleUnpinStop = useCallback((id: string) => {
         setPinnedStops((prev) => prev.filter((s) => s.id !== id));
@@ -362,21 +360,11 @@ export default function App() {
     }, []);
 
     // Route colors and types for departure tables (line number → color / type)
-    const routeColors = useMemo(() => {
-        const map = new globalThis.Map<string, string>();
-        for (const route of routes) {
-            if (route.ref && route.color) map.set(route.ref, route.color);
-        }
-        return map;
-    }, [routes]);
-
-    const routeTypes = useMemo(() => {
-        const map = new globalThis.Map<string, string>();
-        for (const route of routes) {
-            if (route.ref && route.route_type) map.set(route.ref, route.route_type);
-        }
-        return map;
-    }, [routes]);
+    // Route colors and types — loaded from lightweight /api/routes/colors endpoint
+    const [routeColorMap, setRouteColorMap] = useState(() => new globalThis.Map<string, string>());
+    const [routeTypeMap, setRouteTypeMap] = useState(() => new globalThis.Map<string, string>());
+    const routeColors = routeColorMap;
+    const routeTypes = routeTypeMap;
 
     // Derive the active tracked trip ID for Map highlight
     const activeTrackedTripId = useMemo(() => {
@@ -583,31 +571,80 @@ export default function App() {
         []
     );
 
-    // Initial data fetch
+    // Cache for lazily-loaded route geometries (for vehicle interpolation)
+    const routeGeometryCache = useRef(new globalThis.Map<number, RouteGeometry>());
+
+    // Lazily fetch route geometry when vehicles arrive on a route not yet cached
+    const ensureRouteGeometry = useCallback(async (routeId: number) => {
+        if (routeGeometryCache.current.has(routeId)) return;
+        try {
+            const geomResponse = await getApiClient().api.getRouteGeometry(routeId);
+            routeGeometryCache.current.set(routeId, geomResponse.data);
+            // Update routes state so Map gets the geometry for vehicle rendering
+            setRoutes((prev) =>
+                prev.map((r) =>
+                    r.osm_id === routeId ? { ...r, geometry: geomResponse.data } : r
+                )
+            );
+        } catch {
+            // Route may not have geometry yet (not imported from PBF)
+        }
+    }, []);
+
+    // Fetch stations for the visible viewport (debounced via AbortController)
+    const stationsAbort = useRef<AbortController | null>(null);
+    const handleViewportChange = useCallback(async (bbox: [number, number, number, number], zoom: number) => {
+        // Only load stations when zoomed in enough to see them (min_zoom 6 for rail stations)
+        if (zoom < 6) {
+            setStations([]);
+            return;
+        }
+        stationsAbort.current?.abort();
+        const controller = new AbortController();
+        stationsAbort.current = controller;
+        try {
+            const bboxStr = bbox.join(",");
+            const response = await getApiClient().api.listStations({ bbox: bboxStr }, { signal: controller.signal });
+            if (!controller.signal.aborted) {
+                setStations(response.data.stations);
+            }
+        } catch {
+            // Aborted or network error
+        }
+    }, []);
+
+    // Initial data fetch — route color/type lookup. Stations loaded via viewport.
     useEffect(() => {
         const fetchData = async () => {
             try {
-                const [areasResponse, stationsResponse, routesResponse] = await Promise.all([
-                    getApiClient().api.listAreas(),
-                    getApiClient().api.listStations(),
-                    getApiClient().api.listRoutes()
-                ]);
-                setAreas(areasResponse.data.areas);
-                setStations(stationsResponse.data.stations);
-
-                // Fetch geometries for all routes
-                const routesWithGeometry = await Promise.all(
-                    routesResponse.data.routes.map(async (route) => {
-                        try {
-                            const geomResponse = await getApiClient().api.getRouteGeometry(route.osm_id);
-                            return { ...route, geometry: geomResponse.data };
-                        } catch {
-                            return { ...route, geometry: null };
+                // Load route colors/types from a lightweight endpoint.
+                // Keys: "tram:1" for type-specific lookup, "1" as fallback.
+                const response = await fetch(`${getApiClient().baseUrl}/api/routes/colors`);
+                if (response.ok) {
+                    const data = await response.json();
+                    const colorMap = new globalThis.Map<string, string>();
+                    const typeMap = new globalThis.Map<string, string>();
+                    for (const entry of data.entries ?? []) {
+                        if (!entry.ref) continue;
+                        const typeKey = `${entry.route_type}:${entry.ref}`;
+                        if (entry.color) {
+                            // Operator-scoped key (e.g. "Stadtwerke München:U5") — most specific
+                            if (entry.operator) {
+                                const operatorKey = `${entry.operator}:${entry.ref}`;
+                                if (!colorMap.has(operatorKey)) colorMap.set(operatorKey, entry.color);
+                            }
+                            // Type-specific key (e.g. "tram:1") — first wins per type
+                            if (!colorMap.has(typeKey)) colorMap.set(typeKey, entry.color);
+                            // Fallback key (first color for this ref)
+                            if (!colorMap.has(entry.ref)) colorMap.set(entry.ref, entry.color);
                         }
-                    })
-                );
-                setRoutes(routesWithGeometry);
-                // Vehicle data will be fetched via WebSocket subscription
+                        if (!typeMap.has(entry.ref)) {
+                            typeMap.set(entry.ref, entry.route_type);
+                        }
+                    }
+                    setRouteColorMap(colorMap);
+                    setRouteTypeMap(typeMap);
+                }
             } catch (err) {
                 console.error("Failed to fetch data:", err);
             }
@@ -615,6 +652,15 @@ export default function App() {
 
         fetchData();
     }, []);
+
+    // When vehicles data changes, ensure geometry is loaded for all active routes
+    useEffect(() => {
+        for (const rv of vehicles) {
+            if (rv.vehicles.length > 0 && !routeGeometryCache.current.has(rv.routeId)) {
+                ensureRouteGeometry(rv.routeId);
+            }
+        }
+    }, [vehicles, ensureRouteGeometry]);
 
     // Get route IDs for WebSocket subscription
     const routeIds = useMemo(() => routes.map((r) => r.osm_id), [routes]);
@@ -787,7 +833,6 @@ export default function App() {
                         {activePanel === "navigation" && (
                             <NavigationPanel
                                 stations={stations}
-                                areas={areas}
                                 routeColors={routeColors}
                                 routeTypes={routeTypes}
                                 startLocation={navStart}
@@ -806,16 +851,6 @@ export default function App() {
                             <div className="p-4">
                                 <h2 className="mb-4 font-semibold">Ebenen</h2>
                                 <div className="space-y-3">
-                                    <label className="flex cursor-pointer items-center gap-3">
-                                        <Checkbox
-                                            checked={showAreaOutlines}
-                                            onCheckedChange={(checked) =>
-                                                updateOption("showAreaOutlines", checked === true)
-                                            }
-                                        />
-                                        <span className="text-sm">Gebietsumrisse anzeigen</span>
-                                    </label>
-
                                     <label className="flex cursor-pointer items-center gap-3">
                                         <Checkbox
                                             checked={showStations}
@@ -953,24 +988,6 @@ export default function App() {
                                     )}
                                 </div>
 
-                                {areas.length > 0 && (
-                                    <div className="mt-6 border-t pt-4">
-                                        <h3 className="text-muted-foreground mb-2 text-sm font-medium">
-                                            Gebiete
-                                        </h3>
-                                        <ul className="space-y-1">
-                                            {areas.map((area) => (
-                                                <li
-                                                    key={area.id}
-                                                    className="flex items-center gap-2 text-sm"
-                                                >
-                                                    <span className="bg-primary h-2 w-2 rounded-full" />
-                                                    {area.name}
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    </div>
-                                )}
                             </div>
                         )}
 
@@ -1051,6 +1068,7 @@ export default function App() {
                                     routeTypes={routeTypes}
                                     referenceTime={timeSimulation.isRealTime ? undefined : timeSimulation.currentTime}
                                     onUnpin={handleUnpinStop}
+                                    onLocate={handleFlyTo}
                                 />
                             );
                         })()}
@@ -1091,11 +1109,9 @@ export default function App() {
             <div className="h-full flex-1">
                 <Map
                     ref={mapRef}
-                    areas={areas}
                     stations={stations}
                     routes={routes}
                     vehicles={vehicles}
-                    showAreaOutlines={showAreaOutlines}
                     showStations={showStations}
                     showStopPositions={showStopPositions}
                     showPlatforms={showPlatforms}
@@ -1117,7 +1133,10 @@ export default function App() {
                     onHighlightBuilding={setHighlightedBuilding}
                     mappingLines={activePanel === "issues" ? mappingMapData.lines : []}
                     mappingGtfsStops={activePanel === "issues" ? mappingMapData.gtfsStops : []}
+                    pinnedStopIds={pinnedStopIds}
                     onPinStop={handlePinStop}
+                    onUnpinStop={handleUnpinStop}
+                    onViewportChange={handleViewportChange}
                     trackedTripId={activeTrackedTripId}
                     cameraFollowTripId={cameraFollowTripId}
                     onVehicleClick={handleVehicleClick}
@@ -1125,6 +1144,8 @@ export default function App() {
                     onCameraFollowStop={handleCameraFollowStop}
                     onTrackedTripChanged={handleTrackedTripChanged}
                     onTrackedVehicleLost={handleTrackedVehicleLost}
+                    routeColors={routeColors}
+                    routeTypes={routeTypes}
                 />
             </div>
         </div>

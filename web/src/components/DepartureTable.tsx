@@ -3,6 +3,20 @@ import { EventType, type Departure } from "../api";
 import { LineBadge } from "./LineBadge";
 import { LiveTime } from "./LiveTime";
 
+/** Convert GTFS route_type integer to LineBadge mode string */
+function gtfsRouteTypeToMode(type: number | null): string | undefined {
+    if (type === null) return undefined;
+    switch (type) {
+        case 0: return "tram";
+        case 1: return "subway";
+        case 2: return "train";
+        case 3: return "bus";
+        case 4: return "ferry";
+        case 7: return "bus"; // funicular
+        default: return undefined;
+    }
+}
+
 export interface TripEvent {
     tripId: string;
     lineNumber: string;
@@ -14,6 +28,10 @@ export interface TripEvent {
     delayMinutes: number | null;
     /** Trip has been cancelled (strike, disruption, etc.) */
     cancelled: boolean;
+    /** GTFS route_type: 0=tram, 1=subway, 2=rail, 3=bus */
+    gtfsRouteType: number | null;
+    /** Route color from API */
+    color: string | null;
 }
 
 type TimeColumn = "departure" | "arrival" | "relative";
@@ -61,6 +79,8 @@ export function buildTripEvents(events: Departure[]): TripEvent[] {
                 departureIsLive: event.event_type === EventType.Departure && isLive,
                 delayMinutes: event.delay_minutes ?? null,
                 cancelled: event.cancelled === true,
+                gtfsRouteType: event.gtfs_route_type ?? null,
+                color: event.color ?? null,
             });
         }
     }
@@ -145,6 +165,20 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
 
     const allTripEvents = useMemo(() => buildTripEvents(events), [events]);
 
+    // Per-line color and mode from the first trip with that line
+    const lineInfo = useMemo(() => {
+        const map = new globalThis.Map<string, { color: string | null; mode: string | undefined }>();
+        for (const trip of allTripEvents) {
+            if (!map.has(trip.lineNumber)) {
+                map.set(trip.lineNumber, {
+                    color: trip.color,
+                    mode: gtfsRouteTypeToMode(trip.gtfsRouteType),
+                });
+            }
+        }
+        return map;
+    }, [allTripEvents]);
+
     const availableLines = useMemo(() => {
         const lines = new Set<string>();
         for (const trip of allTripEvents) {
@@ -207,8 +241,8 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
                             >
                                 <LineBadge
                                     line={line}
-                                    color={routeColors.get(line)}
-                                    mode={routeTypes?.get(line)}
+                                    color={lineInfo.get(line)?.color ?? routeColors.get(`${lineInfo.get(line)?.mode}:${line}`) ?? routeColors.get(line)}
+                                    mode={lineInfo.get(line)?.mode ?? routeTypes?.get(line)}
                                 />
                             </button>
                         );
@@ -261,7 +295,7 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
                         return (
                             <tr key={trip.tripId} className={`whitespace-nowrap${trip.cancelled ? " line-through opacity-50" : ""}`}>
                                 <td className="pr-2 py-1">
-                                    <LineBadge line={trip.lineNumber} color={routeColors.get(trip.lineNumber)} mode={routeTypes?.get(trip.lineNumber)} />
+                                    <LineBadge line={trip.lineNumber} color={trip.color ?? routeColors.get(`${gtfsRouteTypeToMode(trip.gtfsRouteType)}:${trip.lineNumber}`) ?? routeColors.get(trip.lineNumber)} mode={gtfsRouteTypeToMode(trip.gtfsRouteType) ?? routeTypes?.get(trip.lineNumber)} />
                                 </td>
                                 <td className="pr-3">{trip.destination}</td>
                                 {showArr && (

@@ -143,6 +143,10 @@ export interface Departure {
   stop_ifopt: string;
   /** Unique trip identifier (GTFS trip_id) - consistent across all stops for a journey */
   trip_id?: string | null;
+  /** GTFS route_type: 0=tram, 1=subway, 2=rail, 3=bus, 4=ferry, etc. */
+  gtfs_route_type?: number | null;
+  /** Route color from GTFS or OSM (hex, e.g. "#ee1d23") */
+  color?: string | null;
 }
 
 export interface DepartureListResponse {
@@ -461,13 +465,29 @@ export interface Station {
   lat: number;
   /** @format double */
   lon: number;
+  /** Minimum zoom level at which this station should be shown */
+  min_zoom?: number;
   name?: string | null;
   /** @format int64 */
   osm_id: number;
   osm_type: string;
   platforms: StationPlatform[];
+  platform_ways?: StationPlatformWay[];
   ref_ifopt?: string | null;
   stop_positions: StationStopPosition[];
+}
+
+/** Platform way info (physical platform outline centroid) */
+export interface StationPlatformWay {
+  /** @format double */
+  lat: number;
+  /** @format double */
+  lon: number;
+  name?: string | null;
+  /** @format int64 */
+  osm_id: number;
+  ref?: string | null;
+  ref_ifopt?: string | null;
 }
 
 export interface StationListResponse {
@@ -1188,6 +1208,8 @@ export class Api<
          * @format int64
          */
         area_id?: number | null;
+        /** Bounding box: west,south,east,north */
+        bbox?: string | null;
       },
       params: RequestParams = {},
     ) =>

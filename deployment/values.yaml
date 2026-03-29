@@ -10,7 +10,7 @@ lanIp: "10.0.0.20" # LAN IP for device access (set to null to disable)
 
 services:
     postgres:
-        image: postgres:17-alpine@sha256:ff4ccc02b97e0ebb6b328ef9ff92522f95586f83be6801896b615088defc8ad2
+        image: postgis/postgis:18-3.6-alpine
         database: omniviv
         storage:
             volumeName: omniviv-postgres-data
@@ -41,6 +41,10 @@ services:
         image: ghcr.io/maplibre/martin@sha256:b51c201d4b1a2128676fbe3c8f370dae74efa49b3f14f13a0b0248ffddfdea86
         dataPath: ./data/
         cacheSeconds: 86400 # 1 day
+    osmImport:
+        image: iboates/osm2pgsql:latest
+        dataPath: ./data/  # directory containing germany-latest.osm.pbf
+        skipDownload: "false"  # set to "true" if PBF is already present
     motis:
         subdomain: omniviv-motis
         image: ghcr.io/motis-project/motis:latest@sha256:5ace015c6667bf02cc127fa94e2c944543dbe6e9ea56d8837d71d9c82530cf7f

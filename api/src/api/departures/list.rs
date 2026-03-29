@@ -2,14 +2,14 @@ use axum::{extract::State, Json};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use utoipa::ToSchema;
 
 use crate::api::ErrorResponse;
 use crate::api::state::AppState;
 use crate::api::utils::{ifopt_station_prefix, parse_reference_time};
 use crate::providers::timetables::gtfs::realtime;
-use crate::sync::Departure;
+use crate::sync::{Departure, osm_stop_id, parse_osm_stop_id};
 
 /// How many minutes of past departures to keep so that recent arrivals remain visible.
 /// See also: `SCHEDULE_PAST_WINDOW_MINUTES` in `realtime.rs` (10 min for schedule building).
@@ -40,64 +40,258 @@ fn filter_same_station_destinations(departures: Vec<Departure>, stop_ifopt: &str
 /// Filter departures by direction when a platform's OSM route has known destinations.
 /// This handles cases where a single GTFS stop serves both directions (e.g., Kulturstraße)
 /// but the OSM data distinguishes platforms A and E by their route direction.
+///
+/// Supports both IFOPT-based lookup (e.g. "de:09761:101:31:A3") and OSM ID-based
+/// lookup (e.g. "osm:12345678"). For OSM IDs, joins directly through the platform/stop_position
+/// tables by `osm_id`.
 async fn filter_by_direction(
     departures: Vec<Departure>,
-    stop_ifopt: &str,
+    stop_id: &str,
     pool: &PgPool,
 ) -> Vec<Departure> {
-    // Load OSM route destinations for this platform (extracted from route names like
-    // "Straßenbahn 1: Göggingen => Lechhausen" → destination keywords for this platform)
-    let rows: Vec<(String,)> = match sqlx::query_as(
-        r#"
-        SELECT DISTINCT r.name
-        FROM route_stops rs
-        JOIN routes r ON r.osm_id = rs.route_id
-        LEFT JOIN platforms p ON p.osm_id = rs.platform_id
-        LEFT JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
-        WHERE r.name IS NOT NULL
-          AND (p.ref_ifopt = $1 OR sp.ref_ifopt = $1)
-        "#,
-    )
-    .bind(stop_ifopt)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(_) => return departures,
+    // Load OSM route destinations for this platform, grouped by route type.
+    // Only use routes of the same transport type for direction filtering
+    // (prevents bus route names from polluting tram direction keywords).
+    let rows: Vec<(String, String)> = if let Some(osm_id) = parse_osm_stop_id(stop_id) {
+        match sqlx::query_as(
+            r#"
+            SELECT DISTINCT r.name, r.route_type
+            FROM route_stops rs
+            JOIN routes r ON r.osm_id = rs.route_id
+            WHERE r.name IS NOT NULL
+              AND (rs.platform_id = $1 OR rs.stop_position_id = $1)
+            "#,
+        )
+        .bind(osm_id)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(_) => return departures,
+        }
+    } else {
+        match sqlx::query_as(
+            r#"
+            SELECT DISTINCT r.name, r.route_type
+            FROM route_stops rs
+            JOIN routes r ON r.osm_id = rs.route_id
+            LEFT JOIN platforms p ON p.osm_id = rs.platform_id
+            LEFT JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+            WHERE r.name IS NOT NULL
+              AND (p.ref_ifopt = $1 OR sp.ref_ifopt = $1)
+            "#,
+        )
+        .bind(stop_id)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(_) => return departures,
+        }
     };
 
-    // Extract destination keywords from route names ("... => Destination")
-    let mut dest_keywords: HashSet<String> = HashSet::new();
-    for (route_name,) in &rows {
+    // Extract destination keywords from route names, grouped by OSM route_type.
+    // Only tram keywords apply to tram departures, bus keywords to bus departures, etc.
+    let mut keywords_by_type: HashMap<String, HashSet<String>> = HashMap::new();
+    for (route_name, route_type) in &rows {
         if let Some(arrow_pos) = route_name.find("=>") {
             let dest = route_name[arrow_pos + 2..].trim();
             for word in dest.split_whitespace() {
                 let normalized = word
                     .trim_matches(|c: char| !c.is_alphanumeric())
                     .to_lowercase();
-                if normalized.len() >= 3 {
-                    dest_keywords.insert(normalized);
+                if normalized.len() >= 4 {
+                    keywords_by_type
+                        .entry(route_type.clone())
+                        .or_default()
+                        .insert(normalized);
                 }
             }
         }
     }
 
-    if dest_keywords.is_empty() {
+    if keywords_by_type.is_empty() {
         return departures;
     }
 
+    // Map GTFS route_type to OSM route_type for lookup
+    fn gtfs_to_osm(gtfs_type: i32) -> &'static str {
+        match gtfs_type {
+            0 => "tram",
+            1 => "subway",
+            2 => "train",
+            3 => "bus",
+            4 => "ferry",
+            7 => "bus",
+            _ => "bus",
+        }
+    }
+
     // Filter: keep departures whose destination contains at least one keyword
+    // from the SAME transport type
     departures
         .into_iter()
         .filter(|d| {
-            let dest_lower = d.destination.to_lowercase();
-            dest_keywords.iter().any(|kw| dest_lower.contains(kw))
+            let osm_type = d.gtfs_route_type.map(|t| gtfs_to_osm(t)).unwrap_or("bus");
+            let keywords = keywords_by_type.get(osm_type);
+            match keywords {
+                Some(kws) => {
+                    let dest_lower = d.destination.to_lowercase();
+                    kws.iter().any(|kw| dest_lower.contains(kw))
+                }
+                // No keywords for this type → no filtering (let it through)
+                None => true,
+            }
         })
         .collect()
 }
 
 /// Filter out departures that are too far in the past relative to the given reference time.
 /// Departures within [`PAST_GRACE_MINUTES`] of the reference time are kept.
+/// Fill in OSM route colors for departures that have no GTFS color.
+/// Queries the OSM route serving this stop with the matching line number and route type.
+///
+/// Supports both IFOPT-based lookup (e.g. "de:09761:101:31:A3") and OSM ID-based
+/// lookup (e.g. "osm:12345678"). For OSM IDs, joins directly through the
+/// platform/stop_position tables by `osm_id`.
+async fn fill_osm_route_colors(departures: &mut [Departure], stop_id: &str, pool: &PgPool) {
+    // Collect distinct (line_number, gtfs_route_type) pairs that need colors
+    let needs_color: Vec<(String, Option<i32>)> = departures
+        .iter()
+        .filter(|d| d.color.is_none())
+        .map(|d| (d.line_number.clone(), d.gtfs_route_type))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    if needs_color.is_empty() {
+        return;
+    }
+
+    // Look up colors from OSM routes serving this stop
+    let gtfs_to_osm = |gt: i32| -> &str {
+        match gt { 0 => "tram", 1 => "subway", 2 => "train", 3 => "bus", 4 => "ferry", _ => "bus" }
+    };
+
+    #[derive(sqlx::FromRow)]
+    struct ColorRow {
+        line_ref: String,
+        route_type: String,
+        color: String,
+    }
+
+    let color_rows: Vec<ColorRow> = if let Some(osm_id) = parse_osm_stop_id(stop_id) {
+        // OSM ID-based: look up routes by the platform/stop_position osm_id directly
+        sqlx::query_as(
+            r#"
+            SELECT DISTINCT r.ref AS line_ref, r.route_type, r.color
+            FROM routes r
+            JOIN route_stops rs ON rs.route_id = r.osm_id
+            WHERE r.color IS NOT NULL
+              AND (rs.platform_id = $1 OR rs.stop_position_id = $1)
+            "#,
+        )
+        .bind(osm_id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+    } else {
+        // IFOPT-based: look up routes by ref_ifopt on platforms/stop_positions
+        sqlx::query_as(
+            r#"
+            SELECT DISTINCT r.ref AS line_ref, r.route_type, r.color
+            FROM routes r
+            JOIN route_stops rs ON rs.route_id = r.osm_id
+            LEFT JOIN platforms p ON p.osm_id = rs.platform_id
+            LEFT JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+            WHERE r.color IS NOT NULL
+              AND COALESCE(p.ref_ifopt, sp.ref_ifopt) = $1
+            "#,
+        )
+        .bind(stop_id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    // Build lookup: (line_ref, route_type) -> color
+    let mut color_map = std::collections::HashMap::new();
+    for row in &color_rows {
+        color_map.entry((row.line_ref.as_str(), row.route_type.as_str())).or_insert(&row.color);
+    }
+
+    // Apply colors to departures
+    for dep in departures.iter_mut() {
+        if dep.color.is_some() {
+            continue;
+        }
+        let osm_type = dep.gtfs_route_type.map(|t| gtfs_to_osm(t)).unwrap_or("bus");
+        if let Some(color) = color_map.get(&(dep.line_number.as_str(), osm_type)) {
+            dep.color = Some((*color).clone());
+        }
+    }
+}
+
+/// Fill colors from OSM routes nearest to the given coordinates.
+/// Used for stops without IFOPT (e.g. München U-Bahn).
+async fn fill_osm_route_colors_by_coords(departures: &mut [Departure], lat: f64, lon: f64, pool: &PgPool) {
+    let needs_color: Vec<(String, Option<i32>)> = departures
+        .iter()
+        .filter(|d| d.color.is_none())
+        .map(|d| (d.line_number.clone(), d.gtfs_route_type))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    if needs_color.is_empty() {
+        return;
+    }
+
+    let gtfs_to_osm = |gt: i32| -> &str {
+        match gt { 0 => "tram", 1 => "subway", 2 => "train", 3 => "bus", 4 => "ferry", _ => "bus" }
+    };
+
+    #[derive(sqlx::FromRow)]
+    struct ColorRow {
+        line_ref: String,
+        route_type: String,
+        color: String,
+    }
+
+    // Find OSM routes whose geometry passes near these coordinates.
+    // Use bbox pre-filter (GIST index) then precise distance check on candidates.
+    let buffer = 0.003; // ~300m in degrees
+    let color_rows: Vec<ColorRow> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT r.ref AS line_ref, r.route_type, r.color
+        FROM routes r
+        WHERE r.color IS NOT NULL AND r.ref IS NOT NULL
+          AND r.geom IS NOT NULL
+          AND r.geom && ST_Expand(ST_SetSRID(ST_MakePoint($1, $2), 4326), $3)
+          AND ST_Distance(r.geom, ST_SetSRID(ST_MakePoint($1, $2), 4326)) < $3
+        "#,
+    )
+    .bind(lon)
+    .bind(lat)
+    .bind(buffer)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut color_map = std::collections::HashMap::new();
+    for row in &color_rows {
+        color_map.entry((row.line_ref.as_str(), row.route_type.as_str())).or_insert(&row.color);
+    }
+
+    for dep in departures.iter_mut() {
+        if dep.color.is_some() { continue; }
+        let osm_type = dep.gtfs_route_type.map(|t| gtfs_to_osm(t)).unwrap_or("bus");
+        if let Some(color) = color_map.get(&(dep.line_number.as_str(), osm_type)) {
+            dep.color = Some((*color).clone());
+        }
+    }
+}
+
 fn filter_past_departures(departures: Vec<Departure>, reference_time: DateTime<Utc>) -> Vec<Departure> {
     let cutoff = reference_time - Duration::minutes(PAST_GRACE_MINUTES);
     departures
@@ -140,7 +334,14 @@ pub struct GtfsStopDeparturesResponse {
     pub departures: Vec<Departure>,
 }
 
-/// Get departures for a specific stop by IFOPT ID
+/// Get departures for a specific stop by IFOPT ID or OSM stop ID.
+///
+/// Accepts both IFOPT strings (e.g. "de:09761:101:31:A3") and OSM-based
+/// identifiers (e.g. "osm:12345678") in the `stop_ifopt` field.
+///
+/// For OSM IDs, queries `osm_gtfs_stop_mapping` by `osm_id`.
+/// For IFOPT strings, queries `osm_gtfs_stop_mapping` by `ref_ifopt`,
+/// falling back to the legacy `ifopt_gtfs_mapping` table.
 #[utoipa::path(
     post,
     path = "/api/departures/by-stop",
@@ -159,15 +360,56 @@ pub async fn get_departures_by_stop(
 
     let ref_time = simulated_time.unwrap_or_else(Utc::now);
 
+    // Resolve the stop_ifopt to a canonical stop_id used for departure store
+    // and schedule lookups, and find the mapped GTFS stop ID.
+    let stop_id = &request.stop_ifopt;
+
+    // Look up the mapped GTFS stop ID via osm_gtfs_stop_mapping
+    let mapped_gtfs_stop_id: Option<String> = if let Some(osm_id) = parse_osm_stop_id(stop_id) {
+        // OSM ID-based: query by osm_id
+        sqlx::query_scalar(
+            "SELECT gtfs_stop_id FROM osm_gtfs_stop_mapping WHERE osm_id = $1 LIMIT 1",
+        )
+        .bind(osm_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()
+    } else {
+        // IFOPT-based: query by ref_ifopt in osm_gtfs_stop_mapping first,
+        // fall back to legacy ifopt_gtfs_mapping for backwards compatibility
+        let from_new_table: Option<String> = sqlx::query_scalar(
+            "SELECT gtfs_stop_id FROM osm_gtfs_stop_mapping WHERE ref_ifopt = $1 LIMIT 1",
+        )
+        .bind(stop_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten();
+
+        if from_new_table.is_some() {
+            from_new_table
+        } else {
+            sqlx::query_scalar(
+                "SELECT gtfs_stop_id FROM ifopt_gtfs_mapping WHERE ifopt = $1",
+            )
+            .bind(stop_id)
+            .fetch_optional(&state.pool)
+            .await
+            .ok()
+            .flatten()
+        }
+    };
+
     // Always compute schedule-based departures with the longer stop board horizon
     // so the popup shows upcoming events even when the real-time feed has no data
     // (e.g., late at night when trams have stopped running).
-    let stop_ids = HashSet::from([request.stop_ifopt.clone()]);
+    let stop_ids = HashSet::from([stop_id.clone()]);
 
     let mut departures = if simulated_time.is_none() {
         // Start with real-time departure store (has estimated times and delays)
         let store = state.departure_store.read().await;
-        store.get(&request.stop_ifopt).cloned().unwrap_or_default()
+        store.get(stop_id).cloned().unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -184,7 +426,7 @@ pub async fn get_departures_by_stop(
                 time_horizon,
                 state.timezone,
             );
-            let schedule_deps = schedule_departures.get(&request.stop_ifopt).cloned().unwrap_or_default();
+            let schedule_deps = schedule_departures.get(stop_id).cloned().unwrap_or_default();
 
             // Collect trip_ids already in real-time data to avoid duplicates
             let rt_trip_ids: HashSet<String> = departures.iter()
@@ -202,24 +444,18 @@ pub async fn get_departures_by_stop(
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, stop_ifopt = %request.stop_ifopt, "Failed to build schedule from DB for stop departures");
+            tracing::warn!(error = %e, stop_id = %stop_id, "Failed to build schedule from DB for stop departures");
         }
     }
 
     departures.sort_by(|a, b| a.planned_time.cmp(&b.planned_time));
     let departures = filter_past_departures(departures, ref_time);
-    let departures = filter_same_station_destinations(departures, &request.stop_ifopt);
-    let departures = filter_by_direction(departures, &request.stop_ifopt, &state.pool).await;
+    let departures = filter_same_station_destinations(departures, stop_id);
+    let mut departures = filter_by_direction(departures, stop_id, &state.pool).await;
 
-    // Look up the mapped GTFS stop ID for this IFOPT
-    let mapped_gtfs_stop_id: Option<String> = sqlx::query_scalar(
-        "SELECT gtfs_stop_id FROM ifopt_gtfs_mapping WHERE ifopt = $1",
-    )
-    .bind(&request.stop_ifopt)
-    .fetch_optional(&state.pool)
-    .await
-    .ok()
-    .flatten();
+    // Fill in colors from OSM route data for departures without GTFS color.
+    // Looks up the OSM route that serves this stop with the matching line number.
+    fill_osm_route_colors(&mut departures, stop_id, &state.pool).await;
 
     Json(StopDeparturesResponse {
         stop_ifopt: request.stop_ifopt,
@@ -280,6 +516,210 @@ pub async fn get_departures_by_gtfs_stop(
     })
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CoordinateDeparturesRequest {
+    pub lat: f64,
+    pub lon: f64,
+    pub reference_time: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct OsmIdDeparturesRequest {
+    pub osm_id: i64,
+    pub reference_time: Option<String>,
+}
+
+/// Find departures for an OSM stop position/platform by its osm_id.
+///
+/// Primary path: query `osm_gtfs_stop_mapping` directly for the GTFS stop ID.
+/// This is the most efficient path and works for all mapped stops regardless of
+/// whether they have IFOPT tags.
+///
+/// Fallback: if no mapping exists, look up coordinates from the OSM element and
+/// use coordinate-based GTFS stop lookup.
+#[utoipa::path(
+    post,
+    path = "/api/departures/by-osm-id",
+    request_body = OsmIdDeparturesRequest,
+    responses(
+        (status = 200, description = "Departures for OSM stop", body = GtfsStopDeparturesResponse),
+    ),
+    tag = "departures"
+)]
+pub async fn get_departures_by_osm_id(
+    State(state): State<AppState>,
+    Json(request): Json<OsmIdDeparturesRequest>,
+) -> Json<GtfsStopDeparturesResponse> {
+    // Primary path: query osm_gtfs_stop_mapping directly for this OSM ID
+    #[derive(sqlx::FromRow)]
+    struct MappingRow {
+        gtfs_stop_id: String,
+        ref_ifopt: Option<String>,
+    }
+
+    let mapping: Option<MappingRow> = sqlx::query_as(
+        "SELECT gtfs_stop_id, ref_ifopt FROM osm_gtfs_stop_mapping WHERE osm_id = $1 LIMIT 1",
+    )
+    .bind(request.osm_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+
+    if let Some(mapping) = mapping {
+        // Use the osm:{id} stop identifier for the departure store and direction/color lookups
+        let stop_id = osm_stop_id(request.osm_id);
+
+        // Delegate to get_departures_by_stop which handles schedule cache, RT data,
+        // direction filtering, and color filling. If the stop has an IFOPT, prefer that
+        // as the departure store key since existing RT data is indexed by IFOPT.
+        let lookup_id = mapping.ref_ifopt.clone().unwrap_or_else(|| stop_id.clone());
+
+        let response = get_departures_by_stop(
+            State(state.clone()),
+            Json(StopDeparturesRequest {
+                stop_ifopt: lookup_id,
+                reference_time: request.reference_time.clone(),
+            }),
+        )
+        .await;
+        let data = response.0;
+
+        // If the IFOPT-based lookup returned a GTFS stop ID, use it; otherwise use
+        // the one from our direct mapping query.
+        let gtfs_stop_id = data.mapped_gtfs_stop_id
+            .unwrap_or(mapping.gtfs_stop_id);
+
+        return Json(GtfsStopDeparturesResponse {
+            gtfs_stop_id,
+            departures: data.departures,
+        });
+    }
+
+    // Fallback: no mapping found — look up coordinates from OSM element and use
+    // coordinate-based GTFS stop lookup
+    #[derive(sqlx::FromRow)]
+    struct OsmStopCoords {
+        lat: f64,
+        lon: f64,
+    }
+
+    let coords: Option<OsmStopCoords> = sqlx::query_as(
+        r#"
+        SELECT lat, lon FROM stop_positions WHERE osm_id = $1
+        UNION ALL
+        SELECT lat, lon FROM platforms WHERE osm_id = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(request.osm_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+
+    match coords {
+        Some(coords) => {
+            get_departures_by_coordinates(
+                State(state),
+                Json(CoordinateDeparturesRequest {
+                    lat: coords.lat,
+                    lon: coords.lon,
+                    reference_time: request.reference_time,
+                }),
+            )
+            .await
+        }
+        None => {
+            tracing::debug!(osm_id = request.osm_id, "No OSM stop found for osm_id");
+            Json(GtfsStopDeparturesResponse {
+                gtfs_stop_id: String::new(),
+                departures: vec![],
+            })
+        }
+    }
+}
+
+/// Find the nearest GTFS stop by coordinates and return its departures.
+/// Used for stops without ref:IFOPT in OSM (e.g. München U-Bahn).
+#[utoipa::path(
+    post,
+    path = "/api/departures/by-coordinates",
+    request_body = CoordinateDeparturesRequest,
+    responses(
+        (status = 200, description = "Departures for nearest stop", body = GtfsStopDeparturesResponse),
+    ),
+    tag = "departures"
+)]
+pub async fn get_departures_by_coordinates(
+    State(state): State<AppState>,
+    Json(request): Json<CoordinateDeparturesRequest>,
+) -> Json<GtfsStopDeparturesResponse> {
+    // Find the nearest GTFS stop that has actual departures (stop_times)
+    let nearest: Option<(String,)> = sqlx::query_as(
+        r#"
+        SELECT stop_id FROM gtfs_stops
+        WHERE geom IS NOT NULL
+          AND EXISTS (SELECT 1 FROM gtfs_stop_times WHERE stop_id = gtfs_stops.stop_id LIMIT 1)
+        ORDER BY geom <-> ST_SetSRID(ST_MakePoint($1, $2), 4326)
+        LIMIT 1
+        "#,
+    )
+    .bind(request.lon)
+    .bind(request.lat)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let gtfs_stop_id = match nearest {
+        Some((id,)) => id,
+        None => {
+            return Json(GtfsStopDeparturesResponse {
+                gtfs_stop_id: String::new(),
+                departures: vec![],
+            });
+        }
+    };
+
+    // Reuse the existing GTFS stop departure logic
+    let simulated_time = parse_reference_time(&request.reference_time);
+    let ref_time = simulated_time.unwrap_or_else(Utc::now);
+
+    let mut stop_ids = HashSet::new();
+    stop_ids.insert(gtfs_stop_id.clone());
+
+    let departures =
+        match state.schedule_cache.get_or_build_by_gtfs_stop(&state.pool, &stop_ids).await {
+            Ok(schedule) => {
+                let time_horizon = Duration::minutes(STOP_BOARD_HORIZON_MINUTES);
+                let all_departures = realtime::compute_schedule_departures(
+                    &schedule,
+                    &stop_ids,
+                    ref_time,
+                    time_horizon,
+                    state.timezone,
+                );
+                let mut deps = all_departures.get(&gtfs_stop_id).cloned().unwrap_or_default();
+                deps.sort_by(|a, b| a.planned_time.cmp(&b.planned_time));
+                filter_past_departures(deps, ref_time)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to build schedule for coordinate-based departures");
+                vec![]
+            }
+        };
+
+    // Fill colors from nearest OSM routes by geometry proximity
+    let mut departures = departures;
+    fill_osm_route_colors_by_coords(&mut departures, request.lat, request.lon, &state.pool).await;
+
+    Json(GtfsStopDeparturesResponse {
+        gtfs_stop_id,
+        departures,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +741,8 @@ mod tests {
             platform: None,
             trip_id: Some("trip_1".to_string()),
             cancelled: false,
+            gtfs_route_type: Some(1),
+            color: None,
         }
     }
 
