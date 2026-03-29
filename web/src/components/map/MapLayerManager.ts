@@ -32,7 +32,7 @@ export class MapLayerManager {
      */
     setupLayers(): void {
         // Guard against duplicate setup (e.g. style reload, hot module reload)
-        if (this.map.getSource("stations")) return;
+        if (this.map.getSource("transit-stations")) return;
 
         // Set up on-demand handler for subclass names not in the Maki bundle
         this.setupPoiIconHandler();
@@ -70,22 +70,36 @@ export class MapLayerManager {
             layout: { "line-cap": "round", "line-join": "round" },
         }, "3d-buildings");
 
-        // Platform connections (only visible when very zoomed in)
+        // Stations + stops — vector tiles from Martin (PostGIS transit_stations function)
+        this.map.addSource("transit-stations", {
+            type: "vector",
+            tiles: [`${this.martinUrl}/transit_stations/{z}/{x}/{y}`],
+        });
+
+        // Stop positions (from vector tiles, z15+)
+        this.map.addLayer({
+            id: "stops-circle", type: "circle",
+            source: "transit-stations", "source-layer": "stops",
+            minzoom: 15,
+            paint: { "circle-radius": 5, "circle-color": "#666", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" },
+        });
+        this.map.addLayer({
+            id: "stops-label", type: "symbol",
+            source: "transit-stations", "source-layer": "stops",
+            minzoom: 16,
+            layout: { "text-field": ["coalesce", ["get", "ref"], ["get", "name"]], "text-font": ["Open Sans Regular"], "text-size": 10, "text-offset": [0, 0.9], "text-anchor": "top" },
+            paint: { "text-color": "#333", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
+        });
+
+        // Legacy GeoJSON sources kept for mapping visualization and click handlers
         this.map.addSource("platform-connections", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
         this.map.addLayer({ id: "platform-connections-line", type: "line", source: "platform-connections", minzoom: 15, paint: { "line-color": "#888", "line-width": 1, "line-opacity": 0.5 } });
-
-        // Platforms (grey circles) — only when very zoomed in
         this.map.addSource("platforms", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-        this.map.addLayer({ id: "platforms-circle", type: "circle", source: "platforms", minzoom: 15, paint: { "circle-radius": 5, "circle-color": "#666", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" } });
-        this.map.addLayer({ id: "platforms-label", type: "symbol", source: "platforms", minzoom: 16, layout: { "text-field": ["get", "name"], "text-font": ["Open Sans Regular"], "text-size": 10, "text-offset": [0, 0.9], "text-anchor": "top" }, paint: { "text-color": "#333", "text-halo-color": "#ffffff", "text-halo-width": 1.5 } });
-
-        // Stop positions (blue squares) — only when very zoomed in
+        this.map.addLayer({ id: "platforms-circle", type: "circle", source: "platforms", minzoom: 15, paint: { "circle-radius": 5, "circle-color": "#666", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" }, layout: { visibility: "none" } });
         this.map.addSource("stop-positions", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-        this.map.addLayer({ id: "stop-positions-marker", type: "circle", source: "stop-positions", minzoom: 15, paint: { "circle-radius": 4, "circle-color": "#3b82f6", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" } });
-
-        // Platform elements (orange squares) — only when very zoomed in
+        this.map.addLayer({ id: "stop-positions-marker", type: "circle", source: "stop-positions", minzoom: 15, paint: { "circle-radius": 4, "circle-color": "#3b82f6", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" }, layout: { visibility: "none" } });
         this.map.addSource("platform-elements", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-        this.map.addLayer({ id: "platform-elements-marker", type: "circle", source: "platform-elements", minzoom: 15, paint: { "circle-radius": 4, "circle-color": "#f97316", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" } });
+        this.map.addLayer({ id: "platform-elements-marker", type: "circle", source: "platform-elements", minzoom: 15, paint: { "circle-radius": 4, "circle-color": "#f97316", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" }, layout: { visibility: "none" } });
 
         // Hide the base map's rail layer — our transit route tiles replace it
         if (this.map.getLayer("rail")) {
@@ -109,10 +123,21 @@ export class MapLayerManager {
             paint: { "text-color": "#ef4444", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
         });
 
-        // Stations — filtered by min_zoom property (rail=6, tram=10, bus=13)
-        this.map.addSource("stations", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-        this.map.addLayer({ id: "stations-circle", type: "circle", source: "stations", filter: ["<=", ["get", "min_zoom"], ["zoom"]], paint: { "circle-radius": 6, "circle-color": "#525252", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" } });
-        this.map.addLayer({ id: "stations-label", type: "symbol", source: "stations", minzoom: 8, filter: ["<=", ["get", "min_zoom"], ["zoom"]], layout: { "text-field": ["get", "name"], "text-font": ["Open Sans Regular"], "text-size": 12, "text-offset": [0, 1.5], "text-anchor": "top" }, paint: { "text-color": "#065f46", "text-halo-color": "#ffffff", "text-halo-width": 2 } });
+        // Stations — from vector tiles, filtered by min_zoom property
+        this.map.addLayer({
+            id: "stations-circle", type: "circle",
+            source: "transit-stations", "source-layer": "stations",
+            filter: ["<=", ["get", "min_zoom"], ["zoom"]],
+            paint: { "circle-radius": 6, "circle-color": "#525252", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" },
+        });
+        this.map.addLayer({
+            id: "stations-label", type: "symbol",
+            source: "transit-stations", "source-layer": "stations",
+            minzoom: 8,
+            filter: ["<=", ["get", "min_zoom"], ["zoom"]],
+            layout: { "text-field": ["get", "name"], "text-font": ["Open Sans Regular"], "text-size": 12, "text-offset": [0, 1.5], "text-anchor": "top" },
+            paint: { "text-color": "#065f46", "text-halo-color": "#ffffff", "text-halo-width": 2 },
+        });
 
         // Debug: route segments visualization (ahead=green, behind=red) - added before 3D models so it renders underneath
         this.map.addSource("debug-segments", { type: "geojson", data: { type: "FeatureCollection", features: [] } });

@@ -640,6 +640,8 @@ export default class Map extends React.Component<MapProps, MapState> {
         // Hover cursors
         this.map.on("mouseenter", "stations-circle", () => { if (this.map) this.map.getCanvas().style.cursor = "pointer"; });
         this.map.on("mouseleave", "stations-circle", () => { if (this.map) this.map.getCanvas().style.cursor = ""; });
+        this.map.on("mouseenter", "stops-circle", () => { if (this.map) this.map.getCanvas().style.cursor = "pointer"; });
+        this.map.on("mouseleave", "stops-circle", () => { if (this.map) this.map.getCanvas().style.cursor = ""; });
         this.map.on("mouseenter", "platforms-circle", () => { if (this.map) this.map.getCanvas().style.cursor = "pointer"; });
         this.map.on("mouseleave", "platforms-circle", () => { if (this.map) this.map.getCanvas().style.cursor = ""; });
         this.map.on("mouseenter", "mapping-gtfs-circle", () => { if (this.map) this.map.getCanvas().style.cursor = "pointer"; });
@@ -648,11 +650,15 @@ export default class Map extends React.Component<MapProps, MapState> {
         this.map.on("mouseleave", "vehicles-marker", () => { if (this.map) this.map.getCanvas().style.cursor = ""; });
 
         // Station click
-        this.map.on("click", "stations-circle", (e) => {
+        // Station click — load details from API on demand
+        this.map.on("click", "stations-circle", async (e) => {
             if (!e.features || e.features.length === 0) return;
             const feature = e.features[0];
             const coordinates = (feature.geometry as GeoJSON.Point).coordinates.slice() as [number, number];
             const osmId = feature.properties?.osm_id;
+            const stationName = feature.properties?.name ?? "Station";
+
+            // Try to find station in props first (for backwards compat)
             const station = this.props.stations.find((s) => s.osm_id === osmId);
             if (station) {
                 const handlePlatformClick = (platform: StationPlatform | StationStopPosition) => {
@@ -660,10 +666,39 @@ export default class Map extends React.Component<MapProps, MapState> {
                     this.showPopup(platformCoords, <PlatformPopup platform={platform} stationName={station.name ?? undefined} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(platform.osm_id))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} />);
                 };
                 this.showPopup(coordinates, <StationPopup station={station} onPlatformClick={handlePlatformClick} onClose={() => this.popup?.remove()} />);
+                return;
             }
+
+            // Station not in props (loaded via vector tiles) — show name from tile
+            this.showPopup(coordinates, <div className="p-3 font-semibold">{stationName}</div>);
         });
 
-        // Platform click
+        // Stop position click (from vector tiles) — show departure monitor directly
+        this.map.on("click", "stops-circle", (e) => {
+            if (!e.features || e.features.length === 0) return;
+            const feature = e.features[0];
+            const coordinates = (feature.geometry as GeoJSON.Point).coordinates.slice() as [number, number];
+            const osmId = feature.properties?.osm_id;
+            const ref = feature.properties?.ref;
+            const name = feature.properties?.name;
+            const refIfopt = feature.properties?.ref_ifopt;
+            const displayName = ref || name || `Stop ${osmId}`;
+
+            // Build a synthetic platform object from tile properties
+            const platform = {
+                osm_id: osmId,
+                name: name ?? null,
+                ref: ref ?? null,
+                ref_ifopt: refIfopt ?? null,
+                lat: coordinates[1],
+                lon: coordinates[0],
+                gtfs_stop_ids: [],
+            };
+            const stationName = feature.properties?.station_name ?? undefined;
+            this.showPopup(coordinates, <PlatformPopup platform={platform} stationName={stationName} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(osmId))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} />);
+        });
+
+        // Legacy platform click (GeoJSON, for mapping mode)
         this.map.on("click", "platforms-circle", (e) => {
             if (!e.features || e.features.length === 0) return;
             const feature = e.features[0];
