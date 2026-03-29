@@ -112,19 +112,30 @@ async fn filter_by_direction(
         }
     }
 
-    // Filter: only keep departures whose line number is in the allowed set for that type
-    departures
-        .into_iter()
+    // Collect all allowed line numbers across all types
+    let _all_allowed: HashSet<&String> = allowed_lines_by_type.values().flat_map(|s| s.iter()).collect();
+
+    // Filter: only keep departures whose line number matches an OSM route at this platform.
+    // BUT: if NO departures match any OSM route (e.g. replacement service B6 for Tram 6),
+    // then let ALL departures through — better to show something than nothing.
+    let filtered: Vec<Departure> = departures
+        .iter()
         .filter(|d| {
             let osm_type = d.gtfs_route_type.map(|t| gtfs_to_osm(t)).unwrap_or("bus");
             match allowed_lines_by_type.get(osm_type) {
                 Some(allowed) => allowed.contains(&d.line_number),
-                // No OSM routes of this type at this platform → let it through
-                // (e.g. bus departures at a tram-only platform from GTFS data)
                 None => true,
             }
         })
-        .collect()
+        .cloned()
+        .collect();
+
+    // If filtering removed ALL departures, the GTFS data doesn't match OSM
+    // (e.g. replacement bus service). Return unfiltered in that case.
+    if filtered.is_empty() && !departures.is_empty() {
+        return departures;
+    }
+    filtered
 }
 
 /// Filter out departures that are too far in the past relative to the given reference time.
