@@ -37,28 +37,24 @@ fn filter_same_station_destinations(departures: Vec<Departure>, stop_ifopt: &str
         .collect()
 }
 
-/// Filter departures by direction when a platform's OSM route has known destinations.
-/// This handles cases where a single GTFS stop serves both directions (e.g., Kulturstraße)
-/// but the OSM data distinguishes platforms A and E by their route direction.
+/// Filter departures by the line numbers (refs) of OSM routes serving this platform.
 ///
-/// Supports both IFOPT-based lookup (e.g. "de:09761:101:31:A3") and OSM ID-based
-/// lookup (e.g. "osm:12345678"). For OSM IDs, joins directly through the platform/stop_position
-/// tables by `osm_id`.
+/// OSM route relations tell us exactly which lines stop at each platform.
+/// For example, A3 at Königsplatz only has "Straßenbahn 4" → only tram 4 departures.
+/// This is more precise than keyword matching on destination names.
 async fn filter_by_direction(
     departures: Vec<Departure>,
     stop_id: &str,
     pool: &PgPool,
 ) -> Vec<Departure> {
-    // Load OSM route destinations for this platform, grouped by route type.
-    // Only use routes of the same transport type for direction filtering
-    // (prevents bus route names from polluting tram direction keywords).
+    // Load line numbers (refs) of OSM routes serving this platform, grouped by type.
     let rows: Vec<(String, String)> = if let Some(osm_id) = parse_osm_stop_id(stop_id) {
         match sqlx::query_as(
             r#"
-            SELECT DISTINCT r.name, r.route_type
+            SELECT DISTINCT r.ref, r.route_type
             FROM route_stops rs
             JOIN routes r ON r.osm_id = rs.route_id
-            WHERE r.name IS NOT NULL
+            WHERE r.ref IS NOT NULL
               AND (rs.platform_id = $1 OR rs.stop_position_id = $1)
             "#,
         )
@@ -72,12 +68,12 @@ async fn filter_by_direction(
     } else {
         match sqlx::query_as(
             r#"
-            SELECT DISTINCT r.name, r.route_type
+            SELECT DISTINCT r.ref, r.route_type
             FROM route_stops rs
             JOIN routes r ON r.osm_id = rs.route_id
             LEFT JOIN platforms p ON p.osm_id = rs.platform_id
             LEFT JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
-            WHERE r.name IS NOT NULL
+            WHERE r.ref IS NOT NULL
               AND (p.ref_ifopt = $1 OR sp.ref_ifopt = $1)
             "#,
         )
@@ -90,31 +86,20 @@ async fn filter_by_direction(
         }
     };
 
-    // Extract destination keywords from route names, grouped by OSM route_type.
-    // Only tram keywords apply to tram departures, bus keywords to bus departures, etc.
-    let mut keywords_by_type: HashMap<String, HashSet<String>> = HashMap::new();
-    for (route_name, route_type) in &rows {
-        if let Some(arrow_pos) = route_name.find("=>") {
-            let dest = route_name[arrow_pos + 2..].trim();
-            for word in dest.split_whitespace() {
-                let normalized = word
-                    .trim_matches(|c: char| !c.is_alphanumeric())
-                    .to_lowercase();
-                if normalized.len() >= 4 {
-                    keywords_by_type
-                        .entry(route_type.clone())
-                        .or_default()
-                        .insert(normalized);
-                }
-            }
-        }
-    }
-
-    if keywords_by_type.is_empty() {
+    if rows.is_empty() {
         return departures;
     }
 
-    // Map GTFS route_type to OSM route_type for lookup
+    // Build allowed line numbers per transport type
+    // e.g. tram: {"4"}, bus: {"44", "91"}
+    let mut allowed_lines_by_type: HashMap<String, HashSet<String>> = HashMap::new();
+    for (route_ref, route_type) in &rows {
+        allowed_lines_by_type
+            .entry(route_type.clone())
+            .or_default()
+            .insert(route_ref.clone());
+    }
+
     fn gtfs_to_osm(gtfs_type: i32) -> &'static str {
         match gtfs_type {
             0 => "tram",
@@ -127,19 +112,15 @@ async fn filter_by_direction(
         }
     }
 
-    // Filter: keep departures whose destination contains at least one keyword
-    // from the SAME transport type
+    // Filter: only keep departures whose line number is in the allowed set for that type
     departures
         .into_iter()
         .filter(|d| {
             let osm_type = d.gtfs_route_type.map(|t| gtfs_to_osm(t)).unwrap_or("bus");
-            let keywords = keywords_by_type.get(osm_type);
-            match keywords {
-                Some(kws) => {
-                    let dest_lower = d.destination.to_lowercase();
-                    kws.iter().any(|kw| dest_lower.contains(kw))
-                }
-                // No keywords for this type → no filtering (let it through)
+            match allowed_lines_by_type.get(osm_type) {
+                Some(allowed) => allowed.contains(&d.line_number),
+                // No OSM routes of this type at this platform → let it through
+                // (e.g. bus departures at a tram-only platform from GTFS data)
                 None => true,
             }
         })
