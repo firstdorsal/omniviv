@@ -364,69 +364,104 @@ pub async fn get_departures_by_stop(
     // and schedule lookups, and find the mapped GTFS stop ID.
     let stop_id = &request.stop_ifopt;
 
-    // Look up the mapped GTFS stop ID via osm_gtfs_stop_mapping
-    let mapped_gtfs_stop_id: Option<String> = if let Some(osm_id) = parse_osm_stop_id(stop_id) {
-        // OSM ID-based: query by osm_id
+    // Look up ALL mapped GTFS stop IDs for this stop.
+    // A platform may have multiple stop_positions, each mapped to different GTFS stops
+    // serving different lines (e.g., one for tram, one for bus at the same platform).
+    let all_gtfs_ids: Vec<String> = if let Some(osm_id) = parse_osm_stop_id(stop_id) {
         sqlx::query_scalar(
-            "SELECT gtfs_stop_id FROM osm_gtfs_stop_mapping WHERE osm_id = $1 LIMIT 1",
+            "SELECT DISTINCT gtfs_stop_id FROM osm_gtfs_stop_mapping WHERE osm_id = $1",
         )
         .bind(osm_id)
-        .fetch_optional(&state.pool)
+        .fetch_all(&state.pool)
         .await
-        .ok()
-        .flatten()
+        .unwrap_or_default()
     } else {
-        // IFOPT-based: query by ref_ifopt in osm_gtfs_stop_mapping first,
-        // fall back to legacy ifopt_gtfs_mapping for backwards compatibility
-        let from_new_table: Option<String> = sqlx::query_scalar(
-            "SELECT gtfs_stop_id FROM osm_gtfs_stop_mapping WHERE ref_ifopt = $1 LIMIT 1",
+        let from_new: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT gtfs_stop_id FROM osm_gtfs_stop_mapping WHERE ref_ifopt = $1",
         )
         .bind(stop_id)
-        .fetch_optional(&state.pool)
+        .fetch_all(&state.pool)
         .await
-        .ok()
-        .flatten();
+        .unwrap_or_default();
 
-        if from_new_table.is_some() {
-            from_new_table
+        if !from_new.is_empty() {
+            from_new
         } else {
             sqlx::query_scalar(
                 "SELECT gtfs_stop_id FROM ifopt_gtfs_mapping WHERE ifopt = $1",
             )
             .bind(stop_id)
-            .fetch_optional(&state.pool)
+            .fetch_all(&state.pool)
             .await
-            .ok()
-            .flatten()
+            .unwrap_or_default()
         }
     };
 
-    // Always compute schedule-based departures with the longer stop board horizon
-    // so the popup shows upcoming events even when the real-time feed has no data
-    // (e.g., late at night when trams have stopped running).
-    let stop_ids = HashSet::from([stop_id.clone()]);
+    let mapped_gtfs_stop_id = all_gtfs_ids.first().cloned();
+
+    // Build stop IDs set including all GTFS stop IDs for this IFOPT.
+    // A platform may have multiple stop_positions, each mapped to different GTFS stops.
+    let mut stop_ids = HashSet::from([stop_id.clone()]);
+    // Also add osm-based IDs so the schedule cache resolves all GTFS stops
+    for gtfs_id in &all_gtfs_ids {
+        // Find osm_ids that map to this gtfs_stop_id
+        let osm_ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT osm_id FROM osm_gtfs_stop_mapping WHERE gtfs_stop_id = $1 AND ref_ifopt = $2",
+        )
+        .bind(gtfs_id)
+        .bind(stop_id)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+        for oid in osm_ids {
+            stop_ids.insert(osm_stop_id(oid));
+        }
+    }
 
     let mut departures = if simulated_time.is_none() {
         // Start with real-time departure store (has estimated times and delays)
         let store = state.departure_store.read().await;
-        store.get(stop_id).cloned().unwrap_or_default()
+        // Collect from all matching stop IDs
+        let mut deps = Vec::new();
+        for sid in &stop_ids {
+            if let Some(d) = store.get(sid) {
+                deps.extend(d.clone());
+            }
+        }
+        deps
     } else {
         Vec::new()
     };
 
-    // Supplement with schedule-based departures to fill the 12-hour window.
-    // This adds trips that aren't in the real-time store (e.g., next morning).
-    match state.schedule_cache.get_or_build(&state.pool, &stop_ids).await {
+    // Supplement with schedule-based departures using GTFS stop IDs directly.
+    // This ensures all mapped GTFS stops are included (not just the first one).
+    let gtfs_stop_set: HashSet<String> = all_gtfs_ids.iter().cloned().collect();
+    let schedule_result = crate::providers::timetables::gtfs::static_data::db::build_schedule_from_db_by_gtfs_stop(
+        &state.pool,
+        &gtfs_stop_set,
+    ).await;
+    match schedule_result {
         Ok(schedule) => {
             let time_horizon = Duration::minutes(STOP_BOARD_HORIZON_MINUTES);
+            // Include GTFS stop IDs themselves as lookup keys since
+            // build_schedule_from_db_by_gtfs_stop keys departures by GTFS stop ID
+            let mut combined_stop_ids = stop_ids.clone();
+            for gtfs_id in &all_gtfs_ids {
+                combined_stop_ids.insert(gtfs_id.clone());
+            }
             let schedule_departures = realtime::compute_schedule_departures(
                 &schedule,
-                &stop_ids,
+                &combined_stop_ids,
                 ref_time,
                 time_horizon,
                 state.timezone,
             );
-            let schedule_deps = schedule_departures.get(stop_id).cloned().unwrap_or_default();
+            let mut schedule_deps: Vec<Departure> = Vec::new();
+            for sid in &combined_stop_ids {
+                if let Some(deps) = schedule_departures.get(sid.as_str()) {
+                    schedule_deps.extend(deps.clone());
+                }
+            }
 
             // Collect trip_ids already in real-time data to avoid duplicates
             let rt_trip_ids: HashSet<String> = departures.iter()

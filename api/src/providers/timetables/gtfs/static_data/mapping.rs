@@ -720,8 +720,10 @@ pub(crate) async fn build_ifopt_mapping_to_db(
         JOIN gtfs_trips gt ON gt.trip_id = st.trip_id
         JOIN gtfs_routes gr ON gr.route_id = gt.route_id
         JOIN gtfs_stops gs ON gs.stop_id = st.stop_id
+        JOIN gtfs_calendar gc ON gc.service_id = gt.service_id
         WHERE gr.route_short_name IS NOT NULL
           AND gs.lat IS NOT NULL AND gs.lon IS NOT NULL
+          AND gc.start_date <= CURRENT_DATE AND gc.end_date >= CURRENT_DATE
         "#,
     )
     .fetch_all(pool)
