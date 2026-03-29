@@ -636,14 +636,15 @@ pub(crate) async fn build_ifopt_mapping_to_db(
     }
 
     // --- Step 2: Load OSM route->stop relationships ---
-    // Each row: (osm_route_id, route_ref, route_type, stop_osm_id, stop_osm_type, stop_lat, stop_lon)
+    // Each row: (route_osm_id, route_ref, route_type, route_name, stop_osm_id, stop_osm_type, stop_lat, stop_lon)
     info!("Loading OSM route->stop relationships...");
-    let osm_route_stop_rows: Vec<(i64, String, String, i64, String, f64, f64)> = sqlx::query_as(
+    let osm_route_stop_rows: Vec<(i64, String, String, Option<String>, i64, String, f64, f64)> = sqlx::query_as(
         r#"
         SELECT
             r.osm_id AS route_osm_id,
             r.ref AS route_ref,
             r.route_type,
+            r.name AS route_name,
             p.osm_id AS stop_osm_id,
             'platform' AS stop_osm_type,
             p.lat, p.lon
@@ -656,6 +657,7 @@ pub(crate) async fn build_ifopt_mapping_to_db(
             r.osm_id AS route_osm_id,
             r.ref AS route_ref,
             r.route_type,
+            r.name AS route_name,
             sp.osm_id AS stop_osm_id,
             'stop_position' AS stop_osm_type,
             sp.lat, sp.lon
@@ -668,8 +670,9 @@ pub(crate) async fn build_ifopt_mapping_to_db(
     .fetch_all(pool)
     .await?;
 
-    // Group OSM stops by route key (ref, transport_type)
-    // Each entry: list of (osm_id, osm_type, lat, lon)
+    // Group OSM stops by individual OSM route (route_osm_id).
+    // Each OSM route relation represents one direction (e.g. "Tram 6: Stadtbergen => Friedberg").
+    // This preserves direction information for matching against GTFS trips.
     struct OsmRouteStop {
         osm_id: i64,
         osm_type: String,
@@ -677,29 +680,55 @@ pub(crate) async fn build_ifopt_mapping_to_db(
         lon: f64,
     }
 
-    let mut osm_routes_grouped: HashMap<RouteIdentifier, Vec<OsmRouteStop>> = HashMap::new();
-    let mut osm_stop_seen: HashSet<(i64, String, String, TransportType)> = HashSet::new();
+    struct OsmRouteInfo {
+        route_osm_id: i64,
+        line_ref: String,
+        transport_type: TransportType,
+        /// Destination keywords extracted from route name (e.g. "Friedberg", "West")
+        dest_keywords: HashSet<String>,
+        stops: Vec<OsmRouteStop>,
+    }
 
-    for (_, route_ref, route_type, stop_osm_id, stop_osm_type, lat, lon) in &osm_route_stop_rows {
+    let mut osm_routes: HashMap<i64, OsmRouteInfo> = HashMap::new();
+
+    for (route_osm_id, route_ref, route_type, route_name, stop_osm_id, stop_osm_type, lat, lon) in &osm_route_stop_rows {
         let transport_type = transport_type_from_route(route_type);
-        let route_key = RouteIdentifier {
-            line_ref: route_ref.clone(),
-            transport_type,
-        };
-        // Deduplicate: same stop can appear multiple times on the same logical route
-        // (e.g. from multiple OSM route relations for same line+direction)
-        if osm_stop_seen.insert((*stop_osm_id, stop_osm_type.clone(), route_ref.clone(), transport_type)) {
-            osm_routes_grouped.entry(route_key).or_default().push(OsmRouteStop {
-                osm_id: *stop_osm_id,
-                osm_type: stop_osm_type.clone(),
-                lat: *lat,
-                lon: *lon,
-            });
-        }
+
+        let entry = osm_routes.entry(*route_osm_id).or_insert_with(|| {
+            // Extract destination keywords from route name ("... => Destination")
+            let mut dest_keywords = HashSet::new();
+            if let Some(name) = route_name {
+                if let Some(arrow_pos) = name.find("=>") {
+                    let dest = name[arrow_pos + 2..].trim();
+                    for word in dest.split_whitespace() {
+                        let normalized = word
+                            .trim_matches(|c: char| !c.is_alphanumeric())
+                            .to_lowercase();
+                        if normalized.len() >= 4 {
+                            dest_keywords.insert(normalized);
+                        }
+                    }
+                }
+            }
+            OsmRouteInfo {
+                route_osm_id: *route_osm_id,
+                line_ref: route_ref.clone(),
+                transport_type,
+                dest_keywords,
+                stops: Vec::new(),
+            }
+        });
+
+        entry.stops.push(OsmRouteStop {
+            osm_id: *stop_osm_id,
+            osm_type: stop_osm_type.clone(),
+            lat: *lat,
+            lon: *lon,
+        });
     }
 
     info!(
-        osm_route_keys = osm_routes_grouped.len(),
+        osm_routes = osm_routes.len(),
         osm_route_stop_rows = osm_route_stop_rows.len(),
         "Loaded OSM route->stop relationships"
     );
@@ -781,8 +810,12 @@ pub(crate) async fn build_ifopt_mapping_to_db(
     let mut routes_matched = 0usize;
     let mut routes_unmatched = 0usize;
 
-    for (route_key, osm_stops_on_route) in &osm_routes_grouped {
-        let gtfs_stops_on_route = match gtfs_routes_grouped.get(route_key) {
+    for osm_route in osm_routes.values() {
+        let route_key = RouteIdentifier {
+            line_ref: osm_route.line_ref.clone(),
+            transport_type: osm_route.transport_type,
+        };
+        let gtfs_stops_on_route = match gtfs_routes_grouped.get(&route_key) {
             Some(stops) => stops,
             None => {
                 routes_unmatched += 1;
@@ -791,8 +824,9 @@ pub(crate) async fn build_ifopt_mapping_to_db(
         };
         routes_matched += 1;
 
-        // For each OSM stop on this route, find the nearest GTFS stop on the same route
-        for osm_stop in osm_stops_on_route {
+        // For each OSM stop on this route, find the nearest GTFS stop
+        // that also serves trips in the same DIRECTION as this OSM route.
+        for osm_stop in &osm_route.stops {
             let stop_key = OsmStopKey {
                 osm_id: osm_stop.osm_id,
                 osm_type: osm_stop.osm_type.clone(),
@@ -802,7 +836,6 @@ pub(crate) async fn build_ifopt_mapping_to_db(
             if manual_osm_keys.contains(&stop_key) {
                 continue;
             }
-            // Check IFOPT manual too
             let osm_info = osm_stop_info_map.get(&(osm_stop.osm_id, osm_stop.osm_type.as_str()));
             if let Some(info) = osm_info {
                 if let Some(ref ifopt) = info.ifopt {
@@ -872,6 +905,12 @@ pub(crate) async fn build_ifopt_mapping_to_db(
     // Build set of matched OSM stop keys for quick lookup
     let matched_osm_keys: HashSet<&OsmStopKey> = mapping_results.keys().collect();
 
+    // Pre-build set of all OSM stop IDs that appear on routes (for fast lookup)
+    let stops_on_routes: HashSet<i64> = osm_routes
+        .values()
+        .flat_map(|route| route.stops.iter().map(|s| s.osm_id))
+        .collect();
+
     let unmatched_osm: Vec<UnmatchedOsmStop> = osm_stops
         .iter()
         .filter(|s| {
@@ -884,14 +923,10 @@ pub(crate) async fn build_ifopt_mapping_to_db(
                 && !s.ifopt.as_ref().map_or(false, |i| manual_ifopts.contains(i))
         })
         .map(|s| {
-            // Determine reason: does this stop appear on any OSM route?
-            let on_route = osm_routes_grouped.values().any(|stops| {
-                stops.iter().any(|rs| rs.osm_id == s.osm_id && rs.osm_type == s.osm_type)
-            });
-            let reason = if !on_route {
-                UnmatchedReason::NoRouteData
-            } else {
+            let reason = if stops_on_routes.contains(&s.osm_id) {
                 UnmatchedReason::NoDefinitiveCandidate
+            } else {
+                UnmatchedReason::NoRouteData
             };
             UnmatchedOsmStop {
                 osm_id: s.osm_id,
