@@ -4,6 +4,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Station, StationPlatform, StationStopPosition } from "../../api";
+import { getApiClient } from "../../apiClient";
 import type { RouteVehicles, RouteWithGeometry } from "../../App";
 import type { MappingLine, MappingGtfsStop } from "../MappingManager";
 import { getConfig } from "../../config";
@@ -498,6 +499,9 @@ export default class Map extends React.Component<MapProps, MapState> {
             attributionControl: false,
         });
 
+        // Expose map for E2E tests to allow querying rendered features
+        (window as any).map = this.map;
+
         this.map.on("error", (e) => {
             console.error("Map error:", e.error?.message || e);
         });
@@ -669,8 +673,19 @@ export default class Map extends React.Component<MapProps, MapState> {
                 return;
             }
 
-            // Station not in props (loaded via vector tiles) — show name from tile
-            this.showPopup(coordinates, <div className="p-3 font-semibold">{stationName}</div>);
+            // Station not in props (loaded via vector tiles) — fetch from API
+            try {
+                const response = await getApiClient().api.getStation(Number(osmId));
+                const fullStation = response.data;
+                const handlePlatformClick = (platform: StationPlatform | StationStopPosition) => {
+                    const platformCoords: [number, number] = [platform.lon, platform.lat];
+                    this.showPopup(platformCoords, <PlatformPopup platform={platform} stationName={fullStation.name ?? undefined} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(platform.osm_id))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} />);
+                };
+                this.showPopup(coordinates, <StationPopup station={fullStation} onPlatformClick={handlePlatformClick} onClose={() => this.popup?.remove()} />);
+            } catch (error) {
+                console.error("Failed to fetch station details:", error);
+                this.showPopup(coordinates, <div className="p-3 font-semibold">{stationName}</div>);
+            }
         });
 
         // Stop position click (from vector tiles) — show departure monitor directly

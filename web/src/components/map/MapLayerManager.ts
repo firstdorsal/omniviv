@@ -56,6 +56,7 @@ export class MapLayerManager {
         this.map.addSource("transit-routes", {
             type: "vector",
             tiles: [`${this.martinUrl}/transit_routes/{z}/{x}/{y}`],
+            maxzoom: 24,
         });
         this.map.addLayer({
             id: "routes-line",
@@ -74,6 +75,7 @@ export class MapLayerManager {
         this.map.addSource("transit-stations", {
             type: "vector",
             tiles: [`${this.martinUrl}/transit_stations/{z}/{x}/{y}`],
+            maxzoom: 24,
         });
 
         // Stop positions (from vector tiles, z15+)
@@ -81,13 +83,15 @@ export class MapLayerManager {
             id: "stops-circle", type: "circle",
             source: "transit-stations", "source-layer": "stops",
             minzoom: 15,
+            maxzoom: 24,
             paint: { "circle-radius": 5, "circle-color": "#666", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" },
         });
         this.map.addLayer({
             id: "stops-label", type: "symbol",
             source: "transit-stations", "source-layer": "stops",
             minzoom: 16,
-            layout: { "text-field": ["coalesce", ["get", "ref"], ["get", "name"]], "text-font": ["Open Sans Regular"], "text-size": 10, "text-offset": [0, 0.9], "text-anchor": "top" },
+            maxzoom: 24,
+            layout: { "text-field": ["get", "display_name"], "text-font": ["Open Sans Regular"], "text-size": 10, "text-offset": [0, 0.9], "text-anchor": "top" },
             paint: { "text-color": "#333", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
         });
 
@@ -123,10 +127,26 @@ export class MapLayerManager {
             paint: { "text-color": "#ef4444", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
         });
 
+        // Station connections (lines from stops to stations, from vector tiles, z15+)
+        // Added BEFORE labels so text remains on top
+        this.map.addLayer({
+            id: "station-connections-vector-line", type: "line",
+            source: "transit-stations", "source-layer": "connections",
+            minzoom: 15,
+            maxzoom: 24,
+            paint: { 
+                "line-color": "#444", 
+                "line-width": 1, 
+                "line-opacity": 0.9, 
+                "line-dasharray": [2, 2] 
+            },
+        }, "stops-circle");
+
         // Stations — from vector tiles, filtered by min_zoom property
         this.map.addLayer({
             id: "stations-circle", type: "circle",
             source: "transit-stations", "source-layer": "stations",
+            maxzoom: 24,
             filter: ["<=", ["get", "min_zoom"], ["zoom"]],
             paint: { "circle-radius": 6, "circle-color": "#525252", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" },
         });
@@ -134,6 +154,7 @@ export class MapLayerManager {
             id: "stations-label", type: "symbol",
             source: "transit-stations", "source-layer": "stations",
             minzoom: 8,
+            maxzoom: 24,
             filter: ["<=", ["get", "min_zoom"], ["zoom"]],
             layout: { "text-field": ["get", "name"], "text-font": ["Open Sans Regular"], "text-size": 12, "text-offset": [0, 1.5], "text-anchor": "top" },
             paint: { "text-color": "#065f46", "text-halo-color": "#ffffff", "text-halo-width": 2 },
@@ -284,7 +305,8 @@ export class MapLayerManager {
 
         stationSource.setData({ type: "FeatureCollection", features: stationFeatures });
         platformSource.setData({ type: "FeatureCollection", features: platformFeatures });
-        connectionSource.setData({ type: "FeatureCollection", features: connectionFeatures });
+        // Disable legacy connections as we now use vector tiles
+        connectionSource.setData({ type: "FeatureCollection", features: [] });
         stopPositionSource.setData({ type: "FeatureCollection", features: stopPositionFeatures });
         platformElementSource.setData({ type: "FeatureCollection", features: platformElementFeatures });
     }

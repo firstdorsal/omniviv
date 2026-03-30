@@ -29,6 +29,7 @@ export enum OsmIssueType {
   MissingName = "missing_name",
   MissingStopPosition = "missing_stop_position",
   MissingPlatform = "missing_platform",
+  MissingRef = "missing_ref",
   NoGtfsMatch = "no_gtfs_match",
   AmbiguousGtfsMatch = "ambiguous_gtfs_match",
   LowConfidenceMatch = "low_confidence_match",
@@ -144,10 +145,15 @@ export interface Departure {
   /** Unique trip identifier (GTFS trip_id) - consistent across all stops for a journey */
   trip_id?: string | null;
   /** GTFS route_type: 0=tram, 1=subway, 2=rail, 3=bus, 4=ferry, etc. */
-  gtfs_route_type?: number | null;
+  gtfs_route_type?: number;
   /** Route color from GTFS or OSM (hex, e.g. "#ee1d23") */
   color?: string | null;
-}
+  /** Whether this is the first stop of the trip */
+  is_first_stop: boolean;
+  /** Whether this is the last stop of the trip */
+  is_last_stop: boolean;
+  }
+
 
 export interface DepartureListResponse {
   departures: Departure[];
@@ -1217,6 +1223,20 @@ export class Api<
         path: `/api/stations`,
         method: "GET",
         query: query,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @tags stations
+     * @name GetStation
+     * @summary Get a single station by its OSM ID
+     * @request GET:/api/stations/{osm_id}
+     */
+    getStation: (osmId: number, params: RequestParams = {}) =>
+      this.request<Station, ErrorResponse>({
+        path: `/api/stations/${osmId}`,
+        method: "GET",
         format: "json",
         ...params,
       }),

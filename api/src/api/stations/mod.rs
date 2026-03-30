@@ -11,5 +11,6 @@ pub fn router(pool: PgPool) -> Router {
     };
     Router::new()
         .route("/", axum::routing::get(list::list_stations))
+        .route("/{osm_id}", axum::routing::get(list::get_station))
         .with_state(state)
 }

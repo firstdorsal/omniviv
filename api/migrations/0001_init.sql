@@ -78,6 +78,9 @@ CREATE TABLE IF NOT EXISTS stop_positions (
     platform_id BIGINT REFERENCES platforms(osm_id) ON DELETE SET NULL,
     station_id BIGINT REFERENCES stations(osm_id) ON DELETE SET NULL,
     area_id BIGINT REFERENCES areas(id) ON DELETE CASCADE,
+    geom geometry(Point, 4326),
+    marker_geom geometry(Point, 4326),
+    connection_geom geometry(LineString, 4326),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -136,6 +139,9 @@ CREATE INDEX IF NOT EXISTS idx_stop_positions_platform ON stop_positions(platfor
 CREATE INDEX IF NOT EXISTS idx_stop_positions_station ON stop_positions(station_id);
 CREATE INDEX IF NOT EXISTS idx_stop_positions_area_station ON stop_positions(area_id, station_id);
 CREATE INDEX IF NOT EXISTS idx_stop_positions_ref_ifopt ON stop_positions(ref_ifopt) WHERE ref_ifopt IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_stop_positions_geom ON stop_positions USING GIST (geom);
+CREATE INDEX IF NOT EXISTS idx_stop_positions_marker_geom ON stop_positions USING GIST (marker_geom);
+CREATE INDEX IF NOT EXISTS idx_stop_positions_connection_geom ON stop_positions USING GIST (connection_geom);
 CREATE INDEX IF NOT EXISTS idx_routes_area ON routes(area_id);
 CREATE INDEX IF NOT EXISTS idx_routes_type ON routes(route_type);
 CREATE INDEX IF NOT EXISTS idx_routes_ref ON routes(ref);
@@ -323,8 +329,7 @@ SELECT ST_AsMVT(tile, 'transit_routes', 4096, 'geom') FROM (
     FROM routes r, bounds b
     WHERE r.geom IS NOT NULL
       AND r.min_zoom <= z
-      AND r.geom && b.geom_4326
-      AND ST_Intersects(r.geom, b.geom_4326)
+      AND r.geom && ST_Expand(b.geom_4326, 0.001)
 ) AS tile
 WHERE geom IS NOT NULL;
 $$ LANGUAGE sql STABLE PARALLEL SAFE;
@@ -334,74 +339,85 @@ COMMENT ON FUNCTION transit_routes IS 'Vector tile source for transit route geom
 -------------------------------------------------------------------------------
 -- PostGIS vector tile function for transit stations / stops
 -------------------------------------------------------------------------------
-
--- Martin auto-discovers this function as a vector tile source.
--- Returns 2 MVT layers:
---   - stations: station points with min_zoom filtering
---   - stops: stop positions at platform_way position when available, otherwise at stop_position
-CREATE OR REPLACE FUNCTION transit_stations(z integer, x integer, y integer)
-RETURNS bytea AS $$
+CREATE OR REPLACE FUNCTION public.transit_stations(z integer, x integer, y integer)
+ RETURNS bytea
+ LANGUAGE plpgsql
+ STABLE PARALLEL SAFE
+AS $function$
 DECLARE
-    bounds_4326 geometry;
-    bounds_3857 geometry;
     stations_mvt bytea;
     stops_mvt bytea;
+    connections_mvt bytea;
+    b3857 geometry;
+    b4326 geometry;
 BEGIN
-    bounds_3857 := ST_TileEnvelope(z, x, y);
-    bounds_4326 := ST_Transform(bounds_3857, 4326);
+    b3857 := ST_TileEnvelope(z, x, y);
+    b4326 := ST_Transform(b3857, 4326);
 
-    -- Layer 1: stations (zoom-filtered by railway tag)
-    SELECT COALESCE(ST_AsMVT(tile, 'stations', 4096, 'geom'), ''::bytea) INTO stations_mvt FROM (
-        SELECT
-            s.osm_id, s.name, s.ref_ifopt,
+    -- 1. Stations (Explicit ID)
+    SELECT COALESCE(ST_AsMVT(tile, 'stations', 4096, 'geom', 'id'), ''::bytea) INTO stations_mvt FROM (
+        SELECT 
+            osm_id as id, osm_id, name, ref_ifopt,
             CASE
-                WHEN s.tags->>'railway' = 'station' THEN 6
-                WHEN s.tags->>'railway' = 'halt' THEN 9
+                WHEN tags->>'railway' = 'station' THEN 6
+                WHEN tags->>'railway' = 'halt' THEN 9
                 ELSE 11
             END AS min_zoom,
-            ST_AsMVTGeom(
-                ST_Transform(ST_SetSRID(ST_MakePoint(s.lon, s.lat), 4326), 3857),
-                bounds_3857, 4096, 256, true
-            ) AS geom
+            ST_AsMVTGeom(ST_Transform(geom, 3857), b3857, 4096, 4096, false) AS geom
         FROM stations s
-        WHERE s.lat IS NOT NULL AND s.lon IS NOT NULL
-          AND ST_SetSRID(ST_MakePoint(s.lon, s.lat), 4326) && bounds_4326
-          AND (EXISTS (SELECT 1 FROM platforms WHERE station_id = s.osm_id)
-            OR EXISTS (SELECT 1 FROM stop_positions WHERE station_id = s.osm_id)
-            OR EXISTS (SELECT 1 FROM platform_ways WHERE station_id = s.osm_id))
-          AND CASE
-                WHEN s.tags->>'railway' = 'station' THEN z >= 6
-                WHEN s.tags->>'railway' = 'halt' THEN z >= 9
-                ELSE z >= 11
-              END
+        WHERE geom && ST_Expand(b4326, 0.01)
+           OR EXISTS (SELECT 1 FROM stop_positions sp WHERE sp.station_id = s.osm_id AND sp.marker_geom && ST_Expand(b4326, 0.01))
     ) AS tile WHERE geom IS NOT NULL;
 
-    -- Layer 2: stops (z15+) — position from platform_way centroid when available
+    -- 2. Stops (Explicit ID)
     IF z >= 15 THEN
-        SELECT COALESCE(ST_AsMVT(tile, 'stops', 4096, 'geom'), ''::bytea) INTO stops_mvt FROM (
-            SELECT DISTINCT ON (sp.osm_id)
-                sp.osm_id, sp.name, sp.ref, sp.ref_ifopt,
-                sp.station_id,
-                ST_AsMVTGeom(
-                    ST_Transform(ST_SetSRID(ST_MakePoint(
-                        COALESCE(pw.lon, sp.lon),
-                        COALESCE(pw.lat, sp.lat)
-                    ), 4326), 3857),
-                    bounds_3857, 4096, 256, true
-                ) AS geom
-            FROM stop_positions sp
-            LEFT JOIN platform_ways pw ON pw.ref_ifopt = sp.ref_ifopt AND pw.station_id = sp.station_id
-            WHERE sp.lat IS NOT NULL AND sp.lon IS NOT NULL
-              AND sp.station_id IS NOT NULL
-              AND ST_SetSRID(ST_MakePoint(sp.lon, sp.lat), 4326) && bounds_4326
-            ORDER BY sp.osm_id, pw.osm_id NULLS LAST
+        SELECT COALESCE(ST_AsMVT(tile, 'stops', 4096, 'geom', 'id'), ''::bytea) INTO stops_mvt FROM (
+            SELECT DISTINCT ON (station_id, display_name)
+                osm_id as id, osm_id, name, ref, ref_ifopt, station_id, display_name,
+                ST_X(marker_geom) as lon, ST_Y(marker_geom) as lat,
+                ST_AsMVTGeom(ST_Transform(marker_geom, 3857), b3857, 4096, 4096, false) AS geom
+            FROM (
+                SELECT 
+                    sp.osm_id, sp.name, sp.ref, sp.ref_ifopt, sp.station_id, sp.marker_geom,
+                    COALESCE(
+                        ref,
+                        UPPER(split_part(ref_ifopt, ':', array_length(string_to_array(ref_ifopt, ':'), 1))),
+                        name,
+                        (osm_id % 1000)::text
+                    ) as display_name
+                FROM stop_positions sp
+                WHERE station_id IS NOT NULL 
+                  AND (marker_geom && ST_Expand(b4326, 0.01) OR EXISTS (
+                      SELECT 1 FROM stations s WHERE s.osm_id = sp.station_id AND s.geom && ST_Expand(b4326, 0.01)
+                  ))
+            ) sub
+            ORDER BY station_id, display_name, ref_ifopt NULLS LAST, osm_id
+        ) AS tile WHERE geom IS NOT NULL;
+
+        -- 3. Connections (Explicit ID)
+        SELECT COALESCE(ST_AsMVT(tile, 'connections', 4096, 'geom', 'id'), ''::bytea) INTO connections_mvt FROM (
+            SELECT DISTINCT ON (station_id, display_name)
+                (station_id) as id, -- Consistent ID for the connection group
+                ST_AsMVTGeom(ST_Transform(connection_geom, 3857), b3857, 4096, 4096, false) AS geom,
+                station_id, display_name
+            FROM (
+                SELECT 
+                    sp.station_id, sp.connection_geom, sp.marker_geom,
+                    COALESCE(sp.ref, UPPER(split_part(sp.ref_ifopt, ':', array_length(string_to_array(sp.ref_ifopt, ':'), 1))), sp.name) as display_name
+                FROM stop_positions sp
+                WHERE connection_geom IS NOT NULL 
+                  AND (marker_geom && ST_Expand(b4326, 0.01) OR EXISTS (
+                      SELECT 1 FROM stations s WHERE s.osm_id = sp.station_id AND s.geom && ST_Expand(b4326, 0.01)
+                  ))
+            ) sub
+            ORDER BY station_id, display_name, connection_geom
         ) AS tile WHERE geom IS NOT NULL;
     ELSE
         stops_mvt := ''::bytea;
+        connections_mvt := ''::bytea;
     END IF;
 
-    RETURN stations_mvt || stops_mvt;
+    RETURN stations_mvt || stops_mvt || connections_mvt;
 END;
-$$ LANGUAGE plpgsql STABLE PARALLEL SAFE;
-
-COMMENT ON FUNCTION transit_stations IS 'Vector tile source for transit stations and stop positions (with platform-way position preference)';
+$function$
+COMMENT ON FUNCTION transit_stations IS 'Vector tile source for transit stations and stop positions (Final stable unique IDs)';

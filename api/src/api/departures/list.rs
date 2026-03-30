@@ -9,7 +9,7 @@ use crate::api::ErrorResponse;
 use crate::api::state::AppState;
 use crate::api::utils::{ifopt_station_prefix, parse_reference_time};
 use crate::providers::timetables::gtfs::realtime;
-use crate::sync::{Departure, osm_stop_id, parse_osm_stop_id};
+use crate::sync::{Departure, EventType, osm_stop_id, parse_osm_stop_id};
 
 /// How many minutes of past departures to keep so that recent arrivals remain visible.
 /// See also: `SCHEDULE_PAST_WINDOW_MINUTES` in `realtime.rs` (10 min for schedule building).
@@ -326,6 +326,42 @@ pub struct GtfsStopDeparturesResponse {
     pub departures: Vec<Departure>,
 }
 
+/// Deduplicate departures by (trip_id, event_type, planned_time).
+/// This prevents seeing the same trip multiple times when a platform is mapped to multiple stop IDs.
+fn deduplicate_departures(departures: Vec<Departure>) -> Vec<Departure> {
+    let mut unique_map = HashMap::new();
+    for dep in departures {
+        // Key by trip_id, event_type, and time.
+        // We use string representation of time for the key.
+        let key = (
+            dep.trip_id.clone().unwrap_or_default(),
+            dep.event_type,
+            dep.planned_time.to_rfc3339(),
+        );
+        
+        // If we have a duplicate, prefer the one with a platform name or an IFOPT stop ID
+        let is_better = match unique_map.get(&key) {
+            Some(existing) => {
+                let existing: &Departure = existing;
+                // Prefer IFOPT over OSM-based IDs
+                if !dep.stop_ifopt.starts_with("osm:") && existing.stop_ifopt.starts_with("osm:") {
+                    true
+                } else if dep.platform.is_some() && existing.platform.is_none() {
+                    true
+                } else {
+                    false
+                }
+            }
+            None => true,
+        };
+
+        if is_better {
+            unique_map.insert(key, dep);
+        }
+    }
+    unique_map.into_values().collect()
+}
+
 /// Get departures for a specific stop by IFOPT ID or OSM stop ID.
 ///
 /// Accepts both IFOPT strings (e.g. "de:09761:101:31:A3") and OSM-based
@@ -476,7 +512,16 @@ pub async fn get_departures_by_stop(
     }
 
     departures.sort_by(|a, b| a.planned_time.cmp(&b.planned_time));
+    let departures = deduplicate_departures(departures);
     let departures = filter_past_departures(departures, ref_time);
+    
+    // Filter out terminating departures (last stop of a trip)
+    // unless it's an Arrival event (we still want to see it coming in)
+    let departures: Vec<Departure> = departures
+        .into_iter()
+        .filter(|d| !(d.event_type == EventType::Departure && d.is_last_stop))
+        .collect();
+
     let departures = filter_same_station_destinations(departures, stop_id);
     let mut departures = filter_by_direction(departures, stop_id, &state.pool).await;
 
@@ -770,6 +815,8 @@ mod tests {
             cancelled: false,
             gtfs_route_type: Some(1),
             color: None,
+            is_first_stop: false,
+            is_last_stop: false,
         }
     }
 

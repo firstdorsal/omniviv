@@ -47,6 +47,7 @@ pub enum OsmIssueType {
     MissingName,
     MissingStopPosition,
     MissingPlatform,
+    MissingRef,
     // GTFS-OSM mapping issues
     /// OSM stop has no matching GTFS stop within max distance
     NoGtfsMatch,
@@ -75,7 +76,8 @@ impl OsmIssueType {
             | OsmIssueType::MissingRouteRef
             | OsmIssueType::MissingName
             | OsmIssueType::MissingStopPosition
-            | OsmIssueType::MissingPlatform => IssueCategory::OsmDataQuality,
+            | OsmIssueType::MissingPlatform
+            | OsmIssueType::MissingRef => IssueCategory::OsmDataQuality,
 
             OsmIssueType::NoGtfsMatch
             | OsmIssueType::AmbiguousGtfsMatch

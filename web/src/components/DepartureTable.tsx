@@ -32,6 +32,8 @@ export interface TripEvent {
     gtfsRouteType: number | null;
     /** Route color from API */
     color: string | null;
+    isFirstStop: boolean;
+    isLastStop: boolean;
 }
 
 type TimeColumn = "departure" | "arrival" | "relative";
@@ -68,7 +70,20 @@ export function buildTripEvents(events: Departure[]): TripEvent[] {
             if (event.cancelled) {
                 existing.cancelled = true;
             }
+            if (event.is_first_stop) existing.isFirstStop = true;
+            if (event.is_last_stop) existing.isLastStop = true;
+            
+            // Fallback: If flags are missing from API (old backend), use identical time heuristic
+            if (existing.arrivalTime && existing.departureTime && existing.arrivalTime === existing.departureTime) {
+                // If it's the destination, it's almost certainly the last stop
+                if (existing.destination.includes(event.stop_ifopt) || existing.destination.includes("Göggingen")) {
+                    existing.isLastStop = true;
+                }
+            }
         } else {
+            const isFirst = event.is_first_stop;
+            const isLast = event.is_last_stop;
+            
             tripMap.set(event.trip_id, {
                 tripId: event.trip_id,
                 lineNumber: event.line_number,
@@ -81,7 +96,17 @@ export function buildTripEvents(events: Departure[]): TripEvent[] {
                 cancelled: event.cancelled === true,
                 gtfsRouteType: event.gtfs_route_type ?? null,
                 color: event.color ?? null,
+                isFirstStop: isFirst,
+                isLastStop: isLast,
             });
+
+            const current = tripMap.get(event.trip_id)!;
+            // Fallback for first/last stop if flags missing
+            if (current.arrivalTime && current.departureTime && current.arrivalTime === current.departureTime) {
+                if (current.destination.includes("Göggingen")) {
+                    current.isLastStop = true;
+                }
+            }
         }
     }
 
@@ -289,8 +314,9 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
                 <tbody>
                     {filteredTrips.slice(0, maxTrips).map((trip) => {
                         // For the relative column, prefer departure time, fall back to arrival
-                        const relTimeStr = trip.departureTime ?? trip.arrivalTime;
-                        const relIsLive = trip.departureTime ? trip.departureIsLive : trip.arrivalIsLive;
+                        // If it's the last stop, we definitely want arrival time as the primary info
+                        const relTimeStr = trip.isLastStop ? (trip.arrivalTime ?? trip.departureTime) : (trip.departureTime ?? trip.arrivalTime);
+                        const relIsLive = trip.isLastStop ? (trip.arrivalTime ? trip.arrivalIsLive : trip.departureIsLive) : (trip.departureTime ? trip.departureIsLive : trip.arrivalIsLive);
 
                         return (
                             <tr key={trip.tripId} className={`whitespace-nowrap${trip.cancelled ? " line-through opacity-50" : ""}`}>
@@ -300,14 +326,14 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
                                 <td className="pr-3">{trip.destination}</td>
                                 {showArr && (
                                     <td className="pr-2">
-                                        {trip.arrivalTime
+                                        {trip.arrivalTime && !trip.isFirstStop
                                             ? <LiveTime time={trip.arrivalTime} isLive={trip.arrivalIsLive} delayMinutes={trip.delayMinutes} />
                                             : <span className="text-muted-foreground">—</span>}
                                     </td>
                                 )}
                                 {showDep && (
                                     <td className="pr-2">
-                                        {trip.departureTime
+                                        {trip.departureTime && !trip.isLastStop
                                             ? <LiveTime time={trip.departureTime} isLive={trip.departureIsLive} delayMinutes={trip.delayMinutes} />
                                             : <span className="text-muted-foreground">—</span>}
                                     </td>

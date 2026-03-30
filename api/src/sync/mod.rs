@@ -329,6 +329,46 @@ impl SyncManager {
         let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_routes_geom ON routes USING GIST (geom)").execute(&self.pool).await;
         let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_routes_min_zoom ON routes (min_zoom)").execute(&self.pool).await;
 
+        // --- Materialize Stop Marker and Connection Geometries ---
+        info!("Materializing stop marker and connection geometries...");
+        let mat_start = std::time::Instant::now();
+        
+        // 1. Identify the BEST physical marker for every stop position
+        let _ = sqlx::query(r#"
+            WITH best_markers AS (
+                SELECT DISTINCT ON (sp.osm_id)
+                    sp.osm_id,
+                    COALESCE(p.geom, pw.geom, sp.geom) as m_geom
+                FROM stop_positions sp
+                LEFT JOIN platforms p ON (p.station_id = sp.station_id AND sp.ref_ifopt IS NOT NULL AND p.ref_ifopt IS NOT NULL AND (
+                    LOWER(p.ref_ifopt) = LOWER(sp.ref_ifopt) OR 
+                    split_part(LOWER(p.ref_ifopt), ':', array_length(string_to_array(p.ref_ifopt, ':'), 1)) = split_part(LOWER(sp.ref_ifopt), ':', array_length(string_to_array(sp.ref_ifopt, ':'), 1))
+                ))
+                LEFT JOIN platform_ways pw ON (pw.station_id = sp.station_id AND sp.ref_ifopt IS NOT NULL AND pw.ref_ifopt IS NOT NULL AND (
+                    LOWER(pw.ref_ifopt) = LOWER(sp.ref_ifopt) OR 
+                    split_part(LOWER(pw.ref_ifopt), ':', array_length(string_to_array(pw.ref_ifopt, ':'), 1)) = split_part(LOWER(sp.ref_ifopt), ':', array_length(string_to_array(sp.ref_ifopt, ':'), 1))
+                ))
+                ORDER BY sp.osm_id, (p.osm_id IS NOT NULL OR pw.osm_id IS NOT NULL) DESC
+            )
+            UPDATE stop_positions sp
+            SET marker_geom = bm.m_geom
+            FROM best_markers bm
+            WHERE sp.osm_id = bm.osm_id
+        "#).execute(&self.pool).await;
+
+        // 2. Materialize the connection lines to the parent station
+        let _ = sqlx::query(r#"
+            UPDATE stop_positions sp
+            SET connection_geom = ST_MakeLine(sp.marker_geom, s.geom)
+            FROM stations s
+            WHERE sp.station_id = s.osm_id
+              AND sp.marker_geom IS NOT NULL
+              AND s.geom IS NOT NULL
+              AND ST_Distance(sp.marker_geom, s.geom) > 0.00001
+        "#).execute(&self.pool).await;
+        
+        info!(elapsed_secs = mat_start.elapsed().as_secs(), "Materialized stop geometries complete");
+
         // Drop all staging tables
         for table in &[
             "_osm_transit_routes", "_osm_transit_ways", "_osm_route_way_members",
@@ -986,7 +1026,8 @@ impl SyncManager {
             };
 
             // Check for missing IFOPT
-            if platform.tag("ref:IFOPT").is_none() {
+            let ifopt = platform.tag("ref:IFOPT");
+            if ifopt.is_none() {
                 new_issues.push(OsmIssue::new(
                     platform.id,
                     &platform.element_type,
@@ -996,6 +1037,22 @@ impl SyncManager {
                     format!("Platform '{}' has no ref:IFOPT tag", name.as_deref().unwrap_or("unnamed")),
                     name.clone(),
                     platform_ref.clone(),
+                    Some(lat),
+                    Some(lon),
+                ));
+            }
+
+            // Check for missing ref tag when IFOPT is present
+            if ifopt.is_some() && platform_ref.is_none() {
+                new_issues.push(OsmIssue::new(
+                    platform.id,
+                    &platform.element_type,
+                    "platform",
+                    OsmIssueType::MissingRef,
+                    transport_type,
+                    format!("Platform '{}' has ref:IFOPT but is missing explicit 'ref' tag (e.g. 'A', '1')", name.as_deref().unwrap_or("unnamed")),
+                    name.clone(),
+                    None,
                     Some(lat),
                     Some(lon),
                 ));
@@ -1105,7 +1162,8 @@ impl SyncManager {
             };
 
             // Check for missing IFOPT
-            if stop.tag("ref:IFOPT").is_none() {
+            let ifopt = stop.tag("ref:IFOPT");
+            if ifopt.is_none() {
                 new_issues.push(OsmIssue::new(
                     stop.id,
                     &stop.element_type,
@@ -1115,6 +1173,22 @@ impl SyncManager {
                     format!("Stop position '{}' has no ref:IFOPT tag", name.as_deref().unwrap_or("unnamed")),
                     name.clone(),
                     stop_ref.clone(),
+                    Some(lat),
+                    Some(lon),
+                ));
+            }
+
+            // Check for missing ref tag when IFOPT is present
+            if ifopt.is_some() && stop_ref.is_none() {
+                new_issues.push(OsmIssue::new(
+                    stop.id,
+                    &stop.element_type,
+                    "stop_position",
+                    OsmIssueType::MissingRef,
+                    transport_type,
+                    format!("Stop position '{}' has ref:IFOPT but is missing explicit 'ref' tag (e.g. 'A', '1')", name.as_deref().unwrap_or("unnamed")),
+                    name.clone(),
+                    None,
                     Some(lat),
                     Some(lon),
                 ));

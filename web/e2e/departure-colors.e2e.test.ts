@@ -11,7 +11,7 @@ import { test, expect } from "@playwright/test";
  */
 
 const API = "http://omniviv-api.localhost";
-const TIME = "2026-03-26T08:00:00Z";
+const TIME = new Date().toISOString();
 
 // All 10 Königsplatz platforms
 const KOENIGSPLATZ = [

@@ -343,3 +343,157 @@ pub async fn list_stations(
 
     Ok(Json(StationListResponse { stations }))
 }
+
+/// Get a single station by its OSM ID
+#[utoipa::path(
+    get,
+    path = "/api/stations/{osm_id}",
+    responses(
+        (status = 200, description = "Station details with platforms and stop positions", body = Station),
+        (status = 404, description = "Station not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "stations"
+)]
+pub async fn get_station(
+    State(state): State<StationsState>,
+    axum::extract::Path(osm_id): axum::extract::Path<i64>,
+) -> Result<Json<Station>, (StatusCode, Json<ErrorResponse>)> {
+    // Get OSM ID -> GTFS stop ID mapping for this station's elements
+    let osm_to_gtfs: HashMap<i64, Vec<String>> = {
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT osm_id, gtfs_stop_id FROM osm_gtfs_stop_mapping WHERE osm_id IN (
+                SELECT osm_id FROM platforms WHERE station_id = $1
+                UNION
+                SELECT osm_id FROM stop_positions WHERE station_id = $1
+            ) ORDER BY osm_id, match_score DESC",
+        )
+        .bind(osm_id)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+
+        let mut map: HashMap<i64, Vec<String>> = HashMap::new();
+        for (osm_id, gtfs_stop_id) in rows {
+            map.entry(osm_id).or_default().push(gtfs_stop_id);
+        }
+        map
+    };
+
+    let station_row: StationRow = sqlx::query_as(
+        r#"
+        SELECT s.osm_id, s.osm_type, s.name, s.ref_ifopt, s.lat, s.lon,
+               COALESCE(s.tags->>'railway' IN ('station', 'halt'), false) AS is_rail,
+               s.tags->>'railway' AS railway_tag
+        FROM stations s
+        WHERE s.osm_id = $1
+        "#,
+    )
+    .bind(osm_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal_error)?
+    .ok_or_else(|| (StatusCode::NOT_FOUND, Json(ErrorResponse { error: "Station not found".into() })))?;
+
+    // Fetch all platforms for this station
+    let platform_rows: Vec<PlatformRow> = sqlx::query_as(
+        r#"
+        SELECT station_id, osm_id, name, ref, ref_ifopt, lat, lon
+        FROM platforms
+        WHERE station_id = $1
+        ORDER BY ref, name
+        "#,
+    )
+    .bind(osm_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    // Fetch all stop_positions for this station
+    let stop_rows: Vec<StopPositionRow> = sqlx::query_as(
+        r#"
+        SELECT station_id, osm_id, name, ref, ref_ifopt, lat, lon, platform_id
+        FROM stop_positions
+        WHERE station_id = $1
+        ORDER BY ref, name
+        "#,
+    )
+    .bind(osm_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    // Fetch all platform_ways for this station
+    let platform_way_rows: Vec<PlatformWayRow> = sqlx::query_as(
+        r#"
+        SELECT station_id, osm_id, name, ref, ref_ifopt, lat, lon
+        FROM platform_ways
+        WHERE station_id = $1
+        ORDER BY ref, name
+        "#,
+    )
+    .bind(osm_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal_error)?;
+
+    // Build platform and stop lists
+    let platforms = platform_rows.into_iter().map(|row| {
+        let mut gtfs_stop_ids = osm_to_gtfs.get(&row.osm_id).cloned().unwrap_or_default();
+        gtfs_stop_ids.sort();
+        gtfs_stop_ids.dedup();
+        StationPlatform {
+            osm_id: row.osm_id,
+            name: row.name,
+            platform_ref: row.platform_ref,
+            ref_ifopt: row.ref_ifopt,
+            lat: row.lat,
+            lon: row.lon,
+            gtfs_stop_ids,
+        }
+    }).collect();
+
+    let stop_positions = stop_rows.into_iter().map(|row| {
+        let mut gtfs_stop_ids = osm_to_gtfs.get(&row.osm_id).cloned().unwrap_or_default();
+        gtfs_stop_ids.sort();
+        gtfs_stop_ids.dedup();
+        StationStopPosition {
+            osm_id: row.osm_id,
+            name: row.name,
+            stop_ref: row.stop_ref,
+            ref_ifopt: row.ref_ifopt,
+            lat: row.lat,
+            lon: row.lon,
+            platform_id: row.platform_id,
+            gtfs_stop_ids,
+        }
+    }).collect();
+
+    let platform_ways = platform_way_rows.into_iter().map(|row| {
+        StationPlatformWay {
+            osm_id: row.osm_id,
+            name: row.name,
+            platform_ref: row.platform_ref,
+            ref_ifopt: row.ref_ifopt,
+            lat: row.lat,
+            lon: row.lon,
+        }
+    }).collect();
+
+    Ok(Json(Station {
+        osm_id: station_row.osm_id,
+        osm_type: station_row.osm_type,
+        name: station_row.name,
+        ref_ifopt: station_row.ref_ifopt,
+        lat: station_row.lat,
+        lon: station_row.lon,
+        min_zoom: match station_row.railway_tag.as_deref() {
+            Some("station") => 6,
+            Some("halt") => 9,
+            _ => 11,
+        },
+        platforms,
+        stop_positions,
+        platform_ways,
+    }))
+}

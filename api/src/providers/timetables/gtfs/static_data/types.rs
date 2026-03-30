@@ -180,10 +180,16 @@ impl GtfsSchedule {
     pub fn last_stop_of_trip(&self, trip_id: &str) -> Option<String> {
         let last_stop = self.stop_times.get(trip_id)?.last()?;
         Some(
-            self.gtfs_to_ifopt
+            self.gtfs_to_stop
                 .get(&last_stop.stop_id)
-                .and_then(|ifopts| ifopts.first().cloned())
-                .unwrap_or_else(|| last_stop.stop_id.clone()),
+                .and_then(|ids| ids.first().cloned())
+                .unwrap_or_else(|| {
+                    #[allow(deprecated)]
+                    self.gtfs_to_ifopt
+                        .get(&last_stop.stop_id)
+                        .and_then(|ifopts| ifopts.first().cloned())
+                        .unwrap_or_else(|| last_stop.stop_id.clone())
+                }),
         )
     }
 
@@ -192,6 +198,32 @@ impl GtfsSchedule {
         let last_stop = self.stop_times.get(trip_id)?.last()?;
         self.stops
             .get(&last_stop.stop_id)
+            .and_then(|s| s.stop_name.clone())
+    }
+
+    /// Get the first stop_id of a trip.
+    /// Returns IFOPT if a mapping exists, otherwise the raw GTFS stop_id.
+    pub fn first_stop_of_trip(&self, trip_id: &str) -> Option<String> {
+        let first_stop = self.stop_times.get(trip_id)?.first()?;
+        Some(
+            self.gtfs_to_stop
+                .get(&first_stop.stop_id)
+                .and_then(|ids| ids.first().cloned())
+                .unwrap_or_else(|| {
+                    #[allow(deprecated)]
+                    self.gtfs_to_ifopt
+                        .get(&first_stop.stop_id)
+                        .and_then(|ifopts| ifopts.first().cloned())
+                        .unwrap_or_else(|| first_stop.stop_id.clone())
+                }),
+        )
+    }
+
+    /// Get the name of the first stop of a trip.
+    pub fn first_stop_name_of_trip(&self, trip_id: &str) -> Option<String> {
+        let first_stop = self.stop_times.get(trip_id)?.first()?;
+        self.stops
+            .get(&first_stop.stop_id)
             .and_then(|s| s.stop_name.clone())
     }
 

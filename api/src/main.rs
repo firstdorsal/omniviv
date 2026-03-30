@@ -29,6 +29,7 @@ use omniviv_api::{
         api::routes::list::get_route,
         api::routes::list::get_route_geometry,
         api::stations::list::list_stations,
+        api::stations::list::get_station,
         api::departures::get_departures_by_stop,
         api::departures::get_departures_by_gtfs_stop,
         api::vehicles::get_vehicles_by_route,

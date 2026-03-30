@@ -368,6 +368,7 @@ pub fn process_trip_updates(
         let route_type = route.and_then(|r| r.route_type);
         let route_color = route.and_then(|r| r.route_color.clone());
 
+        let first_stop = schedule.first_stop_of_trip(trip_id);
         let last_stop = schedule.last_stop_of_trip(trip_id);
         // Use trip headsign, falling back to last stop name if headsign is empty
         let headsign = trip
@@ -420,7 +421,11 @@ pub fn process_trip_updates(
         // departures with cancelled=true so the departure monitor can show them
         // with strikethrough. Skip the normal STU processing loop.
         if trip_cancelled {
+            let first_gtfs_stop = stop_times.first().map(|s| s.stop_id.as_str());
+            let last_gtfs_stop = stop_times.last().map(|s| s.stop_id.as_str());
             for st in stop_times {
+                let is_first_stop_in_trip = first_gtfs_stop == Some(st.stop_id.as_str());
+                let is_last_stop_in_trip = last_gtfs_stop == Some(st.stop_id.as_str());
                 let relevant_keys = resolve_relevant_stop_keys(
                     schedule, &st.stop_id, relevant_stop_ids, &station_prefixes, has_mapping,
                 );
@@ -448,6 +453,8 @@ pub fn process_trip_updates(
                                 cancelled: true,
                                 gtfs_route_type: route_type,
                                 color: route_color.clone(),
+                                is_first_stop: is_first_stop_in_trip,
+                                is_last_stop: is_last_stop_in_trip,
                             });
                         }
                     }
@@ -467,6 +474,8 @@ pub fn process_trip_updates(
                                 cancelled: true,
                                 gtfs_route_type: route_type,
                                 color: route_color.clone(),
+                                is_first_stop: is_first_stop_in_trip,
+                                is_last_stop: is_last_stop_in_trip,
                             });
                         }
                     }
@@ -577,6 +586,9 @@ pub fn process_trip_updates(
 
             // Emit events for each mapped stop key (shared stops produce events for all platforms/osm IDs)
             for stop_key in &relevant_keys {
+                let is_first = first_stop.as_ref() == Some(stop_key) || first_stop.as_ref().map_or(false, |fs| station_level_ifopt(fs) == station_level_ifopt(stop_key));
+                let is_last = last_stop.as_ref() == Some(stop_key) || last_stop.as_ref().map_or(false, |ls| station_level_ifopt(ls) == station_level_ifopt(stop_key));
+
                 if let Some((arr_planned_dt, arr_estimated_dt, arr_delay)) = &arr_event {
                     let arrival = Departure {
                         stop_ifopt: stop_key.clone(),
@@ -592,6 +604,8 @@ pub fn process_trip_updates(
                         cancelled: trip_cancelled,
                         gtfs_route_type: route_type,
                         color: route_color.clone(),
+                        is_first_stop: is_first,
+                        is_last_stop: is_last,
                     };
                     departures
                         .entry(stop_key.clone())
@@ -614,6 +628,8 @@ pub fn process_trip_updates(
                         cancelled: trip_cancelled,
                         gtfs_route_type: route_type,
                         color: route_color.clone(),
+                        is_first_stop: is_first,
+                        is_last_stop: is_last,
                     };
                     departures
                         .entry(stop_key.clone())
@@ -776,6 +792,7 @@ fn add_scheduled_departures(
         let route_type = route.and_then(|r| r.route_type);
         let route_color = route.and_then(|r| r.route_color.clone());
 
+        let first_stop = schedule.first_stop_of_trip(trip_id);
         let last_stop = schedule.last_stop_of_trip(trip_id);
         // Use trip headsign, falling back to last stop name if headsign is empty
         let headsign = trip
@@ -816,8 +833,10 @@ fn add_scheduled_departures(
             let arr_dt = st.arrival_time.and_then(|s| schedule_time_to_utc(s, today, tz));
             let dep_dt = st.departure_time.and_then(|s| schedule_time_to_utc(s, today, tz));
 
-            // Emit events for each mapped stop key
             for stop_key in &relevant_keys {
+                let is_first = first_stop.as_ref() == Some(stop_key) || first_stop.as_ref().map_or(false, |fs| station_level_ifopt(fs) == station_level_ifopt(stop_key));
+                let is_last = last_stop.as_ref() == Some(stop_key) || last_stop.as_ref().map_or(false, |ls| station_level_ifopt(ls) == station_level_ifopt(stop_key));
+
                 if let Some(arr_dt) = arr_dt {
                     let arrival = Departure {
                         stop_ifopt: stop_key.clone(),
@@ -833,6 +852,8 @@ fn add_scheduled_departures(
                         cancelled: is_cancelled,
                         gtfs_route_type: route_type,
                         color: route_color.clone(),
+                        is_first_stop: is_first,
+                        is_last_stop: is_last,
                     };
                     departures
                         .entry(stop_key.clone())
@@ -855,6 +876,8 @@ fn add_scheduled_departures(
                         cancelled: is_cancelled,
                         gtfs_route_type: route_type,
                         color: route_color.clone(),
+                        is_first_stop: is_first,
+                        is_last_stop: is_last,
                     };
                     departures
                         .entry(stop_key.clone())

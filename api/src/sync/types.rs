@@ -8,7 +8,7 @@ use tokio::sync::{broadcast, RwLock};
 use utoipa::ToSchema;
 
 /// Type of stop event
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum EventType {
     Departure,
@@ -44,6 +44,10 @@ pub struct Departure {
     /// Route color from GTFS or OSM (hex, e.g. "#ee1d23")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Whether this is the first stop of the trip
+    pub is_first_stop: bool,
+    /// Whether this is the last stop of the trip
+    pub is_last_stop: bool,
 }
 
 fn is_false(v: &bool) -> bool {
