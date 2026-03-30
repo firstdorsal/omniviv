@@ -41,13 +41,13 @@ const SCHWABENCENTER = [
     { ifopt: "de:09761:12:51:D", line: "2", color: "#0068b3", name: "Schertlinstr D – Tram 2 → West P+R" },
 ];
 
-// Göggingen (Line 1 terminus)
-const GOEGGINGEN = [
-    { ifopt: "de:09761:715:31:A", line: "1", color: "#e3000f", name: "Göggingen A – Tram 1 → Göggingen" },
-    { ifopt: "de:09761:715:31:B", line: "1", color: "#e3000f", name: "Göggingen B – Tram 1 → Lechhausen" },
+// Maria Stern (Line 1 stop, both directions)
+const MARIA_STERN = [
+    { ifopt: "de:09761:715:31:A", line: "1", color: "#e3000f", name: "Maria Stern A – Tram 1 → Göggingen" },
+    { ifopt: "de:09761:715:b", line: "1", color: "#e3000f", name: "Maria Stern B – Tram 1 → Lechhausen" },
 ];
 
-const PLATFORMS = [...KOENIGSPLATZ, ...MARIA_ALBER, ...SCHWABENCENTER, ...GOEGGINGEN];
+const PLATFORMS = [...KOENIGSPLATZ, ...MARIA_ALBER, ...SCHWABENCENTER, ...MARIA_STERN];
 
 // München U-Bahn — tested via coordinates (OSM stops lack IFOPTs for U-Bahn)
 const MUENCHEN_UBAHN = [
