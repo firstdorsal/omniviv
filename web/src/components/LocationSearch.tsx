@@ -121,6 +121,15 @@ export function saveRecent(location: GeocodeSuggestion) {
     window.dispatchEvent(new CustomEvent(RECENTS_CHANGED_EVENT));
 }
 
+export function removeRecent(location: GeocodeSuggestion) {
+    const recents = loadRecents();
+    const filtered = recents.filter(
+        r => !(Math.abs(r.lat - location.lat) < 1e-6 && Math.abs(r.lon - location.lon) < 1e-6),
+    );
+    localStorage.setItem(RECENTS_KEY, JSON.stringify(filtered));
+    window.dispatchEvent(new CustomEvent(RECENTS_CHANGED_EVENT));
+}
+
 export function isBookmarked(bookmarks: LocationBookmark[], loc: { lat: number; lon: number }): boolean {
     return bookmarks.some(b => Math.abs(b.lat - loc.lat) < 1e-6 && Math.abs(b.lon - loc.lon) < 1e-6);
 }
@@ -526,6 +535,14 @@ export function LocationSearch({
         inputRef.current?.focus();
     };
 
+    const handleRemoveRecent = (e: React.MouseEvent, suggestion: GeocodeSuggestion) => {
+        e.stopPropagation();
+        e.preventDefault();
+        removeRecent(suggestion);
+        setRecents(loadRecents());
+        inputRef.current?.focus();
+    };
+
     const searchMotis = useCallback(async (text: string) => {
         abortRef.current?.abort();
         const controller = new AbortController();
@@ -848,6 +865,7 @@ export function LocationSearch({
                                             active={activeIndex === itemIndex}
                                             onSelect={handleSelect}
                                             onToggleBookmark={handleToggleBookmark}
+                                            onRemoveRecent={handleRemoveRecent}
                                         />
                                     );
                                 })}
@@ -892,6 +910,7 @@ function SuggestionRow({
     active,
     onSelect,
     onToggleBookmark,
+    onRemoveRecent,
 }: {
     id: string;
     suggestion: GeocodeSuggestion;
@@ -900,6 +919,7 @@ function SuggestionRow({
     active: boolean;
     onSelect: (s: GeocodeSuggestion) => void;
     onToggleBookmark: (e: React.MouseEvent, s: GeocodeSuggestion) => void;
+    onRemoveRecent?: (e: React.MouseEvent, s: GeocodeSuggestion) => void;
 }) {
     return (
         <li
@@ -917,13 +937,26 @@ function SuggestionRow({
                     <div className="text-xs text-muted-foreground truncate">{suggestion.detail}</div>
                 )}
             </div>
-            {recent && !bookmarked && (
+            {recent && !bookmarked && onRemoveRecent && (
+                <span
+                    role="button"
+                    tabIndex={-1}
+                    className="shrink-0 p-0.5 rounded text-muted-foreground hover:text-foreground"
+                    onClick={(e) => onRemoveRecent(e, suggestion)}
+                    onMouseDown={(e) => e.preventDefault()}
+                    title="Aus Verlauf entfernen"
+                    aria-label={`${suggestion.name} aus Verlauf entfernen`}
+                >
+                    <X className="h-3.5 w-3.5" />
+                </span>
+            )}
+            {recent && !bookmarked && !onRemoveRecent && (
                 <Clock className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             )}
             <span
                 role="button"
                 tabIndex={-1}
-                className={`shrink-0 p-0.5 rounded hover:text-foreground ${bookmarked ? "text-foreground" : "text-muted-foreground/0 group-hover:text-muted-foreground"}`}
+                className={`shrink-0 p-0.5 rounded hover:text-foreground ${bookmarked ? "text-foreground" : "text-muted-foreground"}`}
                 onClick={(e) => onToggleBookmark(e, suggestion)}
                 onMouseDown={(e) => e.preventDefault()}
                 title={bookmarked ? "Favorit entfernen" : "Als Favorit speichern"}
