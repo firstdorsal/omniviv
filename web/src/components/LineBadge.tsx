@@ -98,6 +98,9 @@ export function LineBadge({ line, color, mode, variant = "inline", className = "
                 <span
                     className={`inline-flex items-center gap-1 rounded px-1.5 h-6 font-mono font-bold text-xs leading-none ${className}`}
                     style={{ backgroundColor: bg, color: textColor }}
+                    data-testid={`line-badge-${line}`}
+                    data-line={line}
+                    data-color={bg}
                 >
                     {Icon ? <Icon className="h-4 w-4 shrink-0" /> : null}
                     {line}

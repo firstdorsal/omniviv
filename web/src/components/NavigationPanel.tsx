@@ -412,9 +412,9 @@ export function NavigationPanel({
                 )}
 
                 {itineraries.length > 0 && (
-                    <div className="space-y-3">
+                    <div className="space-y-3" data-testid="route-results">
                         {itineraries.map((itinerary, i) => (
-                            <div key={i} className="@container border rounded-lg p-3 space-y-2">
+                            <div key={i} className="@container border rounded-lg p-3 space-y-2" data-testid={`itinerary-${i}`}>
                                 <div className="flex items-center justify-between text-sm">
                                     <span className="font-medium">
                                         {formatTime(itinerary.startTime, false)} - {formatTime(itinerary.endTime, false)}

@@ -108,10 +108,18 @@ async fn filter_by_direction(
         }
     }
 
-    // Build direction keywords per (line, type).
-    // e.g. ("4", "tram") -> {"oberhausen", "nord"}
-    // from route name "Straßenbahn 4: Hauptbahnhof => Oberhausen Nord P+R"
-    let mut direction_keywords: HashMap<(String, String), HashSet<String>> = HashMap::new();
+    // Build origin keywords (= Gegenrichtung) per (line, type).
+    // From route name "Straßenbahn 4: Hauptbahnhof => Oberhausen Nord P+R":
+    //   origin = "Hauptbahnhof" (before =>)  = where the tram COMES FROM
+    //   dest   = "Oberhausen Nord P+R" (after =>) = where the tram GOES TO
+    //
+    // A departure whose destination matches the ORIGIN is going the WRONG way
+    // (it's heading back to where this route starts from).
+    // We REJECT departures whose destination contains origin keywords.
+    // This correctly handles:
+    //   - "Königsplatz" as short-turn destination (no origin keyword → let through)
+    //   - "Göggingen" at A1 which has origin "Göggingen" → blocked (wrong direction)
+    let mut origin_keywords: HashMap<(String, String), HashSet<String>> = HashMap::new();
     let mut known_lines_by_type: HashMap<String, HashSet<String>> = HashMap::new();
 
     for (route_ref, route_type, route_name) in &rows {
@@ -122,15 +130,29 @@ async fn filter_by_direction(
 
         if let Some(name) = route_name {
             if let Some(arrow_pos) = name.find("=>") {
-                let dest = name[arrow_pos + 2..].trim();
-                let keywords = direction_keywords
+                // Extract origin part (before =>), skip the "Straßenbahn N: " prefix
+                let before_arrow = name[..arrow_pos].trim();
+                let origin_part = if let Some(colon_pos) = before_arrow.find(':') {
+                    before_arrow[colon_pos + 1..].trim()
+                } else {
+                    before_arrow
+                };
+
+                let keywords = origin_keywords
                     .entry((route_ref.clone(), route_type.clone()))
                     .or_default();
-                for word in dest.split_whitespace() {
+                // Common city/place names that appear in both directions
+                // and should not be used as direction discriminators
+                const IGNORE_WORDS: &[&str] = &[
+                    "augsburg", "münchen", "munich", "nürnberg", "regensburg",
+                    "straßenbahn", "stadtbus", "nachtbus", "regionalbahn",
+                ];
+
+                for word in origin_part.split_whitespace() {
                     let normalized = word
                         .trim_matches(|c: char| !c.is_alphanumeric())
                         .to_lowercase();
-                    if normalized.len() >= 4 {
+                    if normalized.len() >= 4 && !IGNORE_WORDS.contains(&normalized.as_str()) {
                         keywords.insert(normalized);
                     }
                 }
@@ -138,31 +160,32 @@ async fn filter_by_direction(
         }
     }
 
-    // Filter departures:
-    // - If the line IS in our OSM routes: filter by direction keywords
-    // - If the line is NOT in our OSM routes: let it through (temporary reroute)
+    // Filter departures by direction:
+    // - For lines WITH an OSM route at this platform: reject wrong direction
+    //   (destination matches the route's origin = going backwards)
+    // - For lines WITHOUT an OSM route: let through (GTFS has them here,
+    //   could be temporary reroute due to construction)
+    // - If no OSM routes of this transport type exist at all: no filtering
     departures
         .into_iter()
         .filter(|d| {
             let osm_type = d.gtfs_route_type.map(|t| gtfs_to_osm(t)).unwrap_or("bus");
-            let is_known_line = known_lines_by_type
-                .get(osm_type)
-                .map_or(false, |lines| lines.contains(&d.line_number));
 
-            if !is_known_line {
-                // Line not in OSM routes for this platform → let through
-                // (could be a temporary reroute due to construction)
+            // No OSM routes of this type at this platform → no filtering possible
+            if !known_lines_by_type.contains_key(osm_type) {
                 return true;
             }
 
-            // Line is known at this platform → check direction
+            // Check if this specific line has OSM route data
             let key = (d.line_number.clone(), osm_type.to_string());
-            match direction_keywords.get(&key) {
+            match origin_keywords.get(&key) {
                 Some(keywords) if !keywords.is_empty() => {
+                    // This line has OSM routes → filter by direction
                     let dest_lower = d.destination.to_lowercase();
-                    keywords.iter().any(|kw| dest_lower.contains(kw))
+                    // REJECT if destination contains origin keyword (wrong direction)
+                    !keywords.iter().any(|kw| dest_lower.contains(kw))
                 }
-                _ => true, // No direction keywords → let through
+                _ => true, // No OSM route for this line → let through
             }
         })
         .collect()
