@@ -328,6 +328,10 @@ export function NavigationPanel({
                                                         : undefined
                                             }
                                             autoFocus={focusRequest !== null && slotKeys[i] === focusRequest.key ? focusRequest.seq : undefined}
+                                            excludeLocations={total === 2
+                                                ? [isStart ? endLocation : startLocation].filter((l): l is ResolvedLocation => l !== null)
+                                                : undefined
+                                            }
                                         />
                                     </div>
                                     {/* Remove button — shown for any stop when more than 2 exist */}

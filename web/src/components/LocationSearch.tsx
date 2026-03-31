@@ -35,6 +35,8 @@ interface LocationSearchProps {
     onPickOnMap?: () => void;
     /** Auto-focus the input. Pass a changing value (e.g. timestamp) to re-trigger. */
     autoFocus?: number | boolean;
+    /** Locations to hide from bookmarks, recents, and suggestions (e.g. already selected in another input) */
+    excludeLocations?: ResolvedLocation[];
 }
 
 /** Icon for a location type, using Pinhead map icons.
@@ -401,6 +403,7 @@ export function LocationSearch({
     isPickingOnMap = false,
     onPickOnMap,
     autoFocus = false,
+    excludeLocations,
 }: LocationSearchProps) {
     const [query, setQuery] = useState(value?.name ?? "");
     const [isOpen, setIsOpen] = useState(false);
@@ -472,8 +475,17 @@ export function LocationSearch({
         });
     }, [bookmarks, stations]);
 
+    // Helper: check if a location matches any of the excluded locations
+    const isExcluded = useCallback((loc: { lat: number; lon: number }) => {
+        if (!excludeLocations || excludeLocations.length === 0) return false;
+        return excludeLocations.some(
+            ex => Math.abs(ex.lat - loc.lat) < 1e-6 && Math.abs(ex.lon - loc.lon) < 1e-6,
+        );
+    }, [excludeLocations]);
+
     // Filter bookmarks that match the current query (all when query is short)
     const matchingBookmarks = enrichedBookmarks.filter(b => {
+        if (isExcluded(b)) return false;
         if (query.length < 2) return true;
         return b.name.toLowerCase().includes(query.toLowerCase());
     });
@@ -493,23 +505,22 @@ export function LocationSearch({
         });
     }, [recents, stations]);
 
-    // Filter recents: match query, exclude bookmarked locations
+    // Filter recents: match query, exclude bookmarked locations and excluded locations
     const matchingRecents = enrichedRecents.filter(r => {
-        // Exclude if already a bookmark
         if (isBookmarked(bookmarks, r)) return false;
+        if (isExcluded(r)) return false;
         if (query.length < 2) return true;
         return r.name.toLowerCase().includes(query.toLowerCase());
     });
     const showRecents = matchingRecents.length > 0;
 
-    // Deduplicate suggestions against both bookmarks and recents
-    const filteredSuggestions = (showBookmarks || showRecents)
-        ? suggestions.filter(s => {
-            if (showBookmarks && matchingBookmarks.some(b => Math.abs(b.lat - s.lat) < 1e-6 && Math.abs(b.lon - s.lon) < 1e-6)) return false;
-            if (showRecents && matchingRecents.some(r => Math.abs(r.lat - s.lat) < 1e-6 && Math.abs(r.lon - s.lon) < 1e-6)) return false;
-            return true;
-        })
-        : suggestions;
+    // Deduplicate suggestions against both bookmarks and recents, and exclude locations
+    const filteredSuggestions = suggestions.filter(s => {
+        if (isExcluded(s)) return false;
+        if (showBookmarks && matchingBookmarks.some(b => Math.abs(b.lat - s.lat) < 1e-6 && Math.abs(b.lon - s.lon) < 1e-6)) return false;
+        if (showRecents && matchingRecents.some(r => Math.abs(r.lat - s.lat) < 1e-6 && Math.abs(r.lon - s.lon) < 1e-6)) return false;
+        return true;
+    });
 
     // Build the flat list of visible items for keyboard navigation
     const visibleItems: GeocodeSuggestion[] = [];

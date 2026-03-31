@@ -419,5 +419,6 @@ BEGIN
 
     RETURN stations_mvt || stops_mvt || connections_mvt;
 END;
-$function$
-COMMENT ON FUNCTION transit_stations IS 'Vector tile source for transit stations and stop positions (Final stable unique IDs)';
+$function$;
+
+COMMENT ON FUNCTION transit_stations IS 'Vector tile source for transit stations and stop positions';

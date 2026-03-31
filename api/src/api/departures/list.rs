@@ -37,21 +37,27 @@ fn filter_same_station_destinations(departures: Vec<Departure>, stop_ifopt: &str
         .collect()
 }
 
-/// Filter departures by the line numbers (refs) of OSM routes serving this platform.
+/// Filter departures by direction using OSM route data.
 ///
-/// OSM route relations tell us exactly which lines stop at each platform.
-/// For example, A3 at Königsplatz only has "Straßenbahn 4" → only tram 4 departures.
-/// This is more precise than keyword matching on destination names.
+/// For lines that have an OSM route at this platform, only keep departures
+/// whose destination matches the OSM route's direction (extracted from the
+/// route name after "=>"). Lines NOT in OSM routes are let through (they
+/// may be temporary reroutes due to construction).
+///
+/// Example: A1 has OSM route "Straßenbahn 1: Göggingen => Lechhausen"
+/// → Tram 1 departures must have "lechhausen" in destination
+/// → Tram 2 departures (reroute) are let through (no OSM route to filter against)
 async fn filter_by_direction(
     departures: Vec<Departure>,
     stop_id: &str,
     pool: &PgPool,
 ) -> Vec<Departure> {
-    // Load line numbers (refs) of OSM routes serving this platform, grouped by type.
-    let rows: Vec<(String, String)> = if let Some(osm_id) = parse_osm_stop_id(stop_id) {
+    // Load OSM route refs + direction keywords for this platform.
+    // Each row: (route_ref, route_type, route_name)
+    let rows: Vec<(String, String, Option<String>)> = if let Some(osm_id) = parse_osm_stop_id(stop_id) {
         match sqlx::query_as(
             r#"
-            SELECT DISTINCT r.ref, r.route_type
+            SELECT DISTINCT r.ref, r.route_type, r.name
             FROM route_stops rs
             JOIN routes r ON r.osm_id = rs.route_id
             WHERE r.ref IS NOT NULL
@@ -68,7 +74,7 @@ async fn filter_by_direction(
     } else {
         match sqlx::query_as(
             r#"
-            SELECT DISTINCT r.ref, r.route_type
+            SELECT DISTINCT r.ref, r.route_type, r.name
             FROM route_stops rs
             JOIN routes r ON r.osm_id = rs.route_id
             LEFT JOIN platforms p ON p.osm_id = rs.platform_id
@@ -90,16 +96,6 @@ async fn filter_by_direction(
         return departures;
     }
 
-    // Build allowed line numbers per transport type
-    // e.g. tram: {"4"}, bus: {"44", "91"}
-    let mut allowed_lines_by_type: HashMap<String, HashSet<String>> = HashMap::new();
-    for (route_ref, route_type) in &rows {
-        allowed_lines_by_type
-            .entry(route_type.clone())
-            .or_default()
-            .insert(route_ref.clone());
-    }
-
     fn gtfs_to_osm(gtfs_type: i32) -> &'static str {
         match gtfs_type {
             0 => "tram",
@@ -112,30 +108,64 @@ async fn filter_by_direction(
         }
     }
 
-    // Collect all allowed line numbers across all types
-    let _all_allowed: HashSet<&String> = allowed_lines_by_type.values().flat_map(|s| s.iter()).collect();
+    // Build direction keywords per (line, type).
+    // e.g. ("4", "tram") -> {"oberhausen", "nord"}
+    // from route name "Straßenbahn 4: Hauptbahnhof => Oberhausen Nord P+R"
+    let mut direction_keywords: HashMap<(String, String), HashSet<String>> = HashMap::new();
+    let mut known_lines_by_type: HashMap<String, HashSet<String>> = HashMap::new();
 
-    // Filter: only keep departures whose line number matches an OSM route at this platform.
-    // BUT: if NO departures match any OSM route (e.g. replacement service B6 for Tram 6),
-    // then let ALL departures through — better to show something than nothing.
-    let filtered: Vec<Departure> = departures
-        .iter()
+    for (route_ref, route_type, route_name) in &rows {
+        known_lines_by_type
+            .entry(route_type.clone())
+            .or_default()
+            .insert(route_ref.clone());
+
+        if let Some(name) = route_name {
+            if let Some(arrow_pos) = name.find("=>") {
+                let dest = name[arrow_pos + 2..].trim();
+                let keywords = direction_keywords
+                    .entry((route_ref.clone(), route_type.clone()))
+                    .or_default();
+                for word in dest.split_whitespace() {
+                    let normalized = word
+                        .trim_matches(|c: char| !c.is_alphanumeric())
+                        .to_lowercase();
+                    if normalized.len() >= 4 {
+                        keywords.insert(normalized);
+                    }
+                }
+            }
+        }
+    }
+
+    // Filter departures:
+    // - If the line IS in our OSM routes: filter by direction keywords
+    // - If the line is NOT in our OSM routes: let it through (temporary reroute)
+    departures
+        .into_iter()
         .filter(|d| {
             let osm_type = d.gtfs_route_type.map(|t| gtfs_to_osm(t)).unwrap_or("bus");
-            match allowed_lines_by_type.get(osm_type) {
-                Some(allowed) => allowed.contains(&d.line_number),
-                None => true,
+            let is_known_line = known_lines_by_type
+                .get(osm_type)
+                .map_or(false, |lines| lines.contains(&d.line_number));
+
+            if !is_known_line {
+                // Line not in OSM routes for this platform → let through
+                // (could be a temporary reroute due to construction)
+                return true;
+            }
+
+            // Line is known at this platform → check direction
+            let key = (d.line_number.clone(), osm_type.to_string());
+            match direction_keywords.get(&key) {
+                Some(keywords) if !keywords.is_empty() => {
+                    let dest_lower = d.destination.to_lowercase();
+                    keywords.iter().any(|kw| dest_lower.contains(kw))
+                }
+                _ => true, // No direction keywords → let through
             }
         })
-        .cloned()
-        .collect();
-
-    // If filtering removed ALL departures, the GTFS data doesn't match OSM
-    // (e.g. replacement bus service). Return unfiltered in that case.
-    if filtered.is_empty() && !departures.is_empty() {
-        return departures;
-    }
-    filtered
+        .collect()
 }
 
 /// Filter out departures that are too far in the past relative to the given reference time.
