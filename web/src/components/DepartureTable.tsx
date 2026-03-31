@@ -32,6 +32,8 @@ export interface TripEvent {
     gtfsRouteType: number | null;
     /** Route color from API */
     color: string | null;
+    /** Operator/agency name from GTFS */
+    operator: string | null;
     isFirstStop: boolean;
     isLastStop: boolean;
 }
@@ -96,6 +98,7 @@ export function buildTripEvents(events: Departure[]): TripEvent[] {
                 cancelled: event.cancelled === true,
                 gtfsRouteType: event.gtfs_route_type ?? null,
                 color: event.color ?? null,
+                operator: event.operator ?? null,
                 isFirstStop: isFirst,
                 isLastStop: isLast,
             });
@@ -190,14 +193,15 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
 
     const allTripEvents = useMemo(() => buildTripEvents(events), [events]);
 
-    // Per-line color and mode from the first trip with that line
+    // Per-line color, mode, and operator from the first trip with that line
     const lineInfo = useMemo(() => {
-        const map = new globalThis.Map<string, { color: string | null; mode: string | undefined }>();
+        const map = new globalThis.Map<string, { color: string | null; mode: string | undefined; operator: string | null }>();
         for (const trip of allTripEvents) {
             if (!map.has(trip.lineNumber)) {
                 map.set(trip.lineNumber, {
                     color: trip.color,
                     mode: gtfsRouteTypeToMode(trip.gtfsRouteType),
+                    operator: trip.operator,
                 });
             }
         }
@@ -268,6 +272,7 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
                                     line={line}
                                     color={lineInfo.get(line)?.color ?? routeColors.get(`${lineInfo.get(line)?.mode}:${line}`) ?? routeColors.get(line)}
                                     mode={lineInfo.get(line)?.mode ?? routeTypes?.get(line)}
+                                    operator={lineInfo.get(line)?.operator}
                                 />
                             </button>
                         );
@@ -321,7 +326,7 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
                         return (
                             <tr key={trip.tripId} className={`whitespace-nowrap${trip.cancelled ? " line-through opacity-50" : ""}`}>
                                 <td className="pr-2 py-1">
-                                    <LineBadge line={trip.lineNumber} color={trip.color ?? routeColors.get(`${gtfsRouteTypeToMode(trip.gtfsRouteType)}:${trip.lineNumber}`) ?? routeColors.get(trip.lineNumber)} mode={gtfsRouteTypeToMode(trip.gtfsRouteType) ?? routeTypes?.get(trip.lineNumber)} />
+                                    <LineBadge line={trip.lineNumber} color={trip.color ?? routeColors.get(`${gtfsRouteTypeToMode(trip.gtfsRouteType)}:${trip.lineNumber}`) ?? routeColors.get(trip.lineNumber)} mode={gtfsRouteTypeToMode(trip.gtfsRouteType) ?? routeTypes?.get(trip.lineNumber)} operator={trip.operator} />
                                 </td>
                                 <td className="pr-3">{trip.destination}</td>
                                 {showArr && (

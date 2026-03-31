@@ -292,6 +292,7 @@ mod tests {
             cancelled: false,
             gtfs_route_type: None,
             color: None,
+            operator: None,
             is_first_stop: false,
             is_last_stop: false,
         }

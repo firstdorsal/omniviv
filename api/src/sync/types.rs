@@ -44,6 +44,9 @@ pub struct Departure {
     /// Route color from GTFS or OSM (hex, e.g. "#ee1d23")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Operator/agency name (e.g. "DB Regio AG Bayern", "Go-Ahead")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
     /// Whether this is the first stop of the trip
     pub is_first_stop: bool,
     /// Whether this is the last stop of the trip

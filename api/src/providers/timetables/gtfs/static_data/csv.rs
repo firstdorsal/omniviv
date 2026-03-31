@@ -47,6 +47,8 @@ pub fn load_schedule(zip_path: &Path) -> Result<GtfsSchedule, GtfsError> {
     let routes = parse_routes(&mut archive)?;
     info!(count = routes.len(), "Parsed GTFS routes");
 
+    let agencies = parse_agencies(&mut archive);
+
     let trips = parse_trips(&mut archive)?;
     info!(count = trips.len(), "Parsed GTFS trips");
 
@@ -78,6 +80,7 @@ pub fn load_schedule(zip_path: &Path) -> Result<GtfsSchedule, GtfsError> {
         stops,
         routes,
         trips,
+        agencies,
         stop_times,
         calendars,
         calendar_dates,
@@ -155,6 +158,7 @@ pub(crate) fn parse_routes(
     let idx_long = headers.iter().position(|h| h == "route_long_name");
     let idx_type = headers.iter().position(|h| h == "route_type");
     let idx_color = headers.iter().position(|h| h == "route_color");
+    let idx_agency = headers.iter().position(|h| h == "agency_id");
 
     let mut routes = HashMap::new();
     let mut skipped = 0usize;
@@ -182,6 +186,9 @@ pub(crate) fn parse_routes(
                     .and_then(|i| record.get(i))
                     .and_then(non_empty)
                     .map(|c| if c.starts_with('#') { c.to_string() } else { format!("#{c}") }),
+                agency_id: idx_agency
+                    .and_then(|i| record.get(i))
+                    .and_then(non_empty),
             },
         );
     }
@@ -189,6 +196,44 @@ pub(crate) fn parse_routes(
         warn!(skipped, "Skipped routes.txt records with empty route_id");
     }
     Ok(routes)
+}
+
+pub(crate) fn parse_agencies(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+) -> HashMap<String, String> {
+    info!("Parsing agency.txt");
+    let file = match archive.by_name("agency.txt") {
+        Ok(f) => f,
+        Err(_) => {
+            info!("No agency.txt in GTFS zip (optional file)");
+            return HashMap::new();
+        }
+    };
+    let mut rdr = csv::Reader::from_reader(file);
+    let headers = match rdr.headers() {
+        Ok(h) => h.clone(),
+        Err(_) => return HashMap::new(),
+    };
+
+    let idx_id = headers.iter().position(|h| h == "agency_id");
+    let idx_name = headers.iter().position(|h| h == "agency_name");
+
+    let (Some(idx_id), Some(idx_name)) = (idx_id, idx_name) else {
+        warn!("agency.txt missing agency_id or agency_name columns");
+        return HashMap::new();
+    };
+
+    let mut agencies = HashMap::new();
+    for result in rdr.records() {
+        let Ok(record) = result else { continue };
+        let agency_id = record.get(idx_id).unwrap_or("").to_string();
+        let agency_name = record.get(idx_name).unwrap_or("").to_string();
+        if !agency_id.is_empty() && !agency_name.is_empty() {
+            agencies.insert(agency_id, agency_name);
+        }
+    }
+    info!(count = agencies.len(), "Parsed GTFS agencies");
+    agencies
 }
 
 pub(crate) fn parse_trips(

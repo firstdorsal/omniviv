@@ -6,7 +6,7 @@ use sqlx::PgPool;
 use tracing::{debug, info, warn};
 
 use super::super::error::GtfsError;
-use super::csv::{parse_calendar, parse_calendar_dates, parse_gtfs_time, parse_routes, parse_stops, parse_trips};
+use super::csv::{parse_agencies, parse_calendar, parse_calendar_dates, parse_gtfs_time, parse_routes, parse_stops, parse_trips};
 use super::download::MAX_DECOMPRESSED_SIZE;
 use super::types::{
     GtfsCalendar, GtfsCalendarDate, GtfsRoute, GtfsSchedule, GtfsStop, GtfsStopTime, GtfsTrip,
@@ -39,7 +39,7 @@ pub async fn load_schedule_to_db(pool: &PgPool, zip_path: &Path) -> Result<(), G
 
     // Phase 1: Parse everything except stop_times (all fit in memory)
     let path = zip_path.to_path_buf();
-    let (stops, routes, trips, calendars, calendar_dates) =
+    let (stops, routes, agencies, trips, calendars, calendar_dates) =
         tokio::task::spawn_blocking({
             let path = path.clone();
             move || -> Result<_, GtfsError> {
@@ -62,11 +62,12 @@ pub async fn load_schedule_to_db(pool: &PgPool, zip_path: &Path) -> Result<(), G
 
                 let stops = parse_stops(&mut archive)?;
                 let routes = parse_routes(&mut archive)?;
+                let agencies = parse_agencies(&mut archive);
                 let trips = parse_trips(&mut archive)?;
                 let calendars = parse_calendar(&mut archive);
                 let calendar_dates = parse_calendar_dates(&mut archive);
 
-                Ok((stops, routes, trips, calendars, calendar_dates))
+                Ok((stops, routes, agencies, trips, calendars, calendar_dates))
             }
         })
         .await??;
@@ -85,7 +86,7 @@ pub async fn load_schedule_to_db(pool: &PgPool, zip_path: &Path) -> Result<(), G
     // Truncate all GTFS tables (fast, DDL-level reset)
     sqlx::query(
         "TRUNCATE gtfs_stop_times, gtfs_trips, gtfs_routes, gtfs_stops, \
-         gtfs_calendar, gtfs_calendar_dates, ifopt_gtfs_mapping, gtfs_feed_meta",
+         gtfs_calendar, gtfs_calendar_dates, gtfs_agencies, ifopt_gtfs_mapping, gtfs_feed_meta",
     )
     .execute(pool)
     .await?;
@@ -117,18 +118,33 @@ pub async fn load_schedule_to_db(pool: &PgPool, zip_path: &Path) -> Result<(), G
     ).execute(pool).await?;
     info!("Populated GTFS stops geometry");
 
+    // --- Insert agencies ---
+    let agency_count = agencies.len();
+    let agency_entries: Vec<_> = agencies.iter().collect();
+    for batch in agency_entries.chunks(DB_BATCH_SIZE) {
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT INTO gtfs_agencies (agency_id, agency_name) ",
+        );
+        qb.push_values(batch.iter(), |mut b, (id, name)| {
+            b.push_bind(id).push_bind(name);
+        });
+        qb.build().execute(pool).await?;
+    }
+    info!(count = agency_count, "Inserted GTFS agencies");
+
     // --- Insert routes ---
     let route_values: Vec<_> = routes.values().collect();
     for batch in route_values.chunks(DB_BATCH_SIZE) {
         let mut qb = sqlx::QueryBuilder::new(
-            "INSERT INTO gtfs_routes (route_id, route_short_name, route_long_name, route_type, route_color) ",
+            "INSERT INTO gtfs_routes (route_id, route_short_name, route_long_name, route_type, route_color, agency_id) ",
         );
         qb.push_values(batch.iter(), |mut b, route| {
             b.push_bind(&route.route_id)
                 .push_bind(&route.route_short_name)
                 .push_bind(&route.route_long_name)
                 .push_bind(route.route_type)
-                .push_bind(&route.route_color);
+                .push_bind(&route.route_color)
+                .push_bind(&route.agency_id);
         });
         qb.build().execute(pool).await?;
     }
@@ -552,29 +568,48 @@ async fn build_schedule_from_gtfs_ids(
         }
     }
 
-    // 4. Load routes
+    // 4. Load routes (with agency_id)
     let route_id_list: Vec<String> = route_ids.into_iter().collect();
-    let route_rows: Vec<(String, Option<String>, Option<String>, Option<i32>, Option<String>)> = sqlx::query_as(
-        "SELECT route_id, route_short_name, route_long_name, route_type, route_color \
+    let route_rows: Vec<(String, Option<String>, Option<String>, Option<i32>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT route_id, route_short_name, route_long_name, route_type, route_color, agency_id \
          FROM gtfs_routes WHERE route_id = ANY($1::text[])",
     )
     .bind(&route_id_list)
     .fetch_all(pool)
     .await?;
 
+    let mut agency_ids_needed: HashSet<String> = HashSet::new();
     let mut routes = HashMap::with_capacity(route_rows.len());
-    for (route_id, short, long, rtype, color) in route_rows {
+    for (route_id, short, long, rtype, color, agency_id) in route_rows {
+        if let Some(ref aid) = agency_id {
+            agency_ids_needed.insert(aid.clone());
+        }
         routes.insert(
             route_id.clone(),
             GtfsRoute {
-                route_id,
+                route_id: route_id.clone(),
                 route_short_name: short,
                 route_long_name: long,
                 route_type: rtype,
                 route_color: color,
+                agency_id,
             },
         );
     }
+
+    // 4b. Load agencies for the routes we loaded
+    let agency_id_list: Vec<String> = agency_ids_needed.into_iter().collect();
+    let agencies: HashMap<String, String> = if agency_id_list.is_empty() {
+        HashMap::new()
+    } else {
+        let agency_rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT agency_id, agency_name FROM gtfs_agencies WHERE agency_id = ANY($1::text[])",
+        )
+        .bind(&agency_id_list)
+        .fetch_all(pool)
+        .await?;
+        agency_rows.into_iter().collect()
+    };
 
     // 5. Load calendars and calendar_dates
     let service_id_list: Vec<String> = service_ids.into_iter().collect();
@@ -659,6 +694,7 @@ async fn build_schedule_from_gtfs_ids(
         stops,
         routes,
         trips,
+        agencies,
         stop_times,
         calendars,
         calendar_dates,

@@ -441,7 +441,8 @@ export function NavigationPanel({
                                                         color={leg.routeColor
                                                             ? (leg.routeColor.startsWith('#') ? leg.routeColor : `#${leg.routeColor}`)
                                                             : leg.routeShortName ? (
-                                                                routeColors.get(`${leg.mode?.toLowerCase()}:${leg.routeShortName}`)
+                                                                (leg.agencyName ? routeColors.get(`${leg.agencyName}:${leg.routeShortName}`) : undefined)
+                                                                ?? routeColors.get(`${leg.mode?.toLowerCase()}:${leg.routeShortName}`)
                                                                 ?? routeColors.get(leg.routeShortName)
                                                             ) : undefined}
                                                         mode={leg.mode || (leg.routeShortName ? routeTypes.get(leg.routeShortName) : undefined)}

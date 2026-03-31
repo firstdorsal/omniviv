@@ -12,14 +12,6 @@
  * Only needed for categories where the name doesn't match 1:1 with Maki/Temaki files.
  */
 export const categoryOverrides: Record<string, string> = {
-    hotel: "maki/lodging",
-    supermarket: "maki/grocery",
-    newsagent: "maki/shop",
-    shop_other: "maki/shop",
-    christian: "maki/religious-christian",
-    muslim: "maki/religious-muslim",
-    jewish: "maki/religious-jewish",
-    buddhist: "maki/religious-buddhist",
     none: "maki/marker",
 
     // Generic location types (not from MOTIS)
@@ -33,7 +25,211 @@ export const categoryOverrides: Record<string, string> = {
     coordinates: "maki/marker",
     place: "maki/marker",
 
-    // OpenMapTiles POI class/subclass names that differ from Maki icon names
+    // -- Food & drink ---------------------------------------------------------
+    pub: "maki/beer",
+    biergarten: "maki/beer",
+    outdoor_seating: "maki/cafe",
+
+    // -- Culture & entertainment ----------------------------------------------
+    artwork: "maki/art-gallery",
+    community_centre: "maki/building",
+    arts_centre: "maki/art-gallery",
+    gallery: "maki/art-gallery",
+    internet_cafe: "maki/cafe",
+    public_bookcase: "maki/library",
+    amusement_arcade: "maki/gaming",
+
+    // -- Historic -------------------------------------------------------------
+    memorial: "maki/monument",
+    archaeological_site: "temaki/ruins",
+    palace: "maki/castle",
+    fortress: "maki/castle",
+    historic_fort: "maki/castle",
+    bust: "temaki/statue",
+    city_gate: "temaki/gate",
+    manor: "maki/lodging",
+    stone: "temaki/cairn",
+    carto_shrine: "maki/place-of-worship",
+
+    // -- Leisure & sports -----------------------------------------------------
+    fitness: "maki/fitness-centre",
+    massage: "temaki/beauty_salon",
+    sauna: "temaki/spa",
+    public_bath: "maki/swimming",
+    miniature_golf: "maki/golf",
+    beach_resort: "maki/beach",
+    fishing: "temaki/fishing_pier",
+    leisure_dance: "maki/music",
+    golf_icon: "maki/golf",
+    leisure_golf_pin: "maki/golf",
+    sports_centre: "maki/stadium",
+
+    // -- Amenities & utilities ------------------------------------------------
+    toilets: "maki/toilet",
+    waste_disposal: "maki/waste-basket",
+    camping: "maki/campsite",
+    caravan: "temaki/camper_trailer",
+    firepit: "temaki/campfire",
+    bird_hide: "temaki/binoculars",
+    table: "maki/picnic-site",
+    excrement_bags: "temaki/vending_pet_waste",
+
+    // -- Tourism & information ------------------------------------------------
+    guidepost: "temaki/sign_and_pedestrian",
+    board: "temaki/info_board",
+    office: "maki/building",
+    audioguide: "maki/information",
+
+    // -- Accommodation --------------------------------------------------------
+    hotel: "maki/lodging",
+    tourism_guest_house: "maki/lodging",
+    hostel: "maki/lodging",
+    chalet: "temaki/cabin",
+    motel: "maki/lodging",
+    apartment: "maki/building",
+    alpinehut: "temaki/hut",
+    wilderness_hut: "temaki/hut",
+
+    // -- Financial ------------------------------------------------------------
+    bureau_de_change: "maki/bank",
+
+    // -- Health ---------------------------------------------------------------
+    doctors: "maki/doctor",
+
+    // -- Education ------------------------------------------------------------
+    kindergarten: "maki/school",
+    university: "maki/college",
+
+    // -- Post & communication -------------------------------------------------
+    post_office: "maki/post",
+    parcel_locker: "temaki/vending_lockers",
+
+    // -- Transport ------------------------------------------------------------
+    parking_subtle: "maki/parking",
+    parking_bicycle: "maki/bicycle-share",
+    rendering_railway_tram_stop_mapnik: "maki/rail-light",
+    amenity_bus_station: "maki/bus",
+    helipad: "maki/heliport",
+    aerodrome: "maki/airport",
+    rental_bicycle: "maki/bicycle-share",
+    parking_tickets: "temaki/vending_tickets",
+    subway_entrance: "maki/rail-metro",
+    rental_car: "maki/car-rental",
+    parking_entrance: "maki/parking-garage",
+    public_transport_tickets: "temaki/vending_tickets",
+    ferry_icon: "maki/ferry",
+    parking_motorcycle: "temaki/motorcycle",
+    bicycle_repair_station: "temaki/bicycle_repair",
+    parking_entrance_multi_storey: "maki/parking-garage",
+    transport_slipway: "maki/slipway",
+
+    // -- Government & public services -----------------------------------------
+    townhall: "maki/town-hall",
+    diplomatic: "maki/embassy",
+    office_diplomatic_consulate: "maki/embassy",
+    social_amenity_darken: "temaki/social_facility",
+
+    // -- Religion -------------------------------------------------------------
+    christian: "maki/religious-christian",
+    muslim: "maki/religious-muslim",
+    jewish: "maki/religious-jewish",
+    buddhist: "maki/religious-buddhist",
+    taoist: "temaki/taoism",
+    hinduist: "temaki/hinduism",
+    shintoist: "temaki/shinto",
+    sikhist: "temaki/sikhism",
+    church: "maki/religious-christian",
+    mosque: "maki/religious-muslim",
+    synagogue: "maki/religious-jewish",
+
+    // -- Shopping -------------------------------------------------------------
+    supermarket: "maki/grocery",
+    newsagent: "maki/shop",
+    shop_other: "maki/shop",
+    marketplace: "temaki/shopping_mall",
+    clothes: "maki/clothing-store",
+    doityourself: "temaki/tools",
+    purple_car: "maki/car",
+    beauty: "temaki/beauty_salon",
+    butcher: "temaki/meat",
+    alcohol: "maki/alcohol-shop",
+    electronics: "temaki/electronic",
+    shoes: "maki/shoe",
+    car_parts: "temaki/car_structure",
+    greengrocer: "temaki/food",
+    jewellery: "maki/jewelry-store",
+    jeweller: "maki/jewelry-store",
+    books: "maki/library",
+    department_store: "temaki/shopping_mall",
+    variety_store: "maki/shop",
+    travel_agency: "temaki/ticket",
+    sports: "maki/shop",
+    chemist: "maki/pharmacy",
+    computer: "temaki/electronic",
+    stationery: "maki/shop",
+    pet: "temaki/pet_store",
+    beverages: "maki/alcohol-shop",
+    perfumery: "temaki/perfume",
+    tyres: "maki/car-repair",
+    shop_motorcycle: "temaki/motorcycle",
+    copyshop: "temaki/toolbox",
+    toys: "maki/shop",
+    deli: "temaki/sandwich",
+    tobacco: "maki/shop",
+    seafood: "temaki/fish_cleaning",
+    interior_decoration: "maki/furniture",
+    photo: "maki/shop",
+    trade: "maki/shop",
+    outdoor: "maki/campsite",
+    houseware: "maki/shop",
+    art: "maki/art-gallery",
+    fabric: "maki/shop",
+    bookmaker: "maki/shop",
+    second_hand: "maki/shop",
+    charity: "maki/shop",
+    bed: "maki/furniture",
+    medical_supply: "maki/pharmacy",
+    hifi: "temaki/speaker",
+    shop_music: "maki/music",
+    hearing_aids: "temaki/hearing_aid",
+    musical_instrument: "maki/music",
+    tea: "maki/cafe",
+    video: "maki/shop",
+    bag: "temaki/handbag",
+    carpet: "maki/shop",
+    video_games: "maki/gaming",
+    vehicle_inspection: "maki/car-repair",
+    dairy: "temaki/milk_jug",
+    coffee: "maki/cafe",
+
+    // -- Natural --------------------------------------------------------------
+    tree: "temaki/tree_broadleaved",
+    peak: "maki/mountain",
+    spring: "maki/water",
+    cave: "temaki/cliff_falling_rocks",
+
+    // -- Infrastructure -------------------------------------------------------
+    tower_freestanding: "temaki/tower",
+    tower_observation: "maki/observation-tower",
+    tower_bell_tower: "temaki/tower",
+    hunting_stand: "temaki/hunting_blind",
+
+    // -- Place types ----------------------------------------------------------
+    hamlet: "maki/village",
+    isolated_dwelling: "maki/home",
+    allotments: "maki/garden",
+    island: "temaki/island_trees_building",
+    islet: "temaki/islet_tree",
+    locality: "maki/town",
+    suburb: "maki/city",
+    neighbourhood: "maki/city",
+    borough: "maki/city",
+    quarter: "maki/city",
+
+    // -- Misc -----------------------------------------------------------------
+    food_court: "maki/restaurant",
+
+    // -- OpenMapTiles POI class/subclass names ---------------------------------
     railway: "maki/rail",
     college: "maki/college",
     clothing_store: "maki/clothing-store",

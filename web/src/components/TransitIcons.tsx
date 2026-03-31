@@ -105,4 +105,3 @@ export function TrainIcon({ className, ...props }: IconProps) {
         </svg>
     );
 }
-

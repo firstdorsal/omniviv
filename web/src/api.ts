@@ -148,6 +148,8 @@ export interface Departure {
   gtfs_route_type?: number;
   /** Route color from GTFS or OSM (hex, e.g. "#ee1d23") */
   color?: string | null;
+  /** Operator/agency name (e.g. "DB Regio AG Bayern", "Go-Ahead") */
+  operator?: string | null;
   /** Whether this is the first stop of the trip */
   is_first_stop: boolean;
   /** Whether this is the last stop of the trip */

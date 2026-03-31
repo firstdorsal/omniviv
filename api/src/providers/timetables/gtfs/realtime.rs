@@ -367,6 +367,9 @@ pub fn process_trip_updates(
             .unwrap_or_default();
         let route_type = route.and_then(|r| r.route_type);
         let route_color = route.and_then(|r| r.route_color.clone());
+        let operator = route.and_then(|r| r.agency_id.as_ref())
+            .and_then(|aid| schedule.agencies.get(aid))
+            .cloned();
 
         let first_stop = schedule.first_stop_of_trip(trip_id);
         let last_stop = schedule.last_stop_of_trip(trip_id);
@@ -453,6 +456,7 @@ pub fn process_trip_updates(
                                 cancelled: true,
                                 gtfs_route_type: route_type,
                                 color: route_color.clone(),
+                                operator: operator.clone(),
                                 is_first_stop: is_first_stop_in_trip,
                                 is_last_stop: is_last_stop_in_trip,
                             });
@@ -474,6 +478,7 @@ pub fn process_trip_updates(
                                 cancelled: true,
                                 gtfs_route_type: route_type,
                                 color: route_color.clone(),
+                                operator: operator.clone(),
                                 is_first_stop: is_first_stop_in_trip,
                                 is_last_stop: is_last_stop_in_trip,
                             });
@@ -604,6 +609,7 @@ pub fn process_trip_updates(
                         cancelled: trip_cancelled,
                         gtfs_route_type: route_type,
                         color: route_color.clone(),
+                        operator: operator.clone(),
                         is_first_stop: is_first,
                         is_last_stop: is_last,
                     };
@@ -628,6 +634,7 @@ pub fn process_trip_updates(
                         cancelled: trip_cancelled,
                         gtfs_route_type: route_type,
                         color: route_color.clone(),
+                        operator: operator.clone(),
                         is_first_stop: is_first,
                         is_last_stop: is_last,
                     };
@@ -791,6 +798,9 @@ fn add_scheduled_departures(
             .unwrap_or_default();
         let route_type = route.and_then(|r| r.route_type);
         let route_color = route.and_then(|r| r.route_color.clone());
+        let operator = route.and_then(|r| r.agency_id.as_ref())
+            .and_then(|aid| schedule.agencies.get(aid))
+            .cloned();
 
         let first_stop = schedule.first_stop_of_trip(trip_id);
         let last_stop = schedule.last_stop_of_trip(trip_id);
@@ -852,6 +862,7 @@ fn add_scheduled_departures(
                         cancelled: is_cancelled,
                         gtfs_route_type: route_type,
                         color: route_color.clone(),
+                        operator: operator.clone(),
                         is_first_stop: is_first,
                         is_last_stop: is_last,
                     };
@@ -876,6 +887,7 @@ fn add_scheduled_departures(
                         cancelled: is_cancelled,
                         gtfs_route_type: route_type,
                         color: route_color.clone(),
+                        operator: operator.clone(),
                         is_first_stop: is_first,
                         is_last_stop: is_last,
                     };
@@ -1064,6 +1076,7 @@ mod tests {
                 route_long_name: Some("Line 1".to_string()),
                 route_type: Some(0),
                 route_color: None,
+                agency_id: None,
             },
         );
 
@@ -1125,6 +1138,7 @@ mod tests {
             stops,
             routes,
             trips,
+            agencies: HashMap::new(),
             stop_times,
             calendars,
             calendar_dates: HashMap::new(),
@@ -1657,6 +1671,7 @@ mod tests {
                 route_long_name: Some("Line 4".to_string()),
                 route_type: Some(0),
                 route_color: None,
+                agency_id: None,
             },
         );
 
@@ -1755,6 +1770,7 @@ mod tests {
             stops,
             routes,
             trips,
+            agencies: HashMap::new(),
             stop_times,
             calendars,
             calendar_dates: HashMap::new(),
