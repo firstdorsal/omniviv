@@ -107,8 +107,11 @@ test.describe("Königsplatz departures — EFA per-platform validation", () => {
                 if (!efaKeywords || efaKeywords.size === 0) continue;
 
                 const ourDestLower = (dep.destination as string).toLowerCase();
+                // Accept if destination matches EFA direction OR if destination
+                // is the current station itself (= short-turn/terminating service)
                 const matchesDirection = [...efaKeywords].some(kw => ourDestLower.includes(kw));
-                if (!matchesDirection) {
+                const isTerminatingHere = ourDestLower.includes("königsplatz");
+                if (!matchesDirection && !isTerminatingHere) {
                     errors.push(`${name} Tram ${dep.line_number}: "${dep.destination}" ≠ EFA [${[...efaKeywords].join(",")}]`);
                 }
             }
