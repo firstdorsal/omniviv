@@ -17,6 +17,15 @@ dist
 dist-ssr
 *.local
 
+# Test artifacts
+test-results/
+
+# Debug screenshots (scoped to test output)
+test-results/**/*.png
+
+# Generated data files (re-download with scripts/download-city-populations.sh)
+public/data/city-populations.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
