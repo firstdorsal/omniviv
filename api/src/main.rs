@@ -28,10 +28,13 @@ use omniviv_api::{
         api::routes::list::list_routes,
         api::routes::list::get_route,
         api::routes::list::get_route_geometry,
-        api::stations::list::list_stations,
+        api::routes::list::get_route_colors,
+        api::routes::list::get_visible_routes,
         api::stations::list::get_station,
         api::departures::get_departures_by_stop,
         api::departures::get_departures_by_gtfs_stop,
+        api::departures::get_departures_by_coordinates,
+        api::departures::get_departures_by_osm_id,
         api::vehicles::get_vehicles_by_route,
         api::issues::list_issues,
         api::health::health_check,
@@ -50,6 +53,9 @@ use omniviv_api::{
         api::routes::list::RouteDetail,
         api::routes::list::RouteStop,
         api::routes::list::RouteGeometry,
+        api::routes::list::RouteColorsResponse,
+        api::routes::list::RouteColorEntry,
+        api::routes::list::VisibleRoutesRequest,
         api::stations::list::Station,
         api::stations::list::StationPlatform,
         api::stations::list::StationStopPosition,
@@ -58,6 +64,8 @@ use omniviv_api::{
         api::departures::StopDeparturesResponse,
         api::departures::GtfsStopDeparturesRequest,
         api::departures::GtfsStopDeparturesResponse,
+        api::departures::CoordinateDeparturesRequest,
+        api::departures::OsmIdDeparturesRequest,
         api::vehicles::VehiclesByRouteRequest,
         api::vehicles::VehiclesByRouteResponse,
         api::vehicles::Vehicle,
@@ -177,14 +185,18 @@ async fn main() {
         .expect("Failed to connect to PostgreSQL database");
     tracing::info!("Connected to PostgreSQL");
 
-    // Run migrations
-    let migrator = sqlx::migrate!("./migrations");
-    tracing::info!(migrations = migrator.migrations.len(), "Found migrations");
-    migrator
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
-    tracing::info!("Database migrations completed");
+    // Run migrations (skip if SKIP_MIGRATIONS=1, used for OpenAPI spec generation)
+    if std::env::var("SKIP_MIGRATIONS").unwrap_or_default() != "1" {
+        let migrator = sqlx::migrate!("./migrations");
+        tracing::info!(migrations = migrator.migrations.len(), "Found migrations");
+        migrator
+            .run(&pool)
+            .await
+            .expect("Failed to run migrations");
+        tracing::info!("Database migrations completed");
+    } else {
+        tracing::warn!("Skipping database migrations (SKIP_MIGRATIONS=1)");
+    }
 
     // Create shared schedule cache (5-minute TTL; GTFS data changes every 6+ hours)
     let schedule_cache = api::ScheduleCache::new(std::time::Duration::from_secs(300));

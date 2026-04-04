@@ -15,6 +15,58 @@ use crate::sync::{Departure, EventType, osm_stop_id, parse_osm_stop_id};
 /// See also: `SCHEDULE_PAST_WINDOW_MINUTES` in `realtime.rs` (10 min for schedule building).
 const PAST_GRACE_MINUTES: i64 = 5;
 
+/// Words to ignore when extracting origin keywords from route names.
+/// These appear in both directions and should not be used as direction discriminators.
+const IGNORE_WORDS: &[&str] = &[
+    // City names that appear as origin in one direction and destination in another
+    "augsburg", "münchen", "munich", "nürnberg", "regensburg",
+    "frankfurt", "stuttgart", "berlin", "hamburg", "köln",
+    // Common directional suffixes that appear in both directions
+    "nord", "süd", "west", "zentrum",
+    // Transport mode words that appear in route names
+    "straßenbahn", "stadtbus", "nachtbus", "regionalbahn",
+    "tram", "linie", "line",
+];
+
+/// Extract origin keywords from an OSM route name.
+/// Route names follow the pattern "Straßenbahn 4: Hauptbahnhof => Oberhausen Nord P+R"
+/// The origin is "Hauptbahnhof" (before =>), the destination is "Oberhausen Nord P+R" (after =>).
+/// Returns keywords from the origin part, normalized to lowercase, excluding IGNORE_WORDS.
+fn extract_origin_keywords(route_name: &str) -> HashSet<String> {
+    let mut keywords = HashSet::new();
+    if let Some(arrow_pos) = route_name.find("=>") {
+        let before_arrow = route_name[..arrow_pos].trim();
+        let origin_part = if let Some(colon_pos) = before_arrow.find(':') {
+            before_arrow[colon_pos + 1..].trim()
+        } else {
+            before_arrow
+        };
+
+        for word in origin_part.split_whitespace() {
+            let normalized = word
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
+            if normalized.len() >= 4 && !IGNORE_WORDS.contains(&normalized.as_str()) {
+                keywords.insert(normalized);
+            }
+        }
+    }
+    keywords
+}
+
+/// Convert GTFS route_type integer to OSM route type string.
+fn gtfs_to_osm_route_type(gtfs_type: i32) -> &'static str {
+    match gtfs_type {
+        0 => "tram",
+        1 => "subway",
+        2 => "train",
+        3 => "bus",
+        4 => "ferry",
+        7 => "bus",
+        _ => "bus",
+    }
+}
+
 /// Per-stop board queries use a longer time horizon than the main departure list
 /// so that events for the rest of the day (and into the next morning) are visible.
 const STOP_BOARD_HORIZON_MINUTES: i64 = 720; // 12 hours
@@ -96,18 +148,6 @@ async fn filter_by_direction(
         return departures;
     }
 
-    fn gtfs_to_osm(gtfs_type: i32) -> &'static str {
-        match gtfs_type {
-            0 => "tram",
-            1 => "subway",
-            2 => "train",
-            3 => "bus",
-            4 => "ferry",
-            7 => "bus",
-            _ => "bus",
-        }
-    }
-
     // Build origin keywords (= Gegenrichtung) per (line, type).
     // From route name "Straßenbahn 4: Hauptbahnhof => Oberhausen Nord P+R":
     //   origin = "Hauptbahnhof" (before =>)  = where the tram COMES FROM
@@ -129,33 +169,12 @@ async fn filter_by_direction(
             .insert(route_ref.clone());
 
         if let Some(name) = route_name {
-            if let Some(arrow_pos) = name.find("=>") {
-                // Extract origin part (before =>), skip the "Straßenbahn N: " prefix
-                let before_arrow = name[..arrow_pos].trim();
-                let origin_part = if let Some(colon_pos) = before_arrow.find(':') {
-                    before_arrow[colon_pos + 1..].trim()
-                } else {
-                    before_arrow
-                };
-
-                let keywords = origin_keywords
+            let keywords_set = extract_origin_keywords(name);
+            if !keywords_set.is_empty() {
+                origin_keywords
                     .entry((route_ref.clone(), route_type.clone()))
-                    .or_default();
-                // Common city/place names that appear in both directions
-                // and should not be used as direction discriminators
-                const IGNORE_WORDS: &[&str] = &[
-                    "augsburg", "münchen", "munich", "nürnberg", "regensburg",
-                    "straßenbahn", "stadtbus", "nachtbus", "regionalbahn",
-                ];
-
-                for word in origin_part.split_whitespace() {
-                    let normalized = word
-                        .trim_matches(|c: char| !c.is_alphanumeric())
-                        .to_lowercase();
-                    if normalized.len() >= 4 && !IGNORE_WORDS.contains(&normalized.as_str()) {
-                        keywords.insert(normalized);
-                    }
-                }
+                    .or_default()
+                    .extend(keywords_set);
             }
         }
     }
@@ -169,7 +188,10 @@ async fn filter_by_direction(
     departures
         .into_iter()
         .filter(|d| {
-            let osm_type = d.gtfs_route_type.map(|t| gtfs_to_osm(t)).unwrap_or("bus");
+            let osm_type = match d.gtfs_route_type {
+                Some(t) => gtfs_to_osm_route_type(t),
+                None => return true, // Unknown transport type → no filtering
+            };
 
             // No OSM routes of this type at this platform → no filtering possible
             if !known_lines_by_type.contains_key(osm_type) {
@@ -200,23 +222,9 @@ async fn filter_by_direction(
 /// lookup (e.g. "osm:12345678"). For OSM IDs, joins directly through the
 /// platform/stop_position tables by `osm_id`.
 async fn fill_osm_route_colors(departures: &mut [Departure], stop_id: &str, pool: &PgPool) {
-    // Collect distinct (line_number, gtfs_route_type) pairs that need colors
-    let needs_color: Vec<(String, Option<i32>)> = departures
-        .iter()
-        .filter(|d| d.color.is_none())
-        .map(|d| (d.line_number.clone(), d.gtfs_route_type))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    if needs_color.is_empty() {
+    if !departures.iter().any(|d| d.color.is_none()) {
         return;
     }
-
-    // Look up colors from OSM routes serving this stop
-    let gtfs_to_osm = |gt: i32| -> &str {
-        match gt { 0 => "tram", 1 => "subway", 2 => "train", 3 => "bus", 4 => "ferry", _ => "bus" }
-    };
 
     #[derive(sqlx::FromRow)]
     struct ColorRow {
@@ -239,7 +247,7 @@ async fn fill_osm_route_colors(departures: &mut [Departure], stop_id: &str, pool
         .bind(osm_id)
         .fetch_all(pool)
         .await
-        .unwrap_or_default()
+        .unwrap_or_else(|e| { tracing::warn!("Failed to fetch route colors by OSM ID: {e}"); vec![] })
     } else {
         // IFOPT-based: look up routes by ref_ifopt on platforms/stop_positions
         sqlx::query_as(
@@ -250,13 +258,13 @@ async fn fill_osm_route_colors(departures: &mut [Departure], stop_id: &str, pool
             LEFT JOIN platforms p ON p.osm_id = rs.platform_id
             LEFT JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
             WHERE r.color IS NOT NULL
-              AND COALESCE(p.ref_ifopt, sp.ref_ifopt) = $1
+              AND (p.ref_ifopt = $1 OR sp.ref_ifopt = $1)
             "#,
         )
         .bind(stop_id)
         .fetch_all(pool)
         .await
-        .unwrap_or_default()
+        .unwrap_or_else(|e| { tracing::warn!("Failed to fetch route colors by IFOPT: {e}"); vec![] })
     };
 
     // Build lookup: (line_ref, route_type) -> color
@@ -270,7 +278,7 @@ async fn fill_osm_route_colors(departures: &mut [Departure], stop_id: &str, pool
         if dep.color.is_some() {
             continue;
         }
-        let osm_type = dep.gtfs_route_type.map(|t| gtfs_to_osm(t)).unwrap_or("bus");
+        let osm_type = dep.gtfs_route_type.map(|t| gtfs_to_osm_route_type(t)).unwrap_or("bus");
         if let Some(color) = color_map.get(&(dep.line_number.as_str(), osm_type)) {
             dep.color = Some((*color).clone());
         }
@@ -280,21 +288,9 @@ async fn fill_osm_route_colors(departures: &mut [Departure], stop_id: &str, pool
 /// Fill colors from OSM routes nearest to the given coordinates.
 /// Used for stops without IFOPT (e.g. München U-Bahn).
 async fn fill_osm_route_colors_by_coords(departures: &mut [Departure], lat: f64, lon: f64, pool: &PgPool) {
-    let needs_color: Vec<(String, Option<i32>)> = departures
-        .iter()
-        .filter(|d| d.color.is_none())
-        .map(|d| (d.line_number.clone(), d.gtfs_route_type))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    if needs_color.is_empty() {
+    if !departures.iter().any(|d| d.color.is_none()) {
         return;
     }
-
-    let gtfs_to_osm = |gt: i32| -> &str {
-        match gt { 0 => "tram", 1 => "subway", 2 => "train", 3 => "bus", 4 => "ferry", _ => "bus" }
-    };
 
     #[derive(sqlx::FromRow)]
     struct ColorRow {
@@ -330,7 +326,7 @@ async fn fill_osm_route_colors_by_coords(departures: &mut [Departure], lat: f64,
 
     for dep in departures.iter_mut() {
         if dep.color.is_some() { continue; }
-        let osm_type = dep.gtfs_route_type.map(|t| gtfs_to_osm(t)).unwrap_or("bus");
+        let osm_type = dep.gtfs_route_type.map(|t| gtfs_to_osm_route_type(t)).unwrap_or("bus");
         if let Some(color) = color_map.get(&(dep.line_number.as_str(), osm_type)) {
             dep.color = Some((*color).clone());
         }
@@ -382,7 +378,7 @@ pub struct GtfsStopDeparturesResponse {
 /// Deduplicate departures by (trip_id, event_type, planned_time).
 /// This prevents seeing the same trip multiple times when a platform is mapped to multiple stop IDs.
 fn deduplicate_departures(departures: Vec<Departure>) -> Vec<Departure> {
-    let mut unique_map = HashMap::new();
+    let mut unique_map: HashMap<(String, EventType, String), Departure> = HashMap::new();
     for dep in departures {
         // Key by trip_id, event_type, and time.
         // We use string representation of time for the key.
@@ -395,15 +391,8 @@ fn deduplicate_departures(departures: Vec<Departure>) -> Vec<Departure> {
         // If we have a duplicate, prefer the one with a platform name or an IFOPT stop ID
         let is_better = match unique_map.get(&key) {
             Some(existing) => {
-                let existing: &Departure = existing;
-                // Prefer IFOPT over OSM-based IDs
-                if !dep.stop_ifopt.starts_with("osm:") && existing.stop_ifopt.starts_with("osm:") {
-                    true
-                } else if dep.platform.is_some() && existing.platform.is_none() {
-                    true
-                } else {
-                    false
-                }
+                (!dep.stop_ifopt.starts_with("osm:") && existing.stop_ifopt.starts_with("osm:"))
+                    || (dep.platform.is_some() && existing.platform.is_none())
             }
             None => true,
         };
@@ -484,19 +473,17 @@ pub async fn get_departures_by_stop(
     // A platform may have multiple stop_positions, each mapped to different GTFS stops.
     let mut stop_ids = HashSet::from([stop_id.clone()]);
     // Also add osm-based IDs so the schedule cache resolves all GTFS stops
-    for gtfs_id in &all_gtfs_ids {
-        // Find osm_ids that map to this gtfs_stop_id
-        let osm_ids: Vec<i64> = sqlx::query_scalar(
-            "SELECT osm_id FROM osm_gtfs_stop_mapping WHERE gtfs_stop_id = $1 AND ref_ifopt = $2",
-        )
-        .bind(gtfs_id)
-        .bind(stop_id)
-        .fetch_all(&state.pool)
-        .await
-        .unwrap_or_default();
-        for oid in osm_ids {
-            stop_ids.insert(osm_stop_id(oid));
-        }
+    // Batch lookup: find all osm_ids mapped to any of these gtfs_stop_ids
+    let mapped_osm_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT osm_id FROM osm_gtfs_stop_mapping WHERE gtfs_stop_id = ANY($1) AND ref_ifopt = $2",
+    )
+    .bind(&all_gtfs_ids)
+    .bind(stop_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+    for oid in mapped_osm_ids {
+        stop_ids.insert(osm_stop_id(oid));
     }
 
     let mut departures = if simulated_time.is_none() {
@@ -745,15 +732,21 @@ pub async fn get_departures_by_osm_id(
 
     match coords {
         Some(coords) => {
-            get_departures_by_coordinates(
-                State(state),
+            let mut response = get_departures_by_coordinates(
+                State(state.clone()),
                 Json(CoordinateDeparturesRequest {
                     lat: coords.lat,
                     lon: coords.lon,
                     reference_time: request.reference_time,
                 }),
             )
-            .await
+            .await;
+
+            // Apply direction filtering using the OSM ID
+            let stop_id = osm_stop_id(request.osm_id);
+            response.0.departures = filter_by_direction(response.0.departures, &stop_id, &state.pool).await;
+
+            response
         }
         None => {
             tracing::debug!(osm_id = request.osm_id, "No OSM stop found for osm_id");
@@ -781,10 +774,12 @@ pub async fn get_departures_by_coordinates(
     Json(request): Json<CoordinateDeparturesRequest>,
 ) -> Json<GtfsStopDeparturesResponse> {
     // Find the nearest GTFS stop that has actual departures (stop_times)
+    // Find nearest GTFS stop within 1km (~0.01 degrees)
     let nearest: Option<(String,)> = sqlx::query_as(
         r#"
         SELECT stop_id FROM gtfs_stops
         WHERE geom IS NOT NULL
+          AND ST_DWithin(geom, ST_SetSRID(ST_MakePoint($1, $2), 4326), 0.01)
           AND EXISTS (SELECT 1 FROM gtfs_stop_times WHERE stop_id = gtfs_stops.stop_id LIMIT 1)
         ORDER BY geom <-> ST_SetSRID(ST_MakePoint($1, $2), 4326)
         LIMIT 1
@@ -814,7 +809,7 @@ pub async fn get_departures_by_coordinates(
     let mut stop_ids = HashSet::new();
     stop_ids.insert(gtfs_stop_id.clone());
 
-    let departures =
+    let mut departures =
         match state.schedule_cache.get_or_build_by_gtfs_stop(&state.pool, &stop_ids).await {
             Ok(schedule) => {
                 let time_horizon = Duration::minutes(STOP_BOARD_HORIZON_MINUTES);
@@ -836,7 +831,6 @@ pub async fn get_departures_by_coordinates(
         };
 
     // Fill colors from nearest OSM routes by geometry proximity
-    let mut departures = departures;
     fill_osm_route_colors_by_coords(&mut departures, request.lat, request.lon, &state.pool).await;
 
     Json(GtfsStopDeparturesResponse {
@@ -996,5 +990,111 @@ mod tests {
 
         let result = filter_same_station_destinations(vec![departure], "de:09761:10:1:A3");
         assert_eq!(result.len(), 1);
+    }
+
+    // --- extract_origin_keywords tests ---
+
+    #[test]
+    fn test_extract_origin_keywords_basic() {
+        let keywords = extract_origin_keywords("Straßenbahn 4: Hauptbahnhof => Oberhausen Nord P+R");
+        assert!(keywords.contains("hauptbahnhof"));
+        // "Nord" is in IGNORE_WORDS, "P+R" is <4 chars
+        assert!(!keywords.contains("nord"));
+        assert!(!keywords.contains("p+r"));
+    }
+
+    #[test]
+    fn test_extract_origin_keywords_no_arrow() {
+        let keywords = extract_origin_keywords("Straßenbahn 4: Hauptbahnhof - Oberhausen");
+        assert!(keywords.is_empty());
+    }
+
+    #[test]
+    fn test_extract_origin_keywords_no_colon_prefix() {
+        let keywords = extract_origin_keywords("Göggingen => Lechhausen");
+        assert!(keywords.contains("göggingen"));
+        assert!(!keywords.contains("lechhausen"));
+    }
+
+    #[test]
+    fn test_extract_origin_keywords_ignores_city_names() {
+        let keywords = extract_origin_keywords("Tram 1: Augsburg Göggingen => Lechhausen");
+        assert!(!keywords.contains("augsburg"));
+        assert!(keywords.contains("göggingen"));
+    }
+
+    #[test]
+    fn test_extract_origin_keywords_ignores_short_words() {
+        let keywords = extract_origin_keywords("S1: P+R Hbf => Zentrum");
+        // "P+R" → "p+r" (3 chars), "Hbf" → "hbf" (3 chars) — both < 4 chars
+        assert!(keywords.is_empty());
+    }
+
+    #[test]
+    fn test_extract_origin_keywords_ignores_transport_words() {
+        let keywords = extract_origin_keywords("Straßenbahn Linie: Something => Else");
+        assert!(!keywords.contains("straßenbahn"));
+        assert!(!keywords.contains("linie"));
+        assert!(keywords.contains("something"));
+    }
+
+    // --- deduplicate_departures tests ---
+
+    #[test]
+    fn test_deduplicate_keeps_single() {
+        let deps = vec![make_departure("2026-03-10T12:00:00Z", None)];
+        let result = deduplicate_departures(deps);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_deduplicate_removes_exact_duplicate() {
+        let d1 = make_departure("2026-03-10T12:00:00Z", None);
+        let d2 = make_departure("2026-03-10T12:00:00Z", None);
+        let result = deduplicate_departures(vec![d1, d2]);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_deduplicate_prefers_ifopt_over_osm() {
+        let mut d1 = make_departure("2026-03-10T12:00:00Z", None);
+        d1.stop_ifopt = "osm:12345".to_string();
+        let mut d2 = make_departure("2026-03-10T12:00:00Z", None);
+        d2.stop_ifopt = "de:09761:101:31:A1".to_string();
+        let result = deduplicate_departures(vec![d1, d2]);
+        assert_eq!(result.len(), 1);
+        assert!(!result[0].stop_ifopt.starts_with("osm:"));
+    }
+
+    #[test]
+    fn test_deduplicate_prefers_platform_name() {
+        let mut d1 = make_departure("2026-03-10T12:00:00Z", None);
+        d1.platform = None;
+        let mut d2 = make_departure("2026-03-10T12:00:00Z", None);
+        d2.platform = Some("A1".to_string());
+        let result = deduplicate_departures(vec![d1, d2]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].platform, Some("A1".to_string()));
+    }
+
+    #[test]
+    fn test_deduplicate_different_times_kept() {
+        let d1 = make_departure("2026-03-10T12:00:00Z", None);
+        let d2 = make_departure("2026-03-10T12:05:00Z", None);
+        let result = deduplicate_departures(vec![d1, d2]);
+        assert_eq!(result.len(), 2);
+    }
+
+    // --- gtfs_to_osm_route_type tests ---
+
+    #[test]
+    fn test_gtfs_to_osm_route_type_mapping() {
+        assert_eq!(gtfs_to_osm_route_type(0), "tram");
+        assert_eq!(gtfs_to_osm_route_type(1), "subway");
+        assert_eq!(gtfs_to_osm_route_type(2), "train");
+        assert_eq!(gtfs_to_osm_route_type(3), "bus");
+        assert_eq!(gtfs_to_osm_route_type(4), "ferry");
+        assert_eq!(gtfs_to_osm_route_type(7), "bus");
+        assert_eq!(gtfs_to_osm_route_type(99), "bus");
     }
 }

@@ -228,9 +228,8 @@ pub async fn set_mapping(
                 (oid, "platform".to_string(), final_ifopt)
             }
         }
-    } else {
+    } else if let Some(ifopt_val) = ifopt {
         // Only ifopt provided — look up the osm_id from platforms/stop_positions
-        let ifopt_val = ifopt.unwrap(); // safe: we checked at least one is provided
         let osm_stop: Option<(i64, String, Option<String>)> = sqlx::query_as(
             "SELECT osm_id, 'platform' AS osm_type, ref_ifopt FROM platforms WHERE ref_ifopt = $1 \
              UNION ALL \
@@ -245,6 +244,9 @@ pub async fn set_mapping(
             Some((id, osm_type, ref_ifopt)) => (id, osm_type, ref_ifopt),
             None => return Err(MappingError::OsmStopNotFoundForIfopt(ifopt_val.to_string())),
         }
+    } else {
+        // Both osm_id and ifopt are None — unreachable due to guard above
+        return Err(MappingError::NoIdentifierProvided);
     };
 
     // --- Write to NEW table: osm_gtfs_stop_mapping ---
@@ -529,7 +531,7 @@ async fn fetch_unmapped_entries(
     // Get all OSM stops (platforms + stop_positions) that don't have a mapping
     // in osm_gtfs_stop_mapping. Platforms are prioritized (source_priority=1).
     let mut qb = sqlx::QueryBuilder::new(
-        "SELECT sub.osm_id, sub.osm_type, sub.ref_ifopt, sub.name, sub.lat, sub.lon FROM ( \
+        "SELECT DISTINCT ON (sub.osm_id) sub.osm_id, sub.osm_type, sub.ref_ifopt, sub.name, sub.lat, sub.lon FROM ( \
             SELECT osm_id, 'platform' AS osm_type, TRIM(ref_ifopt) AS ref_ifopt, name, lat, lon, 1 AS source_priority FROM platforms \
             UNION ALL \
             SELECT osm_id, 'stop_position' AS osm_type, TRIM(ref_ifopt) AS ref_ifopt, name, lat, lon, 2 AS source_priority FROM stop_positions \
@@ -547,7 +549,7 @@ async fn fetch_unmapped_entries(
         qb.push(")");
     }
 
-    qb.push(" ORDER BY sub.name NULLS LAST, sub.osm_id, sub.source_priority");
+    qb.push(" ORDER BY sub.osm_id, sub.source_priority, sub.name NULLS LAST");
     qb.push(" LIMIT ");
     qb.push_bind(limit as i64);
     qb.push(" OFFSET ");
@@ -655,22 +657,22 @@ async fn fetch_all_entries(
     qb.push(" OFFSET ");
     qb.push_bind(offset as i64);
 
-    #[allow(clippy::type_complexity)]
-    type AllEntryRow = (
-        i64,            // osm_id
-        String,         // osm_type
-        Option<String>, // ref_ifopt
-        Option<String>, // name
-        f64,            // lat
-        f64,            // lon
-        Option<String>, // gtfs_stop_id
-        Option<String>, // gtfs_stop_name
-        Option<f64>,    // gtfs_lat
-        Option<f64>,    // gtfs_lon
-        Option<String>, // match_method
-        Option<f64>,    // match_score
-        Option<bool>,   // is_manual
-    );
+    #[derive(sqlx::FromRow)]
+    struct AllEntryRow {
+        osm_id: i64,
+        osm_type: String,
+        ref_ifopt: Option<String>,
+        name: Option<String>,
+        lat: f64,
+        lon: f64,
+        gtfs_stop_id: Option<String>,
+        gtfs_stop_name: Option<String>,
+        gtfs_lat: Option<f64>,
+        gtfs_lon: Option<f64>,
+        match_method: Option<String>,
+        match_score: Option<f64>,
+        is_manual: Option<bool>,
+    }
 
     let rows: Vec<AllEntryRow> = qb.build_query_as().fetch_all(pool).await?;
 
@@ -678,14 +680,14 @@ async fn fetch_all_entries(
     let mut deduped_rows: Vec<AllEntryRow> = Vec::with_capacity(rows.len());
     let mut seen_osm_ids = HashSet::new();
     for row in rows {
-        if seen_osm_ids.insert(row.0) {
+        if seen_osm_ids.insert(row.osm_id) {
             deduped_rows.push(row);
         }
     }
 
     // Batch-fetch candidates in a single query instead of N+1
     let candidates_per_entry = if include_candidates {
-        let coordinates: Vec<(f64, f64)> = deduped_rows.iter().map(|r| (r.4, r.5)).collect();
+        let coordinates: Vec<(f64, f64)> = deduped_rows.iter().map(|r| (r.lat, r.lon)).collect();
         fetch_candidates_batch(pool, &coordinates).await?
     } else {
         (0..deduped_rows.len()).map(|_| Vec::new()).collect()
@@ -694,26 +696,26 @@ async fn fetch_all_entries(
     let entries = deduped_rows
         .into_iter()
         .zip(candidates_per_entry)
-        .map(|((osm_id, osm_type, ref_ifopt, name, lat, lon, gtfs_stop_id, gtfs_stop_name, gtfs_lat, gtfs_lon, match_method, match_score, is_manual), candidates)| {
-            let status = match is_manual {
+        .map(|(row, candidates)| {
+            let status = match row.is_manual {
                 Some(true) => MappingStatus::Manual,
                 Some(false) => MappingStatus::Auto,
                 None => MappingStatus::Unmapped,
             };
             MappingEntry {
-                osm_id,
-                osm_type,
-                ifopt: ref_ifopt,
-                name,
-                lat,
-                lon,
+                osm_id: row.osm_id,
+                osm_type: row.osm_type,
+                ifopt: row.ref_ifopt,
+                name: row.name,
+                lat: row.lat,
+                lon: row.lon,
                 status,
-                gtfs_stop_id,
-                gtfs_stop_name,
-                gtfs_stop_lat: gtfs_lat,
-                gtfs_stop_lon: gtfs_lon,
-                match_method,
-                match_score,
+                gtfs_stop_id: row.gtfs_stop_id,
+                gtfs_stop_name: row.gtfs_stop_name,
+                gtfs_stop_lat: row.gtfs_lat,
+                gtfs_stop_lon: row.gtfs_lon,
+                match_method: row.match_method,
+                match_score: row.match_score,
                 candidates,
             }
         })
@@ -820,6 +822,7 @@ async fn fetch_candidates_batch(
 /// - `de:09761:770:e`   (4 segments: missing platform number)
 ///
 /// Both normalize to `de:09761:770:e` (station prefix + last segment).
+#[cfg(test)]
 fn ifopt_dedup_key(ifopt: &str) -> String {
     let parts: Vec<&str> = ifopt.split(':').collect();
     if parts.len() >= 4 {

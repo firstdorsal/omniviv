@@ -243,7 +243,7 @@ impl OsmIssue {
         osm_id: i64,
         osm_type: &str,
         name: Option<String>,
-        ifopt: &str,
+        ref_identifier: &str,
         lat: f64,
         lon: f64,
         transport_type: TransportType,
@@ -256,12 +256,12 @@ impl OsmIssue {
             category: IssueCategory::GtfsMapping,
             transport_type,
             description: format!(
-                "No GTFS stop found within matching distance for IFOPT {}",
-                ifopt
+                "No GTFS stop found within matching distance for {}",
+                ref_identifier
             ),
             osm_url: format!("https://www.openstreetmap.org/edit?{}={}", osm_type, osm_id),
             name,
-            ref_tag: Some(ifopt.to_string()),
+            ref_tag: Some(ref_identifier.to_string()),
             lat: Some(lat),
             lon: Some(lon),
             detected_at: Utc::now().to_rfc3339(),

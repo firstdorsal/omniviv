@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS stations (
     lon DOUBLE PRECISION NOT NULL,
     tags JSONB, -- All OSM tags
     area_id BIGINT REFERENCES areas(id) ON DELETE CASCADE,
+    geom geometry(Point, 4326),
+    min_zoom INT NOT NULL DEFAULT 12, -- Precomputed zoom level for tile rendering
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -45,6 +47,7 @@ CREATE TABLE IF NOT EXISTS platforms (
     tags JSONB, -- All OSM tags
     station_id BIGINT REFERENCES stations(osm_id) ON DELETE SET NULL,
     area_id BIGINT REFERENCES areas(id) ON DELETE CASCADE,
+    geom geometry(Point, 4326),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -59,9 +62,11 @@ CREATE TABLE IF NOT EXISTS platform_ways (
     lon DOUBLE PRECISION NOT NULL,
     tags JSONB,
     station_id BIGINT REFERENCES stations(osm_id) ON DELETE SET NULL,
+    geom geometry(Point, 4326),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS idx_platform_ways_geom ON platform_ways USING GIST (geom);
 CREATE INDEX IF NOT EXISTS idx_platform_ways_station ON platform_ways(station_id);
 CREATE INDEX IF NOT EXISTS idx_platform_ways_ref_ifopt ON platform_ways(ref_ifopt) WHERE ref_ifopt IS NOT NULL;
 
@@ -126,9 +131,11 @@ CREATE TABLE IF NOT EXISTS route_stops (
 );
 
 -- OSM table indexes
+CREATE INDEX IF NOT EXISTS idx_stations_geom ON stations USING GIST (geom);
 CREATE INDEX IF NOT EXISTS idx_stations_area ON stations(area_id);
 CREATE INDEX IF NOT EXISTS idx_stations_name ON stations(name);
 CREATE INDEX IF NOT EXISTS idx_platforms_area ON platforms(area_id);
+CREATE INDEX IF NOT EXISTS idx_platforms_geom ON platforms USING GIST (geom);
 CREATE INDEX IF NOT EXISTS idx_platforms_station ON platforms(station_id);
 CREATE INDEX IF NOT EXISTS idx_platforms_area_station ON platforms(area_id, station_id);
 CREATE INDEX IF NOT EXISTS idx_platforms_name_ref ON platforms(name, ref);
@@ -147,6 +154,7 @@ CREATE INDEX IF NOT EXISTS idx_routes_type ON routes(route_type);
 CREATE INDEX IF NOT EXISTS idx_routes_ref ON routes(ref);
 CREATE INDEX IF NOT EXISTS idx_routes_geom ON routes USING GIST (geom);
 CREATE INDEX IF NOT EXISTS idx_routes_min_zoom ON routes(min_zoom);
+CREATE INDEX IF NOT EXISTS idx_routes_color_ref ON routes(ref, route_type, color, operator, network) WHERE ref IS NOT NULL AND color IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_route_ways_route_seq ON route_ways(route_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_route_stops_route ON route_stops(route_id);
 CREATE INDEX IF NOT EXISTS idx_route_stops_stop_position ON route_stops(stop_position_id);
@@ -240,7 +248,9 @@ CREATE INDEX IF NOT EXISTS idx_gtfs_trips_service ON gtfs_trips(service_id);
 CREATE INDEX IF NOT EXISTS idx_gtfs_calendar_dates_service ON gtfs_calendar_dates(service_id, date);
 
 -------------------------------------------------------------------------------
--- IFOPT-to-GTFS stop mapping (transitional, kept during migration period)
+-- IFOPT-to-GTFS stop mapping (DEPRECATED — kept for transition period only)
+-- Primary mapping is now osm_gtfs_stop_mapping below. This table will be removed
+-- once all code paths are migrated to the OSM ID-based mapping.
 -------------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS ifopt_gtfs_mapping (
@@ -347,7 +357,10 @@ AS $function$
 DECLARE
     stations_mvt bytea;
     stops_mvt bytea;
+    platforms_mvt bytea;
     connections_mvt bytea;
+    steige_mvt bytea;
+    outlines_mvt bytea;
     b3857 geometry;
     b4326 geometry;
 BEGIN
@@ -355,14 +368,10 @@ BEGIN
     b4326 := ST_Transform(b3857, 4326);
 
     -- 1. Stations (Explicit ID)
+    -- min_zoom is precomputed by the API during station sync
     SELECT COALESCE(ST_AsMVT(tile, 'stations', 4096, 'geom', 'id'), ''::bytea) INTO stations_mvt FROM (
-        SELECT 
-            osm_id as id, osm_id, name, ref_ifopt,
-            CASE
-                WHEN tags->>'railway' = 'station' THEN 6
-                WHEN tags->>'railway' = 'halt' THEN 9
-                ELSE 11
-            END AS min_zoom,
+        SELECT
+            osm_id as id, osm_id, name, ref_ifopt, min_zoom,
             ST_AsMVTGeom(ST_Transform(geom, 3857), b3857, 4096, 4096, false) AS geom
         FROM stations s
         WHERE geom && ST_Expand(b4326, 0.01)
@@ -371,14 +380,15 @@ BEGIN
 
     -- 2. Stops (Explicit ID)
     IF z >= 15 THEN
+        -- 2. Stop positions — exact OSM stop_position locations (on the track/rail)
         SELECT COALESCE(ST_AsMVT(tile, 'stops', 4096, 'geom', 'id'), ''::bytea) INTO stops_mvt FROM (
-            SELECT DISTINCT ON (station_id, display_name)
+            SELECT
                 osm_id as id, osm_id, name, ref, ref_ifopt, station_id, display_name,
-                ST_X(marker_geom) as lon, ST_Y(marker_geom) as lat,
-                ST_AsMVTGeom(ST_Transform(marker_geom, 3857), b3857, 4096, 4096, false) AS geom
+                ST_X(geom) as lon, ST_Y(geom) as lat,
+                ST_AsMVTGeom(ST_Transform(geom, 3857), b3857, 4096, 4096, false) AS geom
             FROM (
-                SELECT 
-                    sp.osm_id, sp.name, sp.ref, sp.ref_ifopt, sp.station_id, sp.marker_geom,
+                SELECT
+                    sp.osm_id, sp.name, sp.ref, sp.ref_ifopt, sp.station_id, sp.geom,
                     COALESCE(
                         ref,
                         UPPER(split_part(ref_ifopt, ':', array_length(string_to_array(ref_ifopt, ':'), 1))),
@@ -386,12 +396,12 @@ BEGIN
                         (osm_id % 1000)::text
                     ) as display_name
                 FROM stop_positions sp
-                WHERE station_id IS NOT NULL 
-                  AND (marker_geom && ST_Expand(b4326, 0.01) OR EXISTS (
+                WHERE station_id IS NOT NULL
+                  AND sp.geom IS NOT NULL
+                  AND (sp.geom && ST_Expand(b4326, 0.01) OR EXISTS (
                       SELECT 1 FROM stations s WHERE s.osm_id = sp.station_id AND s.geom && ST_Expand(b4326, 0.01)
                   ))
             ) sub
-            ORDER BY station_id, display_name, ref_ifopt NULLS LAST, osm_id
         ) AS tile WHERE geom IS NOT NULL;
 
         -- 3. Connections (Explicit ID)
@@ -412,12 +422,131 @@ BEGIN
             ) sub
             ORDER BY station_id, display_name, connection_geom
         ) AS tile WHERE geom IS NOT NULL;
+        -- 4. Platforms (physical platform nodes, z15+)
+        SELECT COALESCE(ST_AsMVT(tile, 'platforms', 4096, 'geom', 'id'), ''::bytea) INTO platforms_mvt FROM (
+            SELECT
+                p.osm_id as id, p.osm_id, p.name, p.ref as platform_ref, p.ref_ifopt, p.station_id,
+                COALESCE(
+                    p.ref,
+                    UPPER(split_part(p.ref_ifopt, ':', array_length(string_to_array(p.ref_ifopt, ':'), 1))),
+                    p.name,
+                    (p.osm_id % 1000)::text
+                ) as display_name,
+                ST_X(p.geom) as lon, ST_Y(p.geom) as lat,
+                ST_AsMVTGeom(ST_Transform(p.geom, 3857), b3857, 4096, 4096, false) AS geom
+            FROM platforms p
+            WHERE p.station_id IS NOT NULL
+              AND (p.geom && ST_Expand(b4326, 0.01) OR EXISTS (
+                  SELECT 1 FROM stations s WHERE s.osm_id = p.station_id AND s.geom && ST_Expand(b4326, 0.01)
+              ))
+        ) AS tile WHERE geom IS NOT NULL;
+        -- 5. Steige (user-facing platform markers with 3-tier position priority)
+        -- Priority: platform_ways centroids (physical passenger area) > platforms (point nodes)
+        --         > stop_positions (on-track fallback, only when no platform/platform_way matches)
+        -- Each row carries stop_osm_id: the OSM ID of the associated stop_position that has
+        -- a GTFS mapping, used by the frontend to fetch departures via /api/departures/by-osm-id.
+        -- Semicolons in ref or ref_ifopt (e.g. "A;B") are split into separate rows.
+        SELECT COALESCE(ST_AsMVT(tile, 'steige', 4096, 'geom', 'id'), ''::bytea) INTO steige_mvt FROM (
+            SELECT DISTINCT ON (station_id, display_name) * FROM (
+                -- Tier 1: platform_ways (physical platform areas — centroid is at passenger side)
+                SELECT
+                    pw.osm_id as id, pw.osm_id, pw.name, pw.ref as platform_ref, pw.ref_ifopt, pw.station_id,
+                    'platform_way'::text as source_type,
+                    1 as priority,
+                    UPPER(TRIM(dn_part.dn)) as display_name,
+                    (SELECT sp2.osm_id FROM stop_positions sp2
+                     WHERE sp2.station_id = pw.station_id AND sp2.geom IS NOT NULL
+                       AND (sp2.ref = TRIM(dn_part.dn) OR sp2.ref = pw.ref
+                            OR UPPER(split_part(sp2.ref_ifopt, ':', array_length(string_to_array(sp2.ref_ifopt, ':'), 1))) = UPPER(TRIM(dn_part.dn)))
+                     LIMIT 1
+                    ) as stop_osm_id,
+                    ST_X(pw.geom) as lon, ST_Y(pw.geom) as lat,
+                    ST_AsMVTGeom(ST_Transform(pw.geom, 3857), b3857, 4096, 4096, false) AS geom
+                FROM platform_ways pw,
+                LATERAL unnest(string_to_array(
+                    COALESCE(pw.ref, UPPER(split_part(pw.ref_ifopt, ':', array_length(string_to_array(pw.ref_ifopt, ':'), 1))), (pw.osm_id % 1000)::text),
+                    ';'
+                )) AS dn_part(dn)
+                WHERE pw.station_id IS NOT NULL
+                  AND pw.geom IS NOT NULL
+                  AND (pw.geom && ST_Expand(b4326, 0.01) OR EXISTS (
+                      SELECT 1 FROM stations s WHERE s.osm_id = pw.station_id AND s.geom && ST_Expand(b4326, 0.01)
+                  ))
+
+                UNION ALL
+
+                -- Tier 2: platforms (point nodes — explicit platform markers)
+                SELECT
+                    p.osm_id as id, p.osm_id, p.name, p.ref as platform_ref, p.ref_ifopt, p.station_id,
+                    'platform'::text as source_type,
+                    2 as priority,
+                    UPPER(TRIM(dn_part.dn)) as display_name,
+                    (SELECT sp2.osm_id FROM stop_positions sp2
+                     WHERE sp2.station_id = p.station_id AND sp2.geom IS NOT NULL
+                       AND (sp2.ref = TRIM(dn_part.dn) OR sp2.ref = p.ref
+                            OR UPPER(split_part(sp2.ref_ifopt, ':', array_length(string_to_array(sp2.ref_ifopt, ':'), 1))) = UPPER(TRIM(dn_part.dn)))
+                     LIMIT 1
+                    ) as stop_osm_id,
+                    ST_X(p.geom) as lon, ST_Y(p.geom) as lat,
+                    ST_AsMVTGeom(ST_Transform(p.geom, 3857), b3857, 4096, 4096, false) AS geom
+                FROM platforms p,
+                LATERAL unnest(string_to_array(
+                    COALESCE(p.ref, UPPER(split_part(p.ref_ifopt, ':', array_length(string_to_array(p.ref_ifopt, ':'), 1))), (p.osm_id % 1000)::text),
+                    ';'
+                )) AS dn_part(dn)
+                WHERE p.station_id IS NOT NULL
+                  AND p.geom IS NOT NULL
+                  AND (p.geom && ST_Expand(b4326, 0.01) OR EXISTS (
+                      SELECT 1 FROM stations s WHERE s.osm_id = p.station_id AND s.geom && ST_Expand(b4326, 0.01)
+                  ))
+
+                UNION ALL
+
+                -- Tier 3: stop_positions (on-track fallback) — stop_osm_id is its own osm_id
+                SELECT
+                    sp.osm_id as id, sp.osm_id, sp.name, sp.ref as platform_ref, sp.ref_ifopt, sp.station_id,
+                    'stop_position'::text as source_type,
+                    3 as priority,
+                    UPPER(TRIM(dn_part.dn)) as display_name,
+                    sp.osm_id as stop_osm_id,
+                    ST_X(sp.geom) as lon, ST_Y(sp.geom) as lat,
+                    ST_AsMVTGeom(ST_Transform(sp.geom, 3857), b3857, 4096, 4096, false) AS geom
+                FROM stop_positions sp,
+                LATERAL unnest(string_to_array(
+                    COALESCE(sp.ref, UPPER(split_part(sp.ref_ifopt, ':', array_length(string_to_array(sp.ref_ifopt, ':'), 1))), (sp.osm_id % 1000)::text),
+                    ';'
+                )) AS dn_part(dn)
+                WHERE sp.station_id IS NOT NULL
+                  AND sp.geom IS NOT NULL
+                  AND (sp.geom && ST_Expand(b4326, 0.01) OR EXISTS (
+                      SELECT 1 FROM stations s WHERE s.osm_id = sp.station_id AND s.geom && ST_Expand(b4326, 0.01)
+                  ))
+            ) combined
+            ORDER BY station_id, display_name, priority
+        ) AS tile WHERE geom IS NOT NULL;
+
+        -- 6. Platform outlines (physical platform way geometries as lines, z16+)
+        SELECT COALESCE(ST_AsMVT(tile, 'platform_outlines', 4096, 'geom', 'id'), ''::bytea) INTO outlines_mvt FROM (
+            SELECT
+                pw.osm_id as id, pw.osm_id, pw.name, pw.ref as platform_ref, pw.ref_ifopt, pw.station_id,
+                COALESCE(pw.ref, UPPER(split_part(pw.ref_ifopt, ':', array_length(string_to_array(pw.ref_ifopt, ':'), 1))), pw.name) as display_name,
+                ST_AsMVTGeom(ST_Transform(pw.line_geom, 3857), b3857, 4096, 4096, false) AS geom
+            FROM platform_ways pw
+            WHERE pw.station_id IS NOT NULL
+              AND pw.line_geom IS NOT NULL
+              AND (pw.line_geom && ST_Expand(b4326, 0.01) OR EXISTS (
+                  SELECT 1 FROM stations s WHERE s.osm_id = pw.station_id AND s.geom && ST_Expand(b4326, 0.01)
+              ))
+        ) AS tile WHERE geom IS NOT NULL;
     ELSE
         stops_mvt := ''::bytea;
+        platforms_mvt := ''::bytea;
         connections_mvt := ''::bytea;
+        steige_mvt := ''::bytea;
+        outlines_mvt := ''::bytea;
     END IF;
 
-    RETURN stations_mvt || stops_mvt || connections_mvt;
+    RETURN stations_mvt || stops_mvt || platforms_mvt || connections_mvt || steige_mvt || outlines_mvt;
 END;
 $function$;
 

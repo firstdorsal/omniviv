@@ -46,7 +46,9 @@ impl GtfsProvider {
     /// Skips database loading if the feed hasn't changed (HTTP 304) and data
     /// is already present in the database. This avoids the ~12 minute reload
     /// of 31.5M stop_times on every restart during development.
-    pub async fn refresh_static_schedule(&self) -> Result<(), GtfsError> {
+    ///
+    /// Returns `true` if the feed was freshly loaded, `false` if skipped.
+    pub async fn refresh_static_schedule(&self) -> Result<bool, GtfsError> {
         info!("Refreshing static GTFS schedule...");
 
         let result = static_data::download_feed(
@@ -58,14 +60,14 @@ impl GtfsProvider {
 
         if !result.was_updated && self.is_schedule_loaded().await {
             info!("GTFS feed unchanged and database already populated, skipping reload");
-            return Ok(());
+            return Ok(false);
         }
 
         // Load into PostgreSQL for persistence and query access
         static_data::load_schedule_to_db(&self.pool, &result.zip_path).await?;
         info!("GTFS schedule loaded into PostgreSQL");
 
-        Ok(())
+        Ok(true)
     }
 
     /// Fetch GTFS-RT and produce departures for all relevant stops.

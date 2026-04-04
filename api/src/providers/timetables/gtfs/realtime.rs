@@ -21,6 +21,15 @@ const SCHEDULE_PAST_WINDOW_MINUTES: i64 = 10;
 /// Maximum allowed protobuf response size (100 MB)
 const MAX_PROTOBUF_SIZE: usize = 100 * 1024 * 1024;
 
+/// Check whether `stop_key` matches `candidate` either by direct equality
+/// or by station-level IFOPT prefix (for non-OSM stop IDs).
+fn stop_matches_key(stop_key: &str, candidate: &str) -> bool {
+    stop_key == candidate
+        || (!is_osm_stop_id(stop_key)
+            && !is_osm_stop_id(candidate)
+            && station_level_ifopt(stop_key) == station_level_ifopt(candidate))
+}
+
 /// Resolve a GTFS stop_id to all relevant stop keys that departures should be stored under.
 ///
 /// Returns keys from both the old IFOPT mapping (`gtfs_to_ifopt`) and the new universal
@@ -50,6 +59,7 @@ fn resolve_relevant_stop_keys(
         return vec![];
     }
 
+    let mut seen: HashSet<String> = HashSet::new();
     let mut keys: Vec<String> = Vec::new();
 
     // Old mapping: GTFS stop_id -> IFOPTs
@@ -58,7 +68,9 @@ fn resolve_relevant_stop_keys(
             if relevant_stop_ids.contains(ifopt)
                 || relevant_stop_ids.contains(&station_level_ifopt(ifopt))
             {
-                keys.push(ifopt.clone());
+                if seen.insert(ifopt.clone()) {
+                    keys.push(ifopt.clone());
+                }
             }
         }
     }
@@ -66,17 +78,21 @@ fn resolve_relevant_stop_keys(
     // New mapping: GTFS stop_id -> StopIds (may include both IFOPTs and osm:{id})
     if let Some(stop_ids) = schedule.gtfs_to_stop.get(gtfs_stop_id) {
         for sid in stop_ids {
-            if keys.contains(sid) {
+            if seen.contains(sid) {
                 continue;
             }
             // For IFOPT-style keys, also allow station-level prefix matching.
             // For osm:{id} keys, only exact match.
             if relevant_stop_ids.contains(sid) {
-                keys.push(sid.clone());
+                if seen.insert(sid.clone()) {
+                    keys.push(sid.clone());
+                }
             } else if !is_osm_stop_id(sid)
                 && relevant_stop_ids.contains(&station_level_ifopt(sid))
             {
-                keys.push(sid.clone());
+                if seen.insert(sid.clone()) {
+                    keys.push(sid.clone());
+                }
             }
         }
     }
@@ -591,8 +607,8 @@ pub fn process_trip_updates(
 
             // Emit events for each mapped stop key (shared stops produce events for all platforms/osm IDs)
             for stop_key in &relevant_keys {
-                let is_first = first_stop.as_ref() == Some(stop_key) || first_stop.as_ref().map_or(false, |fs| station_level_ifopt(fs) == station_level_ifopt(stop_key));
-                let is_last = last_stop.as_ref() == Some(stop_key) || last_stop.as_ref().map_or(false, |ls| station_level_ifopt(ls) == station_level_ifopt(stop_key));
+                let is_first = first_stop.as_ref().map_or(false, |fs| stop_matches_key(stop_key, fs));
+                let is_last = last_stop.as_ref().map_or(false, |ls| stop_matches_key(stop_key, ls));
 
                 if let Some((arr_planned_dt, arr_estimated_dt, arr_delay)) = &arr_event {
                     let arrival = Departure {
@@ -844,8 +860,8 @@ fn add_scheduled_departures(
             let dep_dt = st.departure_time.and_then(|s| schedule_time_to_utc(s, today, tz));
 
             for stop_key in &relevant_keys {
-                let is_first = first_stop.as_ref() == Some(stop_key) || first_stop.as_ref().map_or(false, |fs| station_level_ifopt(fs) == station_level_ifopt(stop_key));
-                let is_last = last_stop.as_ref() == Some(stop_key) || last_stop.as_ref().map_or(false, |ls| station_level_ifopt(ls) == station_level_ifopt(stop_key));
+                let is_first = first_stop.as_ref().map_or(false, |fs| stop_matches_key(stop_key, fs));
+                let is_last = last_stop.as_ref().map_or(false, |ls| stop_matches_key(stop_key, ls));
 
                 if let Some(arr_dt) = arr_dt {
                     let arrival = Departure {

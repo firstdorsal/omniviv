@@ -121,12 +121,12 @@ impl SyncManager {
 
         // --- Stations ---
         match sqlx::query(&format!(r#"
-            INSERT INTO stations (osm_id, osm_type, name, ref_ifopt, lat, lon, tags, updated_at)
-            SELECT node_id, 'node', name, ref_ifopt, ST_Y({wgs}), ST_X({wgs}), tags, NOW()
+            INSERT INTO stations (osm_id, osm_type, name, ref_ifopt, lat, lon, geom, tags, updated_at)
+            SELECT node_id, 'node', name, ref_ifopt, ST_Y({wgs}), ST_X({wgs}), {wgs}, tags, NOW()
             FROM _osm_transit_stations
             ON CONFLICT (osm_id) DO UPDATE SET
                 name = EXCLUDED.name, ref_ifopt = EXCLUDED.ref_ifopt,
-                lat = EXCLUDED.lat, lon = EXCLUDED.lon,
+                lat = EXCLUDED.lat, lon = EXCLUDED.lon, geom = EXCLUDED.geom,
                 tags = EXCLUDED.tags, updated_at = NOW()
         "#)).execute(&self.pool).await {
             Ok(r) => info!(rows = r.rows_affected(), "Merged stations"),
@@ -135,12 +135,12 @@ impl SyncManager {
 
         // --- Platform nodes ---
         match sqlx::query(&format!(r#"
-            INSERT INTO platforms (osm_id, osm_type, name, ref, ref_ifopt, lat, lon, tags, updated_at)
-            SELECT node_id, 'node', name, ref, ref_ifopt, ST_Y({wgs}), ST_X({wgs}), tags, NOW()
+            INSERT INTO platforms (osm_id, osm_type, name, ref, ref_ifopt, lat, lon, geom, tags, updated_at)
+            SELECT node_id, 'node', name, ref, ref_ifopt, ST_Y({wgs}), ST_X({wgs}), {wgs}, tags, NOW()
             FROM _osm_transit_platforms
             ON CONFLICT (osm_id) DO UPDATE SET
                 name = EXCLUDED.name, ref = EXCLUDED.ref, ref_ifopt = EXCLUDED.ref_ifopt,
-                lat = EXCLUDED.lat, lon = EXCLUDED.lon,
+                lat = EXCLUDED.lat, lon = EXCLUDED.lon, geom = EXCLUDED.geom,
                 tags = EXCLUDED.tags, updated_at = NOW()
         "#)).execute(&self.pool).await {
             Ok(r) => info!(rows = r.rows_affected(), "Merged platforms"),
@@ -149,13 +149,14 @@ impl SyncManager {
 
         // --- Platform ways (physical outlines with centroid, separate table) ---
         match sqlx::query(&format!(r#"
-            INSERT INTO platform_ways (osm_id, name, ref, ref_ifopt, lat, lon, tags, station_id, updated_at)
+            INSERT INTO platform_ways (osm_id, name, ref, ref_ifopt, lat, lon, geom, line_geom, tags, station_id, updated_at)
             SELECT way_id, name, ref, ref_ifopt,
-                   ST_Y(ST_Centroid({wgs})), ST_X(ST_Centroid({wgs})), tags, NULL, NOW()
+                   ST_Y(ST_Centroid({wgs})), ST_X(ST_Centroid({wgs})), ST_Centroid({wgs}), {wgs}, tags, NULL, NOW()
             FROM _osm_transit_platform_ways
             ON CONFLICT (osm_id) DO UPDATE SET
                 name = EXCLUDED.name, ref = EXCLUDED.ref, ref_ifopt = EXCLUDED.ref_ifopt,
-                lat = EXCLUDED.lat, lon = EXCLUDED.lon,
+                lat = EXCLUDED.lat, lon = EXCLUDED.lon, geom = EXCLUDED.geom,
+                line_geom = EXCLUDED.line_geom,
                 tags = EXCLUDED.tags, updated_at = NOW()
         "#)).execute(&self.pool).await {
             Ok(r) => info!(rows = r.rows_affected(), "Merged platform ways"),
@@ -197,13 +198,14 @@ impl SyncManager {
                 // For stop_areas WITHOUT a station member, create a synthetic station
                 // from the stop_area name and centroid of its stop_position members
                 match sqlx::query(r#"
-                    INSERT INTO stations (osm_id, osm_type, name, lat, lon, tags, updated_at)
+                    INSERT INTO stations (osm_id, osm_type, name, lat, lon, geom, tags, updated_at)
                     SELECT DISTINCT ON (sa.relation_id)
                         sa.relation_id,
                         'relation',
                         sa.station_name,
                         AVG(sp.lat),
                         AVG(sp.lon),
+                        ST_SetSRID(ST_MakePoint(AVG(sp.lon), AVG(sp.lat)), 4326),
                         '{}'::jsonb,
                         NOW()
                     FROM (SELECT DISTINCT relation_id, station_name FROM _osm_stop_area_members) sa
@@ -213,7 +215,7 @@ impl SyncManager {
                       AND sa.station_name IS NOT NULL
                     GROUP BY sa.relation_id, sa.station_name
                     ON CONFLICT (osm_id) DO UPDATE SET
-                        name = EXCLUDED.name, lat = EXCLUDED.lat, lon = EXCLUDED.lon, updated_at = NOW()
+                        name = EXCLUDED.name, lat = EXCLUDED.lat, lon = EXCLUDED.lon, geom = EXCLUDED.geom, updated_at = NOW()
                 "#).execute(&self.pool).await {
                     Ok(r) => {
                         info!(rows = r.rows_affected(), "Created synthetic stations from stop_areas without station nodes");
@@ -372,7 +374,7 @@ impl SyncManager {
         // Drop all staging tables
         for table in &[
             "_osm_transit_routes", "_osm_transit_ways", "_osm_route_way_members",
-            "_osm_transit_stations", "_osm_transit_platforms",
+            "_osm_transit_stations", "_osm_transit_platforms", "_osm_transit_platform_ways",
             "_osm_transit_stops", "_osm_stop_area_members", "_osm_route_stop_members",
         ] {
             let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {table}")).execute(&self.pool).await;
@@ -382,12 +384,74 @@ impl SyncManager {
         true
     }
 
+    /// Ensure stop position marker_geom and connection_geom are materialized.
+    /// These are needed for the transit_stations() MVT function.
+    /// Runs on every startup to fix NULL values from prior incomplete imports.
+    async fn ensure_marker_geometries(&self) {
+        let null_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM stop_positions WHERE marker_geom IS NULL AND geom IS NOT NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+
+        if null_count == 0 {
+            return;
+        }
+
+        info!(null_markers = null_count, "Materializing missing stop marker geometries...");
+        let start = std::time::Instant::now();
+
+        // Best physical marker: prefer platform/platform_way geom, fall back to stop_position geom
+        let _ = sqlx::query(r#"
+            WITH best_markers AS (
+                SELECT DISTINCT ON (sp.osm_id)
+                    sp.osm_id,
+                    COALESCE(p.geom, pw.geom, sp.geom) as m_geom
+                FROM stop_positions sp
+                LEFT JOIN platforms p ON (p.station_id = sp.station_id AND sp.ref_ifopt IS NOT NULL AND p.ref_ifopt IS NOT NULL AND (
+                    LOWER(p.ref_ifopt) = LOWER(sp.ref_ifopt) OR
+                    split_part(LOWER(p.ref_ifopt), ':', array_length(string_to_array(p.ref_ifopt, ':'), 1)) = split_part(LOWER(sp.ref_ifopt), ':', array_length(string_to_array(sp.ref_ifopt, ':'), 1))
+                ))
+                LEFT JOIN platform_ways pw ON (pw.station_id = sp.station_id AND sp.ref_ifopt IS NOT NULL AND pw.ref_ifopt IS NOT NULL AND (
+                    LOWER(pw.ref_ifopt) = LOWER(sp.ref_ifopt) OR
+                    split_part(LOWER(pw.ref_ifopt), ':', array_length(string_to_array(pw.ref_ifopt, ':'), 1)) = split_part(LOWER(sp.ref_ifopt), ':', array_length(string_to_array(sp.ref_ifopt, ':'), 1))
+                ))
+                WHERE sp.marker_geom IS NULL
+                ORDER BY sp.osm_id, (p.osm_id IS NOT NULL OR pw.osm_id IS NOT NULL) DESC
+            )
+            UPDATE stop_positions sp
+            SET marker_geom = bm.m_geom
+            FROM best_markers bm
+            WHERE sp.osm_id = bm.osm_id
+        "#).execute(&self.pool).await;
+
+        // Connection lines to parent station
+        let _ = sqlx::query(r#"
+            UPDATE stop_positions sp
+            SET connection_geom = ST_MakeLine(sp.marker_geom, s.geom)
+            FROM stations s
+            WHERE sp.station_id = s.osm_id
+              AND sp.marker_geom IS NOT NULL
+              AND sp.connection_geom IS NULL
+              AND s.geom IS NOT NULL
+              AND ST_Distance(sp.marker_geom, s.geom) > 0.00001
+        "#).execute(&self.pool).await;
+
+        info!(elapsed_secs = start.elapsed().as_secs(), "Marker geometry materialization complete");
+    }
+
     /// Start the background sync loops
     pub async fn start(self: Arc<Self>) {
         info!("Starting sync manager");
 
         // Merge any pending osm2pgsql PBF import data (stations, platforms, stops, routes)
         let pbf_merged = self.merge_osm_import_staging().await;
+
+        // Ensure stop marker geometries are materialized (needed for MVT tiles).
+        // They may be NULL if the DB was populated before geom materialization was added,
+        // or if the API restarted without a new PBF import.
+        self.ensure_marker_geometries().await;
 
         // Spawn GTFS sync as a background task so the API can serve requests immediately.
         // The GTFS mapping with Germany-wide data can take minutes.
@@ -441,9 +505,8 @@ impl SyncManager {
 
     /// Build the OSM <-> GTFS stop and route mappings after schedule load.
     ///
-    /// Stores stop mapping in PostgreSQL via `build_ifopt_mapping_to_db` (writes
-    /// to both `ifopt_gtfs_mapping` and `osm_gtfs_stop_mapping`), then builds
-    /// route-level mapping via `build_route_mapping_to_db`.
+    /// Stores stop mapping in PostgreSQL via `build_osm_gtfs_mapping_to_db` (writes
+    /// to both `ifopt_gtfs_mapping` and `osm_gtfs_stop_mapping`).
     async fn build_gtfs_mapping(&self) {
         use crate::providers::timetables::gtfs::static_data;
 
@@ -460,7 +523,7 @@ impl SyncManager {
         }
 
         // Build stop mapping and store in PostgreSQL
-        let stats = match static_data::build_ifopt_mapping_to_db(
+        let stats = match static_data::build_osm_gtfs_mapping_to_db(
             self.gtfs_provider.pool(),
             &osm_stops,
         )
@@ -476,13 +539,41 @@ impl SyncManager {
         // Validate mappings against known-correct assignments
         static_data::validate_mappings(self.gtfs_provider.pool()).await;
 
-        // TODO: Route-level mapping disabled — the query joining gtfs_trips × gtfs_stop_times
-        // is too heavy for the initial implementation. The stop-level mapping is sufficient
-        // for departures. Route mapping + color injection can be done as a separate offline step.
-        // match static_data::build_route_mapping_to_db(self.gtfs_provider.pool()).await { ... }
+        // Build route-level mapping (OSM route ↔ GTFS route by ref + transport type)
+        match static_data::build_route_mapping_to_db(self.gtfs_provider.pool()).await {
+            Ok(count) => info!(route_mappings = count, "Built route-level mapping"),
+            Err(e) => tracing::error!("Failed to build route mapping: {}", e),
+        }
 
-        // TODO: Color injection disabled until route-level mapping is optimized.
-        // Colors are still served via the per-departure fill_osm_route_colors fallback.
+        // Inject OSM route colors into gtfs_routes.route_color via the route mapping.
+        // This fills in colors where GTFS has none, using OSM route data as the source.
+        // The enriched colors are then available for:
+        //   1. Per-departure color lookups in the API
+        //   2. GTFS feed enrichment for MOTIS (via enrich-gtfs-colors.sh)
+        match sqlx::query(
+            r#"
+            UPDATE gtfs_routes gr
+            SET route_color = r.color
+            FROM osm_gtfs_route_mapping m
+            JOIN routes r ON r.osm_id = m.osm_route_id
+            WHERE gr.route_id = m.gtfs_route_id
+              AND r.color IS NOT NULL AND r.color != ''
+              AND (gr.route_color IS NULL OR gr.route_color = '')
+            "#,
+        )
+        .execute(self.gtfs_provider.pool())
+        .await
+        {
+            Ok(result) => {
+                info!(
+                    rows = result.rows_affected(),
+                    "Injected OSM route colors into gtfs_routes"
+                );
+            }
+            Err(e) => {
+                tracing::error!("Failed to inject OSM route colors: {}", e);
+            }
+        }
 
         // Report issues from the DB-based mapping stats
         self.report_mapping_issues(&stats).await;
@@ -596,11 +687,14 @@ impl SyncManager {
     async fn run_gtfs_sync_loop(&self, osm_data_changed: bool) {
         // Step 1: Load static GTFS schedule
         info!("Loading static GTFS schedule...");
-        let mut gtfs_feed_changed = false;
         let mut retries = 0u64;
+        let gtfs_feed_loaded;
         loop {
             match self.gtfs_provider.refresh_static_schedule().await {
-                Ok(()) => break,
+                Ok(loaded) => {
+                    gtfs_feed_loaded = loaded;
+                    break;
+                }
                 Err(e) => {
                     retries += 1;
                     // Cap backoff at 5 minutes
@@ -615,13 +709,8 @@ impl SyncManager {
             }
         }
 
-        // Check if the GTFS feed was actually updated (not just "unchanged, skipping")
-        // The provider logs "skipping reload" when unchanged — we detect this by checking
-        // if the schedule was freshly loaded into the DB
-        gtfs_feed_changed = retries == 0; // If no retries needed, the feed loaded (may or may not have changed)
-
         // Step 1b: Build IFOPT <-> GTFS stop mapping — only if data changed
-        if osm_data_changed || gtfs_feed_changed {
+        if osm_data_changed || gtfs_feed_loaded {
             // Check if mapping already exists and neither data source changed
             let mapping_count = sqlx::query_scalar::<_, i64>(
                 "SELECT COALESCE(mapping_count, 0) FROM gtfs_feed_meta WHERE id = 1"
@@ -670,13 +759,19 @@ impl SyncManager {
                 }
                 _ = static_refresh_interval.tick() => {
                     info!("Refreshing static GTFS schedule...");
-                    if let Err(e) = self.gtfs_provider.refresh_static_schedule().await {
-                        error!(error = %e, "Failed to refresh static GTFS schedule");
-                    } else {
-                        // Rebuild IFOPT mapping after schedule refresh
-                        self.build_gtfs_mapping().await;
-                        // Invalidate cached schedules so handlers pick up the new data
-                        self.schedule_cache.invalidate().await;
+                    match self.gtfs_provider.refresh_static_schedule().await {
+                        Err(e) => {
+                            error!(error = %e, "Failed to refresh static GTFS schedule");
+                        }
+                        Ok(false) => {
+                            info!("Static GTFS feed unchanged, skipping mapping rebuild");
+                        }
+                        Ok(true) => {
+                            // Rebuild IFOPT mapping after schedule refresh
+                            self.build_gtfs_mapping().await;
+                            // Invalidate cached schedules so handlers pick up the new data
+                            self.schedule_cache.invalidate().await;
+                        }
                     }
                 }
             }
@@ -848,6 +943,30 @@ impl SyncManager {
         // Check for missing platform/stop_position pairs
         self.check_platform_stop_pairs(&mut tx, area_id).await?;
 
+        // Precompute min_zoom for tile rendering (avoids correlated subqueries in MVT function)
+        sqlx::query(r#"
+            UPDATE stations s SET min_zoom = CASE
+                WHEN (s.tags->>'railway' = 'station') AND (
+                    LOWER(COALESCE(s.name, '')) LIKE '%hauptbahnhof%'
+                    OR LOWER(COALESCE(s.name, '')) LIKE '% hbf%'
+                    OR LOWER(COALESCE(s.name, '')) LIKE '%hbf'
+                ) THEN 6
+                WHEN (s.tags->>'railway' = 'station') AND EXISTS (
+                    SELECT 1 FROM route_stops rs JOIN routes r ON r.osm_id = rs.route_id
+                    WHERE rs.station_id = s.osm_id AND r.route_type = 'train'
+                ) AND (
+                    (SELECT COUNT(DISTINCT r.route_type) FROM route_stops rs JOIN routes r ON r.osm_id = rs.route_id WHERE rs.station_id = s.osm_id) >= 2
+                    OR (SELECT COUNT(*) FROM stop_positions sp2 WHERE sp2.station_id = s.osm_id) >= 3
+                ) THEN 8
+                WHEN s.tags->>'railway' IN ('station', 'halt') THEN 10
+                ELSE 12
+            END
+            WHERE s.area_id = $1
+        "#)
+        .bind(area_id)
+        .execute(&mut *tx)
+        .await?;
+
         // Update last_synced_at
         sqlx::query("UPDATE areas SET last_synced_at = now() WHERE id = $1")
             .bind(area_id)
@@ -953,14 +1072,15 @@ impl SyncManager {
 
             sqlx::query(
                 r#"
-                INSERT INTO stations (osm_id, osm_type, name, ref_ifopt, lat, lon, tags, area_id, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, now())
+                INSERT INTO stations (osm_id, osm_type, name, ref_ifopt, lat, lon, geom, tags, area_id, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, ST_SetSRID(ST_MakePoint($6, $5), 4326), $7::jsonb, $8, now())
                 ON CONFLICT(osm_id) DO UPDATE SET
                     osm_type = excluded.osm_type,
                     name = excluded.name,
                     ref_ifopt = excluded.ref_ifopt,
                     lat = excluded.lat,
                     lon = excluded.lon,
+                    geom = excluded.geom,
                     tags = excluded.tags,
                     area_id = excluded.area_id,
                     updated_at = now()
@@ -1085,8 +1205,8 @@ impl SyncManager {
 
             sqlx::query(
                 r#"
-                INSERT INTO platforms (osm_id, osm_type, name, ref, ref_ifopt, lat, lon, tags, station_id, area_id, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, now())
+                INSERT INTO platforms (osm_id, osm_type, name, ref, ref_ifopt, lat, lon, geom, tags, station_id, area_id, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, ST_SetSRID(ST_MakePoint($7, $6), 4326), $8::jsonb, $9, $10, now())
                 ON CONFLICT(osm_id) DO UPDATE SET
                     osm_type = excluded.osm_type,
                     name = excluded.name,
@@ -1094,6 +1214,7 @@ impl SyncManager {
                     ref_ifopt = excluded.ref_ifopt,
                     lat = excluded.lat,
                     lon = excluded.lon,
+                    geom = excluded.geom,
                     tags = excluded.tags,
                     station_id = COALESCE(excluded.station_id, platforms.station_id),
                     area_id = excluded.area_id,

@@ -499,24 +499,19 @@ pub(crate) async fn load_gtfs_route_sets(
 ) -> Result<HashMap<String, HashSet<RouteIdentifier>>, GtfsError> {
     let mut result: HashMap<String, HashSet<RouteIdentifier>> = HashMap::new();
 
-    // Insert proximity stop IDs into a staging table for efficient joining
-    // (not TEMP table — sqlx connection pool doesn't guarantee same connection)
-    sqlx::query("DROP TABLE IF EXISTS _proximity_stops").execute(pool).await?;
-    sqlx::query("CREATE TABLE _proximity_stops (stop_id TEXT PRIMARY KEY)")
-        .execute(pool).await?;
+    // Use a dedicated connection for TEMP TABLE (pool doesn't guarantee same connection)
+    let mut connection = pool.acquire().await?;
+
+    sqlx::query("CREATE TEMP TABLE _proximity_stops (stop_id TEXT PRIMARY KEY) ON COMMIT DROP")
+        .execute(&mut *connection).await?;
 
     for batch in stop_ids.chunks(10_000) {
         let batch_vec: Vec<&str> = batch.to_vec();
         sqlx::query("INSERT INTO _proximity_stops (stop_id) SELECT unnest($1::text[]) ON CONFLICT DO NOTHING")
             .bind(&batch_vec)
-            .execute(pool).await?;
+            .execute(&mut *connection).await?;
     }
 
-    // Create index for efficient join
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_proximity_stops ON _proximity_stops(stop_id)")
-        .execute(pool).await?;
-
-    // Use a subquery with LATERAL to limit per-stop results and avoid exploding result sets
     let rows: Vec<(String, String, i32)> = sqlx::query_as(
         r#"
         SELECT DISTINCT st.stop_id, gr.route_short_name, gr.route_type
@@ -527,7 +522,7 @@ pub(crate) async fn load_gtfs_route_sets(
         WHERE gr.route_short_name IS NOT NULL
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     for (stop_id, route_short_name, route_type) in rows {
@@ -541,7 +536,7 @@ pub(crate) async fn load_gtfs_route_sets(
             });
     }
 
-    let _ = sqlx::query("DROP TABLE IF EXISTS _proximity_stops").execute(pool).await;
+    drop(connection);
 
     info!(
         gtfs_stops_with_routes = result.len(),
@@ -575,7 +570,7 @@ struct StopMappingResult {
 /// - `ifopt_gtfs_mapping` (legacy table, keyed by IFOPT — for backward compatibility)
 ///
 /// Returns mapping statistics for issue reporting.
-pub(crate) async fn build_ifopt_mapping_to_db(
+pub(crate) async fn build_osm_gtfs_mapping_to_db(
     pool: &PgPool,
     osm_stops: &[OsmStopInfo],
 ) -> Result<MappingStats, GtfsError> {
@@ -749,10 +744,18 @@ pub(crate) async fn build_ifopt_mapping_to_db(
         JOIN gtfs_trips gt ON gt.trip_id = st.trip_id
         JOIN gtfs_routes gr ON gr.route_id = gt.route_id
         JOIN gtfs_stops gs ON gs.stop_id = st.stop_id
-        JOIN gtfs_calendar gc ON gc.service_id = gt.service_id
+        LEFT JOIN gtfs_calendar gc ON gc.service_id = gt.service_id
         WHERE gr.route_short_name IS NOT NULL
           AND gs.lat IS NOT NULL AND gs.lon IS NOT NULL
-          AND gc.start_date <= CURRENT_DATE AND gc.end_date >= CURRENT_DATE
+          AND (
+            (gc.start_date <= CURRENT_DATE AND gc.end_date >= CURRENT_DATE)
+            OR (gc.service_id IS NULL AND EXISTS (
+              SELECT 1 FROM gtfs_calendar_dates cd
+              WHERE cd.service_id = gt.service_id
+                AND cd.exception_type = 1
+                AND cd.date >= CURRENT_DATE - INTERVAL '7 days'
+            ))
+          )
         "#,
     )
     .fetch_all(pool)
@@ -760,8 +763,6 @@ pub(crate) async fn build_ifopt_mapping_to_db(
 
     struct GtfsRouteStop {
         stop_id: String,
-        #[allow(dead_code)]
-        stop_name: Option<String>,
         lat: f64,
         lon: f64,
     }
@@ -769,7 +770,7 @@ pub(crate) async fn build_ifopt_mapping_to_db(
     let mut gtfs_routes_grouped: HashMap<RouteIdentifier, Vec<GtfsRouteStop>> = HashMap::new();
     let mut gtfs_stop_seen: HashSet<(String, String, TransportType)> = HashSet::new();
 
-    for (_, route_short_name, route_type, stop_id, stop_name, lat, lon) in &gtfs_route_stop_rows {
+    for (_, route_short_name, route_type, stop_id, _stop_name, lat, lon) in &gtfs_route_stop_rows {
         let transport_type = TransportType::from_gtfs_route_type(*route_type);
         let route_key = RouteIdentifier {
             line_ref: route_short_name.clone(),
@@ -778,7 +779,6 @@ pub(crate) async fn build_ifopt_mapping_to_db(
         if gtfs_stop_seen.insert((stop_id.clone(), route_short_name.clone(), transport_type)) {
             gtfs_routes_grouped.entry(route_key).or_default().push(GtfsRouteStop {
                 stop_id: stop_id.clone(),
-                stop_name: stop_name.clone(),
                 lat: *lat,
                 lon: *lon,
             });
@@ -1051,7 +1051,7 @@ pub(crate) async fn build_ifopt_mapping_to_db(
                 .push_bind(entry.match_score)
                 .push_bind(false);
         });
-        qb.push(" ON CONFLICT (osm_id, osm_type) DO UPDATE SET gtfs_stop_id = EXCLUDED.gtfs_stop_id, ref_ifopt = EXCLUDED.ref_ifopt, match_method = EXCLUDED.match_method, match_score = EXCLUDED.match_score, is_manual = EXCLUDED.is_manual");
+        qb.push(" ON CONFLICT (osm_id, osm_type) DO UPDATE SET gtfs_stop_id = EXCLUDED.gtfs_stop_id, ref_ifopt = EXCLUDED.ref_ifopt, match_method = EXCLUDED.match_method, match_score = EXCLUDED.match_score WHERE osm_gtfs_stop_mapping.is_manual = FALSE");
         qb.build().execute(pool).await?;
     }
 

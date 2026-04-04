@@ -195,7 +195,11 @@ pub fn build_vehicles_from_departures(
                 return None;
             }
 
-            let line_number = departures.first()?.line_number.clone();
+            let first_dep = departures.first()?;
+            let line_number = first_dep.line_number.clone();
+            let gtfs_route_type = first_dep.gtfs_route_type;
+            let color = first_dep.color.clone();
+            let operator = first_dep.operator.clone();
 
             let destination = departures
                 .iter()
@@ -259,6 +263,9 @@ pub fn build_vehicles_from_departures(
                 origin,
                 stops,
                 next_trip_id: None,
+                gtfs_route_type,
+                color,
+                operator,
             })
         })
         .collect();

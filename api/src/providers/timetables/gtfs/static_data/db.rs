@@ -84,6 +84,8 @@ pub async fn load_schedule_to_db(pool: &PgPool, zip_path: &Path) -> Result<(), G
     );
 
     // Truncate all GTFS tables (fast, DDL-level reset)
+    // NOTE: Do NOT truncate osm_gtfs_stop_mapping or osm_gtfs_route_mapping here —
+    // those are rebuilt by the sync manager's mapping step after GTFS loading.
     sqlx::query(
         "TRUNCATE gtfs_stop_times, gtfs_trips, gtfs_routes, gtfs_stops, \
          gtfs_calendar, gtfs_calendar_dates, gtfs_agencies, ifopt_gtfs_mapping, gtfs_feed_meta",

@@ -42,6 +42,15 @@ pub struct Vehicle {
     /// and starting the return trip). Used for seamless follow-mode
     /// transitions and vehicle reuse rendering.
     pub next_trip_id: Option<String>,
+    /// GTFS route_type: 0=tram, 1=subway, 2=rail, 3=bus, 4=ferry, etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gtfs_route_type: Option<i32>,
+    /// Route color from GTFS (hex, e.g. "#ee1d23")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Operator/agency name (e.g. "DB Regio AG Bayern", "Go-Ahead")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -299,6 +308,9 @@ mod tests {
             destination: "Test".to_string(),
             origin: None,
             next_trip_id: None,
+            gtfs_route_type: None,
+            color: None,
+            operator: None,
             stops: vec![
                 VehicleStop {
                     stop_ifopt: first_ifopt.to_string(),
