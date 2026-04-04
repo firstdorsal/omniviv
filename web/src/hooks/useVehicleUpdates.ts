@@ -11,6 +11,8 @@ export interface RouteVehicles {
     routeId: number;
     lineNumber: string | null;
     vehicles: Vehicle[];
+    /** OSM route_type (e.g. "tram", "bus") — set from visible routes data */
+    routeType?: string | null;
 }
 
 // WebSocket message format (snake_case from backend)

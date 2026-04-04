@@ -1,20 +1,21 @@
 import { Bug, Clock, Github, Layers, Navigation, Settings, TrainFront, Wifi, WifiOff } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TbWorldX } from "react-icons/tb";
-import { Route, RouteGeometry, Station } from "./api";
+import type { Station } from "./api";
 import { getApiClient } from "./apiClient";
 import { DeparturesPanel, type PinnedStop } from "./components/DeparturesPanel";
 import { FeaturesPanel } from "./components/FeaturesPanel";
 import { OsmIssuesPanel, type MappingMapData } from "./components/IssuesPanel";
 import { LineBadge } from "./components/LineBadge";
-import { NavigationPanel, type Location, type PickMode } from "./components/NavigationPanel";
+import { NavigationPanel, type Location, type PickMode, type RouteItinerary } from "./components/NavigationPanel";
 import { TimeControlPanel } from "./components/TimeControlPanel";
 import { VehicleMonitorPanel } from "./components/VehicleMonitorPanel";
 import { VehicleTrackingPanel } from "./components/VehicleTrackingPanel";
-import Map from "./components/map/Map";
+import TransitMap from "./components/map/Map";
 import { Button } from "./components/ui/button";
 import { Checkbox } from "./components/ui/checkbox";
 import { Slider } from "./components/ui/slider";
+import { Toaster } from "./components/ui/sonner";
 import type { DebugOptions } from "./components/vehicles/VehicleRenderer";
 import {
     createTrackedVehicle,
@@ -24,9 +25,11 @@ import {
     transitionTrip,
     type TrackedVehicle,
 } from "./components/vehicles/TrackedVehicle";
+import { DebugModeProvider } from "./contexts/DebugModeContext";
 import { useRendezvous } from "./hooks/useRendezvous";
 import { useTimeSimulation } from "./hooks/useTimeSimulation";
 import { useVehicleUpdates, type RouteVehicles } from "./hooks/useVehicleUpdates";
+import { useVisibleRoutes } from "./hooks/useVisibleRoutes";
 
 type SidebarPanel = "navigation" | "layers" | "features" | "debug" | "issues" | "time" | `departures:${string}` | `vehicle:${string}` | null;
 
@@ -84,29 +87,30 @@ const FALLBACK_REFRESH_INTERVAL = 5000;
 // LocalStorage key for persisted options
 const STORAGE_KEY = "live-tram-options";
 
-export interface RouteWithGeometry extends Route {
-    geometry: RouteGeometry | null;
-}
-
 // Re-export for use by other components
 export type { RouteVehicles } from "./hooks/useVehicleUpdates";
 
 
 interface PersistedOptions {
     showStations: boolean;
-    showStopPositions: boolean;
-    showPlatforms: boolean;
+    showSteige: boolean;
+    showOutlines: boolean;
+    showDebugStops: boolean;
+    showDebugPlatforms: boolean;
     showRoutes: boolean;
     showVehicles: boolean;
     showPois: boolean;
     debugOptions: DebugOptions;
     rendezvousEnabled: boolean;
+    debugMode: boolean;
 }
 
 const DEFAULT_OPTIONS: PersistedOptions = {
     showStations: true,
-    showStopPositions: false,
-    showPlatforms: false,
+    showSteige: false,
+    showOutlines: false,
+    showDebugStops: false,
+    showDebugPlatforms: false,
     showRoutes: true,
     showVehicles: true,
     showPois: false,
@@ -116,7 +120,8 @@ const DEFAULT_OPTIONS: PersistedOptions = {
         showDebugSegments: false,
         showDebugOnlyTracked: true
     },
-    rendezvousEnabled: false
+    rendezvousEnabled: false,
+    debugMode: false,
 };
 
 function loadOptions(): PersistedOptions {
@@ -124,6 +129,13 @@ function loadOptions(): PersistedOptions {
         const stored = localStorage.getItem(STORAGE_KEY);
         if (stored) {
             const parsed = JSON.parse(stored);
+            // Migrate old keys: showStopPositions → showDebugStops, showPlatforms → showDebugPlatforms
+            if ("showStopPositions" in parsed && !("showDebugStops" in parsed)) {
+                parsed.showDebugStops = parsed.showStopPositions;
+            }
+            if ("showPlatforms" in parsed && !("showDebugPlatforms" in parsed)) {
+                parsed.showDebugPlatforms = parsed.showPlatforms;
+            }
             // Merge with defaults to handle new options added in future versions
             return {
                 ...DEFAULT_OPTIONS,
@@ -152,8 +164,11 @@ export default function App() {
     // Stations are loaded via Martin vector tiles, not API.
     // Empty array kept for backwards compat with components that still reference it.
     const stations: Station[] = [];
-    const [routes, setRoutes] = useState<RouteWithGeometry[]>([]);
     const [vehicles, setVehicles] = useState<RouteVehicles[]>([]);
+    const viewportRef = useRef<{ bbox: [number, number, number, number]; zoom: number } | null>(null);
+    const [vehicleRouteGeometries, setVehicleRouteGeometries] = useState(
+        () => new Map<number, number[][][]>()
+    );
     const [activePanel, setActivePanel] = useState<SidebarPanel>(getInitialPanel);
     const [pinnedStops, setPinnedStops] = useState<PinnedStop[]>(() => {
         try {
@@ -195,6 +210,7 @@ export default function App() {
         return raw.split(";").map(s => decodeLocation(s));
     });
     const [pickMode, setPickMode] = useState<PickMode>(null);
+    const [selectedItinerary, setSelectedItinerary] = useState<RouteItinerary | null>(null);
 
     // Sync navigation locations to URL
     useEffect(() => {
@@ -218,7 +234,7 @@ export default function App() {
         lines: [],
         gtfsStops: []
     });
-    const mapRef = useRef<Map>(null);
+    const mapRef = useRef<TransitMap>(null);
 
     // Theme state
     const [isDark, setIsDark] = useState(() => {
@@ -246,8 +262,10 @@ export default function App() {
     // Destructure for easier access
     const {
         showStations,
-        showStopPositions,
-        showPlatforms,
+        showSteige,
+        showOutlines,
+        showDebugStops,
+        showDebugPlatforms,
         showRoutes,
         showVehicles,
         showPois,
@@ -361,10 +379,30 @@ export default function App() {
         mapRef.current?.flyTo(lat, lon);
     }, []);
 
-    // Route colors and types for departure tables (line number → color / type)
-    // Route colors and types — loaded from lightweight /api/routes/colors endpoint
-    const [routeColorMap, setRouteColorMap] = useState(() => new globalThis.Map<string, string>());
-    const [routeTypeMap, setRouteTypeMap] = useState(() => new globalThis.Map<string, string>());
+    // Route colors and types — loaded from /api/routes/colors, cached in localStorage
+    // for instant availability on reload (avoids gray flash).
+    // Cache key includes version to invalidate when the resolution logic changes.
+    const COLOR_CACHE_KEY = "omniviv-route-colors-v2";
+    const TYPE_CACHE_KEY = "omniviv-route-types-v2";
+    const [routeColorMap, setRouteColorMap] = useState(() => {
+        try {
+            const cached = localStorage.getItem(COLOR_CACHE_KEY);
+            if (cached) {
+                return new globalThis.Map<string, string>(JSON.parse(cached));
+            }
+        } catch { /* ignore corrupt cache */ }
+        return new globalThis.Map<string, string>();
+    });
+    const [routeTypeMap, setRouteTypeMap] = useState(() => {
+        try {
+            const cached = localStorage.getItem(TYPE_CACHE_KEY);
+            if (cached) {
+                return new globalThis.Map<string, string>(JSON.parse(cached));
+            }
+        } catch { /* ignore corrupt cache */ }
+        return new globalThis.Map<string, string>();
+    });
+    const [routeColorsLoaded, setRouteColorsLoaded] = useState(false);
     const routeColors = routeColorMap;
     const routeTypes = routeTypeMap;
 
@@ -377,7 +415,7 @@ export default function App() {
     }, [activePanel, trackedVehicles]);
 
     // Vehicle click from map: open sidebar panel + auto-follow
-    const handleVehicleClick = useCallback((tripId: string, lineNumber: string, destination: string, routeId: number) => {
+    const handleVehicleClick = useCallback((tripId: string, lineNumber: string, destination: string, routeId: number, markerColor: string) => {
         // Check if this vehicle is already tracked
         const existing = trackedVehicles.find((v) => v.currentTripId === tripId);
         if (existing) {
@@ -396,7 +434,9 @@ export default function App() {
 
         // Find the full vehicle data
         const liveData = findVehicleInRoutes(tripId, vehicles);
-        const color = routeColors.get(lineNumber) ?? "#3b82f6";
+        // Use the marker's color (from the route's OSM data) — bare-ref routeColors
+        // lookup is unreliable because the same ref exists across multiple cities.
+        const color = markerColor || routeColors.get(lineNumber) || "#3b82f6";
         const stops = liveData?.vehicle.stops ?? [];
         const origin = liveData?.vehicle.origin ?? null;
 
@@ -493,13 +533,20 @@ export default function App() {
                     const liveData = findVehicleInRoutes(entity.currentTripId, vehicles);
                     if (liveData) {
                         changed = true;
-                        return { ...entity, status: "active" as const, lastKnownStops: liveData.vehicle.stops };
+                        // Only update lastKnownStops if live data has at least as many stops
+                        const newStops = liveData.vehicle.stops.length >= entity.lastKnownStops.length
+                            ? liveData.vehicle.stops
+                            : entity.lastKnownStops;
+                        return { ...entity, status: "active" as const, lastKnownStops: newStops };
                     }
                 } else if (entity.status === "active") {
-                    // Update cached stops from live data
+                    // Update cached stops from live data, but never shrink the list.
+                    // The backend may return fewer stops when the departure store
+                    // is geographically pruned — keep the most complete list.
                     const liveData = findVehicleInRoutes(entity.currentTripId, vehicles);
                     if (liveData && liveData.vehicle.stops.length > 0) {
-                        if (liveData.vehicle.stops !== entity.lastKnownStops) {
+                        if (liveData.vehicle.stops.length >= entity.lastKnownStops.length
+                            && liveData.vehicle.stops !== entity.lastKnownStops) {
                             changed = true;
                             return { ...entity, lastKnownStops: liveData.vehicle.stops };
                         }
@@ -524,41 +571,59 @@ export default function App() {
         fetchIssuesCount();
     }, []);
 
-    // Fetch vehicles for all routes (used as fallback when WebSocket unavailable)
+    // Compute route IDs that must always be subscribed (tracked + camera-followed vehicles)
+    const alwaysIncludeRouteIds = useMemo(() => {
+        const ids = new Set<number>();
+        for (const v of trackedVehicles) {
+            if (v.pinned) ids.add(v.routeId);
+        }
+        if (cameraFollowTripId) {
+            const found = findVehicleInRoutes(cameraFollowTripId, vehicles);
+            if (found) ids.add(found.routeId);
+        }
+        return [...ids];
+    }, [trackedVehicles, cameraFollowTripId, vehicles]);
+
+    // Viewport-aware route discovery — only subscribe to visible routes
+    const { routeIds: visibleRouteIds, routeIdColors, routeIdTypes } = useVisibleRoutes({
+        viewportRef,
+        enabled: showVehicles,
+        alwaysIncludeRouteIds,
+    });
+
+    // Fetch vehicles for visible routes (used as fallback when WebSocket unavailable)
     const fetchVehiclesFallback = useCallback(async () => {
-        if (routes.length === 0) return;
+        if (visibleRouteIds.length === 0) return;
 
         const refTime = timeSimulation.isRealTime
             ? undefined
             : timeSimulation.currentTime.toISOString();
 
+        // Cap to 10 routes in fallback mode to avoid request amplification
+        const fallbackRouteIds = visibleRouteIds.slice(0, 10);
         try {
-            const vehiclePromises = routes.map(async (route) => {
-                try {
-                    const response = await getApiClient().api.getVehiclesByRoute({
-                        route_id: route.osm_id,
-                        reference_time: refTime
-                    });
-                    return {
-                        routeId: route.osm_id,
-                        lineNumber: response.data.line_number ?? null,
-                        vehicles: response.data.vehicles
-                    };
-                } catch {
-                    return {
-                        routeId: route.osm_id,
-                        lineNumber: route.ref ?? null,
-                        vehicles: []
-                    };
-                }
-            });
-
-            const results = await Promise.all(vehiclePromises);
+            const results = await Promise.all(
+                fallbackRouteIds.map(async (routeId) => {
+                    try {
+                        const response = await getApiClient().api.getVehiclesByRoute({
+                            route_id: routeId,
+                            reference_time: refTime,
+                        });
+                        return {
+                            routeId,
+                            lineNumber: response.data.line_number ?? null,
+                            vehicles: response.data.vehicles,
+                        };
+                    } catch {
+                        return { routeId, lineNumber: null as string | null, vehicles: [] as never[] };
+                    }
+                })
+            );
             setVehicles(results);
         } catch (err) {
             console.error("Failed to fetch vehicles:", err);
         }
-    }, [routes, timeSimulation.isRealTime, timeSimulation.currentTime]);
+    }, [visibleRouteIds, timeSimulation.isRealTime, timeSimulation.currentTime]);
 
     // Handle full vehicle data from WebSocket (initial subscribe)
     const handleFullVehicleData = useCallback((data: RouteVehicles[]) => {
@@ -573,32 +638,28 @@ export default function App() {
         []
     );
 
-    // Cache for lazily-loaded route geometries (for vehicle interpolation)
-    const routeGeometryCache = useRef(new globalThis.Map<number, RouteGeometry>());
+    // Cache for tracking which route geometries have been fetched
+    const geometryFetchedRef = useRef(new Set<number>());
 
     // Lazily fetch route geometry when vehicles arrive on a route not yet cached
     const ensureRouteGeometry = useCallback(async (routeId: number) => {
-        if (routeGeometryCache.current.has(routeId)) return;
+        if (geometryFetchedRef.current.has(routeId)) return;
+        geometryFetchedRef.current.add(routeId);
         try {
             const geomResponse = await getApiClient().api.getRouteGeometry(routeId);
-            routeGeometryCache.current.set(routeId, geomResponse.data);
-            // Update routes state so Map gets the geometry for vehicle rendering
-            setRoutes((prev) =>
-                prev.map((r) =>
-                    r.osm_id === routeId ? { ...r, geometry: geomResponse.data } : r
-                )
-            );
+            setVehicleRouteGeometries((prev) => {
+                const next = new Map(prev);
+                next.set(routeId, geomResponse.data.segments);
+                return next;
+            });
         } catch {
-            // Route may not have geometry yet (not imported from PBF)
+            // Route may not have geometry yet — allow retry later
+            geometryFetchedRef.current.delete(routeId);
         }
     }, []);
 
-    // Fetch stations for the visible viewport (debounced via AbortController)
-    // stationsAbort removed — stations come from vector tiles now
-    // Stations are now loaded via Martin vector tiles — no API bbox query needed.
-    // The handleViewportChange is kept only for future use (e.g. loading data on viewport change).
-    const handleViewportChange = useCallback(async (_bbox: [number, number, number, number], _zoom: number) => {
-        // No-op: stations come from vector tiles now
+    const handleViewportChange = useCallback((bbox: [number, number, number, number], zoom: number) => {
+        viewportRef.current = { bbox, zoom };
     }, []);
 
     // Initial data fetch — route color/type lookup. Stations loaded via viewport.
@@ -612,29 +673,51 @@ export default function App() {
                     const data = await response.json();
                     const colorMap = new globalThis.Map<string, string>();
                     const typeMap = new globalThis.Map<string, string>();
+                    // Track how many different colors exist per type:ref and bare ref.
+                    // Germany has 26+ cities with "Tram 1" — only use non-operator keys
+                    // when the color is unambiguous (same color everywhere).
+                    const typeKeyColors = new globalThis.Map<string, Set<string>>();
+                    const refKeyColors = new globalThis.Map<string, Set<string>>();
                     for (const entry of data.entries ?? []) {
                         if (!entry.ref) continue;
                         const typeKey = `${entry.route_type}:${entry.ref}`;
                         if (entry.color) {
-                            // Operator-scoped key (e.g. "Stadtwerke München:U5") — most specific
+                            // Operator-scoped key — always set (unambiguous)
                             if (entry.operator) {
                                 const operatorKey = `${entry.operator}:${entry.ref}`;
                                 if (!colorMap.has(operatorKey)) colorMap.set(operatorKey, entry.color);
                             }
-                            // Type-specific key (e.g. "tram:1") — first wins per type
-                            if (!colorMap.has(typeKey)) colorMap.set(typeKey, entry.color);
-                            // Fallback key (first color for this ref)
-                            if (!colorMap.has(entry.ref)) colorMap.set(entry.ref, entry.color);
+                            // Track ambiguity for fallback keys
+                            if (!typeKeyColors.has(typeKey)) typeKeyColors.set(typeKey, new Set());
+                            typeKeyColors.get(typeKey)!.add(entry.color.toLowerCase());
+                            if (!refKeyColors.has(entry.ref)) refKeyColors.set(entry.ref, new Set());
+                            refKeyColors.get(entry.ref)!.add(entry.color.toLowerCase());
                         }
                         if (!typeMap.has(entry.ref)) {
                             typeMap.set(entry.ref, entry.route_type);
                         }
                     }
+                    // Only set type:ref and bare ref keys when the color is unambiguous
+                    for (const [key, colors] of typeKeyColors) {
+                        if (colors.size === 1) colorMap.set(key, [...colors][0]);
+                    }
+                    for (const [key, colors] of refKeyColors) {
+                        if (colors.size === 1) colorMap.set(key, [...colors][0]);
+                    }
                     setRouteColorMap(colorMap);
                     setRouteTypeMap(typeMap);
+                    try {
+                        localStorage.setItem(COLOR_CACHE_KEY, JSON.stringify([...colorMap]));
+                        localStorage.setItem(TYPE_CACHE_KEY, JSON.stringify([...typeMap]));
+                        // Clean up old cache keys
+                        localStorage.removeItem("omniviv-route-colors");
+                        localStorage.removeItem("omniviv-route-types");
+                    } catch { /* localStorage full or unavailable */ }
                 }
+                setRouteColorsLoaded(true);
             } catch (err) {
                 console.error("Failed to fetch data:", err);
+                setRouteColorsLoaded(true);
             }
         };
 
@@ -644,14 +727,28 @@ export default function App() {
     // When vehicles data changes, ensure geometry is loaded for all active routes
     useEffect(() => {
         for (const rv of vehicles) {
-            if (rv.vehicles.length > 0 && !routeGeometryCache.current.has(rv.routeId)) {
+            if (rv.vehicles.length > 0 && !geometryFetchedRef.current.has(rv.routeId)) {
                 ensureRouteGeometry(rv.routeId);
             }
         }
     }, [vehicles, ensureRouteGeometry]);
 
-    // Get route IDs for WebSocket subscription
-    const routeIds = useMemo(() => routes.map((r) => r.osm_id), [routes]);
+    // LRU eviction for geometry cache — keep at most 200 entries
+    useEffect(() => {
+        if (vehicleRouteGeometries.size <= 200) return;
+        const keep = new Set([...visibleRouteIds, ...alwaysIncludeRouteIds]);
+        setVehicleRouteGeometries((prev) => {
+            const next = new Map<number, number[][][]>();
+            for (const [id, geom] of prev) {
+                if (keep.has(id)) next.set(id, geom);
+            }
+            // Also remove from fetch tracker so evicted routes can be re-fetched
+            for (const id of geometryFetchedRef.current) {
+                if (!keep.has(id)) geometryFetchedRef.current.delete(id);
+            }
+            return next;
+        });
+    }, [vehicleRouteGeometries.size, visibleRouteIds, alwaysIncludeRouteIds]);
 
     // Compute reference time for simulated time (only when not in real-time mode)
     const referenceTimeISO = useMemo(() => {
@@ -661,8 +758,8 @@ export default function App() {
 
     // WebSocket-based vehicle updates with fallback to polling
     const { isConnected: wsConnected, usingWebSocket } = useVehicleUpdates({
-        enabled: showVehicles && routes.length > 0,
-        routeIds,
+        enabled: showVehicles,
+        routeIds: visibleRouteIds,
         referenceTime: referenceTimeISO,
         onFullData: handleFullVehicleData,
         onIncrementalUpdate: handleIncrementalUpdate,
@@ -671,6 +768,7 @@ export default function App() {
     });
 
     return (
+        <DebugModeProvider enabled={options.debugMode}>
         <div className="relative flex h-screen w-screen">
             {/* Sidebar */}
             <div className="z-20 flex h-full">
@@ -733,6 +831,7 @@ export default function App() {
                     {trackedVehicles.some((v) => v.pinned) && <div className="mx-2 border-t border-border" />}
                     {trackedVehicles.filter((v) => v.pinned).map((vehicle) => {
                         const panelId: SidebarPanel = `vehicle:${vehicle.id}`;
+                        const vehicleMode = routeIdTypes.get(vehicle.routeId) ?? routeTypes.get(vehicle.lineNumber);
                         return (
                             <Button
                                 key={vehicle.id}
@@ -745,10 +844,9 @@ export default function App() {
                             >
                                 <LineBadge
                                     line={vehicle.lineNumber}
-                                    color={routeColors.get(vehicle.lineNumber) ?? vehicle.color}
-                                    mode={routeTypes.get(vehicle.lineNumber)}
-                                    variant="text"
-                                    className="text-[10px]"
+                                    color={routeColors.get(`${vehicleMode}:${vehicle.lineNumber}`) ?? routeColors.get(vehicle.lineNumber) ?? vehicle.color}
+                                    mode={vehicleMode}
+                                    className="scale-75"
                                 />
                             </Button>
                         );
@@ -783,6 +881,7 @@ export default function App() {
                             </span>
                         )}
                     </Button>
+                    {options.debugMode && (
                     <Button
                         variant={activePanel === "debug" ? "default" : "ghost"}
                         size="icon"
@@ -790,10 +889,10 @@ export default function App() {
                         className="m-2"
                         title="Debug"
                         aria-label="Debug"
-
                     >
                         <Bug className="h-5 w-5" />
                     </Button>
+                    )}
                     <a
                         href="https://github.com/firstdorsal/omniviv"
                         target="_blank"
@@ -817,7 +916,7 @@ export default function App() {
                         className="relative flex h-full border-r shadow-lg"
                         style={{ width: panelWidth }}
                     >
-                        <div className="bg-background h-full flex-1 overflow-y-auto min-w-0">
+                        <div className="bg-background h-full flex-1 overflow-y-scroll min-w-0">
                         {activePanel === "navigation" && (
                             <NavigationPanel
                                 stations={stations}
@@ -832,6 +931,7 @@ export default function App() {
                                 pickMode={pickMode}
                                 onPickModeChange={handlePickModeChange}
                                 onFlyTo={handleFlyTo}
+                                onSelectItinerary={setSelectedItinerary}
                             />
                         )}
 
@@ -847,39 +947,37 @@ export default function App() {
                                             }
                                         />
                                         <span className="text-sm">
-                                            Haltestellen ({stations.length})
+                                            Haltestellen{stations.length > 0 ? ` (${stations.length})` : ""}
                                         </span>
                                     </label>
 
                                     <label className="flex cursor-pointer items-center gap-3 pl-6">
                                         <Checkbox
-                                            checked={showStopPositions}
+                                            checked={showSteige}
                                             onCheckedChange={(checked) =>
-                                                updateOption("showStopPositions", checked === true)
+                                                updateOption("showSteige", checked === true)
                                             }
                                             disabled={!showStations}
                                         />
                                         <span
-                                            className={`flex items-center gap-2 text-sm ${showStations ? "" : "text-muted-foreground"}`}
+                                            className={`text-sm ${showStations ? "" : "text-muted-foreground"}`}
                                         >
-                                            <span className="h-3 w-3 shrink-0 rounded-full bg-blue-500" />
-                                            Haltepositionen
-                                        </span>
-                                    </label>
-
-                                    <label className="flex cursor-pointer items-center gap-3 pl-6">
-                                        <Checkbox
-                                            checked={showPlatforms}
-                                            onCheckedChange={(checked) =>
-                                                updateOption("showPlatforms", checked === true)
-                                            }
-                                            disabled={!showStations}
-                                        />
-                                        <span
-                                            className={`flex items-center gap-2 text-sm ${showStations ? "" : "text-muted-foreground"}`}
-                                        >
-                                            <span className="h-3 w-3 shrink-0 rounded-full bg-orange-500" />
                                             Steige
+                                        </span>
+                                    </label>
+
+                                    <label className="flex cursor-pointer items-center gap-3 pl-12">
+                                        <Checkbox
+                                            checked={showOutlines}
+                                            onCheckedChange={(checked) =>
+                                                updateOption("showOutlines", checked === true)
+                                            }
+                                            disabled={!showStations || !showSteige}
+                                        />
+                                        <span
+                                            className={`text-sm ${showStations && showSteige ? "" : "text-muted-foreground"}`}
+                                        >
+                                            Umrisse
                                         </span>
                                     </label>
 
@@ -891,7 +989,7 @@ export default function App() {
                                             }
                                         />
                                         <span className="text-sm">
-                                            Linien ({routes.length})
+                                            Linien{visibleRouteIds.length > 0 ? ` (${visibleRouteIds.length})` : ""}
                                         </span>
                                     </label>
 
@@ -989,6 +1087,10 @@ export default function App() {
                                 }
                                 rendezvousState={rendezvousState}
                                 shouldFlash={shouldFlash}
+                                debugMode={options.debugMode}
+                                onDebugModeChange={(enabled) =>
+                                    updateOption("debugMode", enabled)
+                                }
                             />
                         )}
 
@@ -1026,6 +1128,36 @@ export default function App() {
                                             Nur verfolgtes Fahrzeug
                                         </span>
                                     </label>
+                                    <div className="mt-4 border-t pt-4">
+                                        <h3 className="mb-3 text-xs font-semibold uppercase text-muted-foreground">Haltestellenmarker</h3>
+                                        <div className="space-y-3">
+                                            <label className="flex cursor-pointer items-center gap-3">
+                                                <Checkbox
+                                                    checked={showDebugStops}
+                                                    onCheckedChange={(checked) =>
+                                                        updateOption("showDebugStops", checked === true)
+                                                    }
+                                                />
+                                                <span className="flex items-center gap-2 text-sm">
+                                                    <span className="h-3 w-3 shrink-0 rounded-full bg-blue-500" />
+                                                    Haltepositionen
+                                                </span>
+                                            </label>
+
+                                            <label className="flex cursor-pointer items-center gap-3">
+                                                <Checkbox
+                                                    checked={showDebugPlatforms}
+                                                    onCheckedChange={(checked) =>
+                                                        updateOption("showDebugPlatforms", checked === true)
+                                                    }
+                                                />
+                                                <span className="flex items-center gap-2 text-sm">
+                                                    <span className="h-3 w-3 shrink-0 rounded-full bg-orange-500" />
+                                                    Plattformen
+                                                </span>
+                                            </label>
+                                        </div>
+                                    </div>
                                 </div>
 
                                 <div className="mt-6 border-t pt-4">
@@ -1071,6 +1203,7 @@ export default function App() {
                                     vehicles={vehicles}
                                     routeColors={routeColors}
                                     routeTypes={routeTypes}
+                                    routeIdTypes={routeIdTypes}
                                     currentTime={timeSimulation.currentTime}
                                     cameraFollowing={cameraFollowTripId === entity.currentTripId}
                                     onPin={handlePinVehicle}
@@ -1095,14 +1228,17 @@ export default function App() {
 
             {/* Map */}
             <div className="h-full flex-1">
-                <Map
+                <TransitMap
                     ref={mapRef}
                     stations={stations}
-                    routes={routes}
+                    vehicleRouteGeometries={vehicleRouteGeometries}
+                    routeIdColors={routeIdColors}
                     vehicles={vehicles}
                     showStations={showStations}
-                    showStopPositions={showStopPositions}
-                    showPlatforms={showPlatforms}
+                    showSteige={showSteige}
+                    showOutlines={showOutlines}
+                    showDebugStops={showDebugStops}
+                    showDebugPlatforms={showDebugPlatforms}
                     showRoutes={showRoutes}
                     showVehicles={showVehicles}
                     showPois={showPois}
@@ -1116,6 +1252,7 @@ export default function App() {
                     onCancelPickMode={() => setPickMode(null)}
                     navigationStart={navStart}
                     navigationEnd={navEnd}
+                    navigationRoute={activePanel === "navigation" ? selectedItinerary : null}
                     navigationWaypoints={navVia}
                     highlightedBuilding={highlightedBuilding}
                     onHighlightBuilding={setHighlightedBuilding}
@@ -1134,8 +1271,11 @@ export default function App() {
                     onTrackedVehicleLost={handleTrackedVehicleLost}
                     routeColors={routeColors}
                     routeTypes={routeTypes}
+                    debugMode={options.debugMode}
                 />
             </div>
         </div>
+        <Toaster position="top-center" theme={isDark ? "dark" : "light"} />
+        </DebugModeProvider>
     );
 }

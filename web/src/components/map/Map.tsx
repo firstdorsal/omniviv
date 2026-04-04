@@ -5,10 +5,15 @@ import React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Station, StationPlatform, StationStopPosition } from "../../api";
 import { getApiClient } from "../../apiClient";
-import type { RouteVehicles, RouteWithGeometry } from "../../App";
+import type { RouteVehicles } from "../../App";
 import type { MappingLine, MappingGtfsStop } from "../MappingManager";
+import type { RouteItinerary } from "../NavigationPanel";
+import { createWaypointMarkerElement } from "../WaypointMarker";
+import { haversineDistance, findClosestPointIndex, stripStationSuffix } from "../../lib/geoUtils";
+import { decodePolyline } from "./polyline";
 import { getConfig } from "../../config";
 import { GtfsStopPopup } from "../GtfsStopPopup";
+import { PlacePopup } from "../PlacePopup";
 import { PlatformPopup } from "../PlatformPopup";
 import { StationPopup } from "../StationPopup";
 import { Button } from "../ui/button";
@@ -69,11 +74,14 @@ interface HighlightedBuilding {
 
 interface MapProps {
     stations: Station[];
-    routes: RouteWithGeometry[];
+    vehicleRouteGeometries: Map<number, number[][][]>;
+    routeIdColors: Map<number, string>;
     vehicles: RouteVehicles[];
     showStations: boolean;
-    showStopPositions: boolean;
-    showPlatforms: boolean;
+    showSteige: boolean;
+    showOutlines: boolean;
+    showDebugStops: boolean;
+    showDebugPlatforms: boolean;
     showRoutes: boolean;
     showVehicles: boolean;
     showPois: boolean;
@@ -88,6 +96,7 @@ interface MapProps {
     navigationStart?: NavigationLocation | null;
     navigationEnd?: NavigationLocation | null;
     navigationWaypoints?: (NavigationLocation | null)[];
+    navigationRoute?: RouteItinerary | null;
     highlightedBuilding?: HighlightedBuilding | null;
     onHighlightBuilding?: (building: HighlightedBuilding | null) => void;
     mappingLines?: MappingLine[];
@@ -98,13 +107,14 @@ interface MapProps {
     onViewportChange?: (bbox: [number, number, number, number], zoom: number) => void;
     trackedTripId?: string | null;
     cameraFollowTripId?: string | null;
-    onVehicleClick?: (tripId: string, lineNumber: string, destination: string, routeId: number) => void;
+    onVehicleClick?: (tripId: string, lineNumber: string, destination: string, routeId: number, color: string) => void;
     onVehicleDeselect?: () => void;
     onCameraFollowStop?: () => void;
     onTrackedTripChanged?: (oldTripId: string, newTripId: string) => void;
     onTrackedVehicleLost?: (tripId: string) => void;
-    routeColors: globalThis.Map<string, string>;
-    routeTypes: globalThis.Map<string, string>;
+    routeColors: Map<string, string>;
+    routeTypes: Map<string, string>;
+    debugMode?: boolean;
 }
 
 interface ContextMenuState {
@@ -134,7 +144,7 @@ interface MapState {
     attributionExpanded: boolean;
 }
 
-export default class Map extends React.Component<MapProps, MapState> {
+export default class TransitMap extends React.Component<MapProps, MapState> {
     private mapContainer: React.RefObject<HTMLDivElement | null>;
     private map: maplibregl.Map | null = null;
     private popup: maplibregl.Popup | null = null;
@@ -146,9 +156,8 @@ export default class Map extends React.Component<MapProps, MapState> {
     private vehicleTracker: VehicleTracker | null = null;
 
     // Data caches
-    private routeColors = new globalThis.Map<string, string>();
-    private routeTypes = new globalThis.Map<string, string>();
-    private routeGeometries = new globalThis.Map<number, number[][][]>();
+    // Route colors and types come from props (this.props.routeColors, this.props.routeTypes)
+    private routeGeometries = new Map<number, number[][][]>();
     private hashSyncTimer: ReturnType<typeof setTimeout> | null = null;
 
     // Guards against stale async initialization (e.g. React StrictMode double-mount).
@@ -193,7 +202,10 @@ export default class Map extends React.Component<MapProps, MapState> {
     }
 
     componentDidUpdate(prevProps: MapProps, prevState: MapState) {
-        if (prevProps.routes !== this.props.routes) {
+        if (prevProps.vehicleRouteGeometries !== this.props.vehicleRouteGeometries ||
+            prevProps.routeColors !== this.props.routeColors ||
+            prevProps.routeTypes !== this.props.routeTypes ||
+            prevProps.routeIdColors !== this.props.routeIdColors) {
             this.updateRouteData();
         }
 
@@ -203,14 +215,18 @@ export default class Map extends React.Component<MapProps, MapState> {
 
         if (this.state.mapLoaded && this.layerManager) {
             if (prevProps.showStations !== this.props.showStations ||
-                prevProps.showStopPositions !== this.props.showStopPositions ||
-                prevProps.showPlatforms !== this.props.showPlatforms ||
+                prevProps.showSteige !== this.props.showSteige ||
+                prevProps.showOutlines !== this.props.showOutlines ||
+                prevProps.showDebugStops !== this.props.showDebugStops ||
+                prevProps.showDebugPlatforms !== this.props.showDebugPlatforms ||
                 prevProps.stations !== this.props.stations) {
                 this.layerManager.updateStations(
                     this.props.stations,
                     this.props.showStations,
-                    this.props.showStopPositions,
-                    this.props.showPlatforms
+                    this.props.showSteige,
+                    this.props.showOutlines,
+                    this.props.showDebugStops,
+                    this.props.showDebugPlatforms,
                 );
             }
             if (prevProps.showRoutes !== this.props.showRoutes) {
@@ -277,6 +293,11 @@ export default class Map extends React.Component<MapProps, MapState> {
             this.updateNavigationPointsLayer();
         }
 
+        // Update navigation route geometry
+        if (prevProps.navigationRoute !== this.props.navigationRoute) {
+            this.updateNavigationRouteLayer();
+        }
+
         // Update mapping visualization lines and GTFS stops
         // Also re-snap when stations change since line endpoints are derived from station coordinates
         if (prevProps.mappingLines !== this.props.mappingLines || prevProps.mappingGtfsStops !== this.props.mappingGtfsStops || prevProps.stations !== this.props.stations) {
@@ -316,27 +337,8 @@ export default class Map extends React.Component<MapProps, MapState> {
     }
 
     private updateRouteData() {
-        const colorMap = new globalThis.Map<string, string>();
-        const typeMap = new globalThis.Map<string, string>();
-        const geometryMap = new globalThis.Map<number, number[][][]>();
-
-        for (const route of this.props.routes) {
-            if (route.ref && route.color) {
-                colorMap.set(route.ref, route.color);
-            }
-            if (route.ref && route.route_type) {
-                typeMap.set(route.ref, route.route_type);
-            }
-            if (route.geometry?.segments) {
-                geometryMap.set(route.osm_id, route.geometry.segments);
-            }
-        }
-
-        this.routeColors = colorMap;
-        this.routeTypes = typeMap;
-        this.routeGeometries = geometryMap;
-
-        this.vehicleRenderer?.updateRouteData(colorMap, geometryMap);
+        this.routeGeometries = new Map(this.props.vehicleRouteGeometries);
+        this.vehicleRenderer?.updateRouteData(this.props.routeColors, this.props.routeTypes, this.props.routeIdColors, this.routeGeometries);
     }
 
     private updateAllMapData() {
@@ -345,8 +347,10 @@ export default class Map extends React.Component<MapProps, MapState> {
         this.layerManager.updateStations(
             this.props.stations,
             this.props.showStations,
-            this.props.showStopPositions,
-            this.props.showPlatforms
+            this.props.showSteige,
+            this.props.showOutlines,
+            this.props.showDebugStops,
+            this.props.showDebugPlatforms,
         );
         this.layerManager.setRoutesVisible(this.props.showRoutes);
         this.layerManager.updateMappingData(this.props.mappingLines ?? [], this.props.mappingGtfsStops ?? [], this.props.stations);
@@ -500,7 +504,9 @@ export default class Map extends React.Component<MapProps, MapState> {
         });
 
         // Expose map for E2E tests to allow querying rendered features
-        (window as any).map = this.map;
+        if (import.meta.env.DEV) {
+            (window as any).map = this.map;
+        }
 
         this.map.on("error", (e) => {
             console.error("Map error:", e.error?.message || e);
@@ -561,7 +567,7 @@ export default class Map extends React.Component<MapProps, MapState> {
                 }
             });
 
-            this.vehicleRenderer = new VehicleRenderer(this.layerManager, this.routeColors, this.routeGeometries);
+            this.vehicleRenderer = new VehicleRenderer(this.layerManager, this.props.routeColors, this.props.routeTypes, this.props.routeIdColors, this.routeGeometries);
             this.vehicleRenderer.setZoom(this.map.getZoom());
             this.vehicleRenderer.setOnTrackedVehicleLost(() => {
                 const tripId = this.props.trackedTripId;
@@ -580,13 +586,91 @@ export default class Map extends React.Component<MapProps, MapState> {
                 onTrackingInfoUpdate: () => {}, // Panel handles tracking info now
                 onTrackingStop: () => this.props.onCameraFollowStop?.(),
                 getSmoothedPosition: (tripId) => this.vehicleRenderer?.getSmoothedPosition(tripId),
-                getRouteColor: (lineNumber) => this.routeColors.get(lineNumber) ?? "#3b82f6",
+                getRouteColor: (lineNumber) => this.props.routeColors.get(lineNumber) ?? "#3b82f6",
+            });
+
+            // Navigation route geometry (GeoJSON source + line layer)
+            this.map.addSource("navigation-route", {
+                type: "geojson",
+                data: { type: "FeatureCollection", features: [] },
+            });
+            this.map.addLayer({
+                id: "navigation-route-outline",
+                type: "line",
+                source: "navigation-route",
+                filter: ["!=", ["get", "mode"], "WALK"],
+                paint: {
+                    "line-color": "#000",
+                    "line-width": 10,
+                    "line-opacity": 0.2,
+                },
+                layout: { "line-cap": "round", "line-join": "round" },
+            });
+            this.map.addLayer({
+                id: "navigation-route-line",
+                type: "line",
+                source: "navigation-route",
+                filter: ["!=", ["get", "mode"], "WALK"],
+                paint: {
+                    "line-color": ["get", "color"],
+                    "line-width": 6,
+                    "line-opacity": 0.9,
+                },
+                layout: { "line-cap": "round", "line-join": "round" },
+            });
+            // Walk segments get dashed lines
+            this.map.addLayer({
+                id: "navigation-route-walk",
+                type: "line",
+                source: "navigation-route",
+                filter: ["==", ["get", "mode"], "WALK"],
+                paint: {
+                    "line-color": "#3b82f6",
+                    "line-width": 4,
+                    "line-opacity": 0.9,
+                    "line-dasharray": [1.5, 1.5],
+                },
+                layout: { "line-cap": "round", "line-join": "round" },
+            });
+            // Stop markers along the navigation route
+            this.map.addLayer({
+                id: "navigation-route-stops",
+                type: "circle",
+                source: "navigation-route",
+                filter: ["==", ["geometry-type"], "Point"],
+                paint: {
+                    "circle-radius": 5,
+                    "circle-color": "#fff",
+                    "circle-stroke-color": "#333",
+                    "circle-stroke-width": 2,
+                },
+            });
+            this.map.addLayer({
+                id: "navigation-route-stop-labels",
+                type: "symbol",
+                source: "navigation-route",
+                filter: ["==", ["geometry-type"], "Point"],
+                layout: {
+                    "text-field": ["get", "name"],
+                    "text-font": ["Open Sans Semibold"],
+                    "text-size": 12,
+                    "text-offset": [0, 1.2],
+                    "text-anchor": "top",
+                    "text-optional": true,
+                    "text-allow-overlap": false,
+                },
+                paint: {
+                    "text-color": "#333",
+                    "text-halo-color": "#fff",
+                    "text-halo-width": 1.5,
+                },
             });
 
             this.setupMapEventHandlers();
             this.setState({ mapLoaded: true });
             this.updateScale();
             this.updateNavigationPointsLayer();
+            this.updateNavigationRouteLayer();
 
             // Notify parent of viewport changes (for loading visible routes)
             // Use 'move' with throttling so stations load during panning, not just after
@@ -666,10 +750,23 @@ export default class Map extends React.Component<MapProps, MapState> {
             const station = this.props.stations.find((s) => s.osm_id === osmId);
             if (station) {
                 const handlePlatformClick = (platform: StationPlatform | StationStopPosition) => {
-                    const platformCoords: [number, number] = [platform.lon, platform.lat];
-                    this.showPopup(platformCoords, <PlatformPopup platform={platform} stationName={station.name ?? undefined} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(platform.osm_id))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} />);
+                    let platformCoords: [number, number] = [platform.lon, platform.lat];
+                    if (this.map) {
+                        const displayName = platform.ref ?? platform.name;
+                        if (displayName) {
+                            const steigeFeatures = this.map.queryRenderedFeatures(undefined, { layers: ["steige-circle"] });
+                            const match = steigeFeatures.find(
+                                (f: { properties: Record<string, unknown> }) => f.properties?.display_name === displayName && f.properties?.station_id === osmId
+                            );
+                            if (match) {
+                                const coords = (match.geometry as GeoJSON.Point).coordinates;
+                                platformCoords = [coords[0], coords[1]];
+                            }
+                        }
+                    }
+                    this.showPopup(platformCoords, <PlatformPopup platform={platform} stationName={station.name ?? undefined} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(platform.osm_id))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} debugMode={this.props.debugMode} />);
                 };
-                this.showPopup(coordinates, <StationPopup station={station} onPlatformClick={handlePlatformClick} onClose={() => this.popup?.remove()} />);
+                this.showPopup(coordinates, <StationPopup station={station} onPlatformClick={handlePlatformClick} onClose={() => this.popup?.remove()} debugMode={this.props.debugMode} />);
                 return;
             }
 
@@ -678,10 +775,27 @@ export default class Map extends React.Component<MapProps, MapState> {
                 const response = await getApiClient().api.getStation(Number(osmId));
                 const fullStation = response.data;
                 const handlePlatformClick = (platform: StationPlatform | StationStopPosition) => {
-                    const platformCoords: [number, number] = [platform.lon, platform.lat];
-                    this.showPopup(platformCoords, <PlatformPopup platform={platform} stationName={fullStation.name ?? undefined} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(platform.osm_id))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} />);
+                    // Try to find the matching steige feature on the map for correct position.
+                    // The steige layer uses platform_ways centroids (passenger-side) which are
+                    // the correct visual position, while the API returns stop_position/platform
+                    // table coordinates which may be on the track.
+                    let platformCoords: [number, number] = [platform.lon, platform.lat];
+                    if (this.map) {
+                        const displayName = platform.ref ?? platform.name;
+                        if (displayName) {
+                            const steigeFeatures = this.map.queryRenderedFeatures(undefined, { layers: ["steige-circle"] });
+                            const match = steigeFeatures.find(
+                                (f: { properties: Record<string, unknown> }) => f.properties?.display_name === displayName && f.properties?.station_id === osmId
+                            );
+                            if (match) {
+                                const coords = (match.geometry as GeoJSON.Point).coordinates;
+                                platformCoords = [coords[0], coords[1]];
+                            }
+                        }
+                    }
+                    this.showPopup(platformCoords, <PlatformPopup platform={platform} stationName={fullStation.name ?? undefined} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(platform.osm_id))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} debugMode={this.props.debugMode} />);
                 };
-                this.showPopup(coordinates, <StationPopup station={fullStation} onPlatformClick={handlePlatformClick} onClose={() => this.popup?.remove()} />);
+                this.showPopup(coordinates, <StationPopup station={fullStation} onPlatformClick={handlePlatformClick} onClose={() => this.popup?.remove()} debugMode={this.props.debugMode} />);
             } catch (error) {
                 console.error("Failed to fetch station details:", error);
                 this.showPopup(coordinates, <div className="p-3 font-semibold">{stationName}</div>);
@@ -710,8 +824,35 @@ export default class Map extends React.Component<MapProps, MapState> {
                 gtfs_stop_ids: [],
             };
             const stationName = feature.properties?.station_name ?? undefined;
-            this.showPopup(coordinates, <PlatformPopup platform={platform} stationName={stationName} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(osmId))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} />);
+            this.showPopup(coordinates, <PlatformPopup platform={platform} stationName={stationName} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(osmId))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} debugMode={this.props.debugMode} />);
         });
+
+        // Steige click (user-facing platform markers from precalculated source-layer)
+        this.map.on("click", "steige-circle", (e) => {
+            if (!e.features || e.features.length === 0) return;
+            const feature = e.features[0];
+            const coordinates = (feature.geometry as GeoJSON.Point).coordinates.slice() as [number, number];
+            // stop_osm_id is the associated stop_position's OSM ID that has a GTFS mapping.
+            // platform_ways and platforms don't have GTFS mappings — only stop_positions do.
+            const stopOsmId = feature.properties?.stop_osm_id ?? feature.properties?.osm_id;
+            const ref = feature.properties?.platform_ref;
+            const name = feature.properties?.name;
+            const refIfopt = feature.properties?.ref_ifopt;
+            const displayName = feature.properties?.display_name;
+
+            const platform = {
+                osm_id: stopOsmId,
+                name: displayName ?? name ?? null,
+                ref: ref ?? null,
+                ref_ifopt: refIfopt ?? null,
+                lat: coordinates[1],
+                lon: coordinates[0],
+                gtfs_stop_ids: [],
+            };
+            this.showPopup(coordinates, <PlatformPopup platform={platform} stationName={undefined} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(stopOsmId))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} debugMode={this.props.debugMode} />);
+        });
+        this.map.on("mouseenter", "steige-circle", () => { if (this.map) this.map.getCanvas().style.cursor = "pointer"; });
+        this.map.on("mouseleave", "steige-circle", () => { if (this.map) this.map.getCanvas().style.cursor = ""; });
 
         // Legacy platform click (GeoJSON, for mapping mode)
         this.map.on("click", "platforms-circle", (e) => {
@@ -723,12 +864,12 @@ export default class Map extends React.Component<MapProps, MapState> {
             for (const station of this.props.stations) {
                 const platform = station.platforms.find((p) => p.osm_id === osmId);
                 if (platform) {
-                    this.showPopup(coordinates, <PlatformPopup platform={platform} stationName={stationName} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(platform.osm_id))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} />);
+                    this.showPopup(coordinates, <PlatformPopup platform={platform} stationName={stationName} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(platform.osm_id))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} debugMode={this.props.debugMode} />);
                     return;
                 }
                 const stopPosition = station.stop_positions.find((s) => s.osm_id === osmId);
                 if (stopPosition) {
-                    this.showPopup(coordinates, <PlatformPopup platform={stopPosition} stationName={stationName} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(stopPosition.osm_id))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} />);
+                    this.showPopup(coordinates, <PlatformPopup platform={stopPosition} stationName={stationName} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} isPinned={this.props.pinnedStopIds?.has(String(stopPosition.osm_id))} onPin={this.handlePinStop} onUnpin={this.props.onUnpinStop} onClose={() => this.popup?.remove()} debugMode={this.props.debugMode} />);
                     return;
                 }
             }
@@ -743,8 +884,29 @@ export default class Map extends React.Component<MapProps, MapState> {
             const stopName = feature.properties?.name ?? stopId;
             const ifopt = feature.properties?.ifopt || null;
             const isAssigned = feature.properties?.isAssigned === true || feature.properties?.isAssigned === "true";
-            this.showPopup(coordinates, <GtfsStopPopup stopId={stopId} stopName={stopName} ifopt={ifopt} isAssigned={isAssigned} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} onClose={() => this.popup?.remove()} />);
+            this.showPopup(coordinates, <GtfsStopPopup stopId={stopId} stopName={stopName} ifopt={ifopt} isAssigned={isAssigned} routeColors={this.props.routeColors} routeTypes={this.props.routeTypes} referenceTime={this.props.isRealTime ? undefined : this.props.simulatedTime} onClose={() => this.popup?.remove()} debugMode={this.props.debugMode} />);
         });
+
+        // Place click (city/town/village labels) - show name + population
+        const placeLayers = ["place-city", "place-town", "place-village"];
+        for (const layer of placeLayers) {
+            this.map.on("click", layer, (e) => {
+                if (!e.features || e.features.length === 0) return;
+                const feature = e.features[0];
+                const name = feature.properties?.name ?? feature.properties?.name_en ?? "";
+                const placeClass = feature.properties?.class ?? "city";
+                if (!name) return;
+                const coordinates = (feature.geometry as GeoJSON.Point).coordinates.slice() as [number, number];
+                e.originalEvent?.stopPropagation();
+                this.showPopup(coordinates, <PlacePopup name={name} placeClass={placeClass} />);
+            });
+            this.map.on("mouseenter", layer, () => {
+                if (this.map) this.map.getCanvas().style.cursor = "pointer";
+            });
+            this.map.on("mouseleave", layer, () => {
+                if (this.map) this.map.getCanvas().style.cursor = "";
+            });
+        }
 
         // Vehicle click - open sidebar panel
         this.map.on("click", "vehicles-marker", (e) => {
@@ -762,7 +924,8 @@ export default class Map extends React.Component<MapProps, MapState> {
                     break;
                 }
             }
-            this.props.onVehicleClick?.(tripId, lineNumber, destination, routeId);
+            const color = props.color ?? "";
+            this.props.onVehicleClick?.(tripId, lineNumber, destination, routeId, color);
         });
 
         // Map click - handle pick mode, measurement, stop tracking, close context menu
@@ -916,18 +1079,7 @@ export default class Map extends React.Component<MapProps, MapState> {
     };
 
     private calculateDistance(start: { lng: number; lat: number }, end: { lng: number; lat: number }): number {
-        // Haversine formula
-        const R = 6371000; // Earth's radius in meters
-        const lat1 = (start.lat * Math.PI) / 180;
-        const lat2 = (end.lat * Math.PI) / 180;
-        const deltaLat = ((end.lat - start.lat) * Math.PI) / 180;
-        const deltaLng = ((end.lng - start.lng) * Math.PI) / 180;
-
-        const a = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
-            Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLng / 2) * Math.sin(deltaLng / 2);
-        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-
-        return R * c;
+        return haversineDistance(start.lat, start.lng, end.lat, end.lng);
     }
 
     private formatDistance(meters: number): string {
@@ -1144,11 +1296,7 @@ export default class Map extends React.Component<MapProps, MapState> {
         if (navigationEnd) points.push({ location: navigationEnd, index: points.length });
 
         for (const { location, index } of points) {
-            const letter = String.fromCharCode(65 + index);
-            const el = document.createElement("div");
-            el.className = "nav-waypoint-marker";
-            el.style.cssText = "width:32px;height:32px;border-radius:50%;background:var(--background);border:2.5px solid var(--foreground);display:flex;align-items:center;justify-content:center;color:var(--foreground);font-weight:700;font-size:14px;line-height:1;box-shadow:0 1px 4px rgba(0,0,0,.3);cursor:default;user-select:none;";
-            el.textContent = letter;
+            const el = createWaypointMarkerElement(index, 22);
 
             const marker = new maplibregl.Marker({ element: el, anchor: "center" })
                 .setLngLat([location.lon, location.lat])
@@ -1156,6 +1304,316 @@ export default class Map extends React.Component<MapProps, MapState> {
             this.navigationMarkers.push(marker);
         }
     }
+
+    /** Pending navigation route update — cancelled when a new itinerary is selected */
+    private navRouteAbort: AbortController | null = null;
+
+    private updateNavigationRouteLayer() {
+        if (!this.map) return;
+
+        // Cancel any in-flight geometry fetches
+        this.navRouteAbort?.abort();
+        this.navRouteAbort = null;
+
+        const source = this.map.getSource("navigation-route") as maplibregl.GeoJSONSource | undefined;
+        if (!source) return;
+
+        const itinerary = this.props.navigationRoute;
+        // Dim/restore transit layers when navigation route changes
+        this.setTransitLayersDimmed(!!itinerary);
+
+        if (!itinerary) {
+            source.setData({ type: "FeatureCollection", features: [] });
+            return;
+        }
+
+        const abort = new AbortController();
+        this.navRouteAbort = abort;
+
+        // Build features asynchronously — fetch OSM geometry for transit legs
+        this.buildNavigationFeatures(itinerary, abort.signal).then(features => {
+            if (abort.signal.aborted || !this.map) return;
+            source.setData({ type: "FeatureCollection", features });
+
+            // Fit the map to show the entire route
+            const lineFeatures = features.filter(f => f.geometry.type === "LineString");
+            if (lineFeatures.length > 0) {
+                const allCoords = lineFeatures.flatMap(f =>
+                    (f.geometry as GeoJSON.LineString).coordinates,
+                );
+                const bounds = new maplibregl.LngLatBounds(allCoords[0] as [number, number], allCoords[0] as [number, number]);
+                for (const coord of allCoords) {
+                    bounds.extend(coord as [number, number]);
+                }
+                this.map.fitBounds(bounds, { padding: 80, duration: 500 });
+            }
+        }).catch(() => {/* aborted or failed — ignore */});
+    }
+
+    /** Hide transit layers and minor labels when navigation route is active */
+    private setTransitLayersDimmed(dimmed: boolean) {
+        if (!this.map) return;
+        // Hide everything: transit routes, stations, stops, and minor labels
+        const hiddenLayers = [
+            "routes-line",
+            "stations-circle", "stations-label",
+            "steige-circle", "steige-label",
+            "stops-circle", "stops-label",
+            "place-village", "place-town",
+            "poi-level-1", "poi-level-2", "poi-level-3",
+        ];
+        for (const layerId of hiddenLayers) {
+            if (this.map.getLayer(layerId)) {
+                this.map.setLayoutProperty(layerId, "visibility", dimmed ? "none" : "visible");
+            }
+        }
+    }
+
+    private resolveLegColor(leg: RouteLeg): string {
+        if (leg.mode === "WALK") return "#3b82f6";
+        if (leg.routeColor) {
+            return leg.routeColor.startsWith("#") ? leg.routeColor : `#${leg.routeColor}`;
+        }
+        if (leg.routeShortName) {
+            const { routeColors } = this.props;
+            return (leg.agencyName ? routeColors.get(`${leg.agencyName}:${leg.routeShortName}`) : undefined)
+                ?? routeColors.get(`${leg.mode?.toLowerCase()}:${leg.routeShortName}`)
+                ?? routeColors.get(leg.routeShortName)
+                ?? "#3b82f6";
+        }
+        return "#3b82f6";
+    }
+
+    private async buildNavigationFeatures(
+        itinerary: RouteItinerary,
+        signal: AbortSignal,
+    ): Promise<GeoJSON.Feature[]> {
+        // Build one feature per leg. For transit legs, fetch OSM geometry in parallel.
+        // Use MOTIS polyline as fallback while/if OSM fetch fails.
+
+        type LegEntry = {
+            leg: RouteLeg;
+            color: string;
+            fallbackCoords: [number, number][] | null;
+            osmFetch: Promise<[number, number][] | null> | null;
+        };
+
+        const entries: LegEntry[] = itinerary.legs.map(leg => {
+            const color = this.resolveLegColor(leg);
+            let fallbackCoords: [number, number][] | null = null;
+            if (leg.legGeometry?.points) {
+                const precision = leg.legGeometry.precision ?? 7;
+                fallbackCoords = decodePolyline(leg.legGeometry.points, precision);
+                if (fallbackCoords.length < 2) fallbackCoords = null;
+            }
+            const osmFetch = leg.mode !== "WALK"
+                ? this.fetchOsmRouteSegment(leg, signal).catch(() => null)
+                : null;
+            return { leg, color, fallbackCoords, osmFetch };
+        });
+
+        // Wait for all OSM geometry fetches
+        const osmResults = await Promise.all(
+            entries.map(e => e.osmFetch ?? Promise.resolve(null)),
+        );
+        if (signal.aborted) return [];
+
+        // Build clean GeoJSON features
+        const features: GeoJSON.Feature[] = [];
+        for (let i = 0; i < entries.length; i++) {
+            const { leg, color, fallbackCoords } = entries[i];
+            const osmCoords = osmResults[i];
+
+            // Prefer OSM geometry, fall back to MOTIS polyline
+            const coordinates = (osmCoords && osmCoords.length >= 2) ? osmCoords : fallbackCoords;
+            if (!coordinates || coordinates.length < 2) continue;
+
+            features.push({
+                type: "Feature",
+                properties: {
+                    mode: leg.mode,
+                    color,
+                    line: leg.routeShortName ?? "",
+                },
+                geometry: { type: "LineString", coordinates },
+            });
+        }
+
+        // Add stop point features for all transit stops along the route
+        // (from, to, and all intermediate stops)
+        const seenStops = new Set<string>();
+        for (const leg of itinerary.legs) {
+            if (leg.mode === "WALK") continue;
+            const allStops = [leg.from, ...(leg.intermediateStops ?? []), leg.to];
+            for (const stop of allStops) {
+                if (stop.lat == null || stop.lon == null || !stop.name) continue;
+                const key = `${stop.lat.toFixed(4)},${stop.lon.toFixed(4)}`;
+                if (seenStops.has(key)) continue;
+                seenStops.add(key);
+                features.push({
+                    type: "Feature",
+                    properties: { name: stop.name },
+                    geometry: { type: "Point", coordinates: [stop.lon, stop.lat] },
+                });
+            }
+        }
+
+        return features;
+    }
+
+    /** Cache: osm_id → chained coordinate array (LRU, max 100 entries) */
+    private routeGeometryCache = new Map<number, [number, number][]>();
+    private static readonly GEOMETRY_CACHE_MAX = 100;
+
+    /**
+     * Fetch OSM route geometry from our API and extract the segment
+     * between the leg's start and end coordinates.
+     */
+    private async fetchOsmRouteSegment(
+        leg: RouteLeg,
+        signal: AbortSignal,
+    ): Promise<[number, number][] | null> {
+        const fromLat = leg.from.lat;
+        const fromLon = leg.from.lon;
+        const toLat = leg.to.lat;
+        const toLon = leg.to.lon;
+        if (fromLat == null || fromLon == null || toLat == null || toLon == null) return null;
+        if (!leg.routeShortName) return null;
+
+        // Map MOTIS mode to our route_type
+        const modeToType: Record<string, string> = {
+            TRAM: "tram", BUS: "bus", RAIL: "train", REGIONAL_RAIL: "train",
+            SUBWAY: "subway", FERRY: "ferry",
+        };
+        const routeType = modeToType[leg.mode] ?? leg.mode.toLowerCase();
+        const baseUrl = getApiClient().baseUrl;
+
+        // Helper: POST to /api/routes/search
+        const searchRoutes = async (body: Record<string, unknown>) => {
+            const res = await fetch(`${baseUrl}/api/routes/search`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+                signal,
+            });
+            if (!res.ok) return [];
+            return ((await res.json()).routes ?? []) as { osm_id: number; ref?: string; operator?: string; name?: string }[];
+        };
+
+        // Step 1: Search by ref + geographic proximity (fast targeted query)
+        const midLat = (fromLat + toLat) / 2;
+        const midLon = (fromLon + toLon) / 2;
+        let refCandidates = await searchRoutes({
+            route_type: routeType,
+            ref: leg.routeShortName,
+            near_lat: midLat,
+            near_lon: midLon,
+        });
+
+        // If geo-filter returned nothing (route_stops missing for some routes),
+        // retry with ref + from/to city name to narrow down
+        if (refCandidates.length === 0) {
+            const cityName = (leg.from.name?.replace(/,.*$/, "").trim()) || (leg.to.name?.replace(/,.*$/, "").trim()) || "";
+            if (cityName) {
+                refCandidates = await searchRoutes({ route_type: routeType, ref: leg.routeShortName, name_contains: cityName });
+            }
+            if (refCandidates.length === 0) {
+                refCandidates = await searchRoutes({ route_type: routeType, ref: leg.routeShortName });
+            }
+        }
+
+        const result = await this.findBestGeometryMatch(refCandidates, fromLat, fromLon, toLat, toLon, signal);
+        if (result && result.score <= 2000) return result.coords;
+
+        // Step 2: Fallback — search by city name in route name
+        const destCity = leg.to.name ? stripStationSuffix(leg.to.name) : undefined;
+        const fromCity = leg.from.name ? stripStationSuffix(leg.from.name) : undefined;
+        if (destCity && fromCity) {
+            const candidateIds = new Set(refCandidates.map(c => c.osm_id));
+            const nameRoutes = await searchRoutes({
+                route_type: routeType,
+                name_contains: destCity,
+                near_lat: midLat,
+                near_lon: midLon,
+            });
+            const filtered = nameRoutes.filter(r => !candidateIds.has(r.osm_id));
+            const withBoth = filtered.filter(r => r.name?.includes(fromCity));
+            const rest = filtered.filter(r => !r.name?.includes(fromCity));
+            const sorted = [...withBoth, ...rest].slice(0, 15);
+            if (sorted.length > 0) {
+                const fallback = await this.findBestGeometryMatch(sorted, fromLat, fromLon, toLat, toLon, signal);
+                if (fallback && fallback.score <= 2000) return fallback.coords;
+            }
+        }
+
+        return null;
+    }
+
+    /** Try a list of route candidates and return the geometry segment that best covers from→to */
+    private async findBestGeometryMatch(
+        candidates: { osm_id: number }[],
+        fromLat: number, fromLon: number, toLat: number, toLon: number,
+        signal: AbortSignal,
+    ): Promise<{ coords: [number, number][]; score: number } | null> {
+        // Fetch all uncached geometries in parallel
+        const uncached = candidates.filter(r => !this.routeGeometryCache.has(r.osm_id));
+        if (uncached.length > 0) {
+            const fetches = uncached.map(async (route) => {
+                try {
+                    const res = await fetch(
+                        `${getApiClient().baseUrl}/api/routes/${route.osm_id}/geometry`,
+                        { signal },
+                    );
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    const segments: number[][][] = data.segments ?? [];
+                    const coords = segments.flatMap(
+                        seg => seg.map(([lon, lat]) => [lon, lat] as [number, number]),
+                    );
+                    if (this.routeGeometryCache.size >= TransitMap.GEOMETRY_CACHE_MAX) {
+                        const oldest = this.routeGeometryCache.keys().next().value;
+                        if (oldest !== undefined) this.routeGeometryCache.delete(oldest);
+                    }
+                    this.routeGeometryCache.set(route.osm_id, coords);
+                } catch { /* network error — skip */ }
+            });
+            await Promise.all(fetches);
+        }
+        if (signal.aborted) return null;
+
+        let bestCoords: [number, number][] | null = null;
+        let bestScore = Infinity;
+
+        for (const route of candidates) {
+            const allCoords = this.routeGeometryCache.get(route.osm_id);
+            if (!allCoords || allCoords.length < 2) continue;
+
+            const startIdx = findClosestPointIndex(allCoords, fromLon, fromLat);
+            const endIdx = findClosestPointIndex(allCoords, toLon, toLat);
+            if (startIdx === endIdx) continue;
+
+            const startDist = haversineDistance(allCoords[startIdx][1], allCoords[startIdx][0], fromLat, fromLon);
+            const endDist = haversineDistance(allCoords[endIdx][1], allCoords[endIdx][0], toLat, toLon);
+            const score = startDist + endDist;
+            // Prefer routes where the geometry goes in the right direction
+            // (startIdx < endIdx = forward direction, no reversal needed).
+            // Reversed routes use the wrong track on parallel-track corridors.
+            const isForward = startIdx < endIdx;
+            const directionPenalty = isForward ? 0 : 50;
+            const adjustedScore = score + directionPenalty;
+
+            if (adjustedScore < bestScore) {
+                bestScore = adjustedScore;
+                bestCoords = isForward
+                    ? allCoords.slice(startIdx, endIdx + 1)
+                    : allCoords.slice(endIdx, startIdx + 1).reverse();
+            }
+        }
+
+        if (!bestCoords) return null;
+        return { coords: bestCoords, score: bestScore };
+    }
+
 
     private updateMeasurementLayer() {
         if (!this.map) return;
