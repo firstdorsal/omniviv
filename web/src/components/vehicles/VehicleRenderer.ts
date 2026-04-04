@@ -51,6 +51,9 @@ type RenderPosition = FeatureRenderPosition;
 export class VehicleRenderer {
     private layerManager: MapLayerManager;
     private routeColors: globalThis.Map<string, string>;
+    private routeTypes: globalThis.Map<string, string>;
+    /** Map of routeId (OSM) → color from visible routes response — most specific lookup */
+    private routeIdColors: globalThis.Map<number, string>;
     private routeGeometries: globalThis.Map<number, number[][][]>;
     private linearizedRoutes = new globalThis.Map<number, LinearizedRoute>();
     private smoothedPositions = new globalThis.Map<string, SmoothedVehiclePosition>();
@@ -103,10 +106,14 @@ export class VehicleRenderer {
     constructor(
         layerManager: MapLayerManager,
         routeColors: globalThis.Map<string, string>,
+        routeTypes: globalThis.Map<string, string>,
+        routeIdColors: globalThis.Map<number, string>,
         routeGeometries: globalThis.Map<number, number[][][]>
     ) {
         this.layerManager = layerManager;
         this.routeColors = routeColors;
+        this.routeTypes = routeTypes;
+        this.routeIdColors = routeIdColors;
         this.routeGeometries = routeGeometries;
         this.buildLinearizedRoutes();
 
@@ -131,11 +138,35 @@ export class VehicleRenderer {
      */
     updateRouteData(
         routeColors: globalThis.Map<string, string>,
+        routeTypes: globalThis.Map<string, string>,
+        routeIdColors: globalThis.Map<number, string>,
         routeGeometries: globalThis.Map<number, number[][][]>
     ): void {
         this.routeColors = routeColors;
+        this.routeTypes = routeTypes;
+        this.routeIdColors = routeIdColors;
         this.routeGeometries = routeGeometries;
         this.buildLinearizedRoutes();
+    }
+
+    /**
+     * Tiered route color lookup:
+     * 1. routeIdColors (exact OSM route → color from /api/routes/visible)
+     * 2. type-scoped key (e.g. "tram:1" in routeColors)
+     * 3. bare ref (e.g. "1" in routeColors)
+     * 4. fallback default blue
+     */
+    private lookupRouteColor(lineNumber: string, routeId: number): string {
+        // Most specific: exact route color from OSM data
+        const byRouteId = this.routeIdColors.get(routeId);
+        if (byRouteId) return byRouteId;
+        // Fallback: type-scoped lookup in the global color map
+        const routeType = this.routeTypes.get(lineNumber);
+        if (routeType) {
+            const byType = this.routeColors.get(`${routeType}:${lineNumber}`);
+            if (byType) return byType;
+        }
+        return this.routeColors.get(lineNumber) ?? "#3b82f6";
     }
 
     /**
@@ -312,9 +343,12 @@ export class VehicleRenderer {
 
         for (const { vehicle, routeId } of vehiclesByTripId.values()) {
             const routeGeometry = this.routeGeometries.get(routeId);
-            const routeColor = this.routeColors.get(vehicle.line_number ?? "") ?? "#3b82f6";
-            const targetPosition = calculateVehiclePosition(vehicle, routeGeometry ?? [], now);
-
+            // Skip vehicles whose route geometry hasn't loaded yet.
+            // Without geometry, vehicles interpolate linearly between stops
+            // (cutting through buildings). Better to show nothing until geometry arrives.
+            if (!routeGeometry || routeGeometry.length === 0) continue;
+            const routeColor = this.lookupRouteColor(vehicle.line_number ?? "", routeId);
+            const targetPosition = calculateVehiclePosition(vehicle, routeGeometry, now);
 
             if (targetPosition && targetPosition.status !== "completed") {
                 allPositions.push({ position: targetPosition, routeId, routeColor });
@@ -376,6 +410,16 @@ export class VehicleRenderer {
             );
         }
 
+        // Capture pre-advance positions for accurate monitor speed diagnostics.
+        // The monitor compares rendered speed (position delta / time delta) against
+        // schedule speed (distance to next stop / time to next stop). Both must use
+        // the SAME position base to avoid inflated ratios.
+        const preAdvancePositions = new globalThis.Map<string, number | undefined>();
+        for (const { position: targetPosition } of allPositions) {
+            const prev = this.smoothedPositions.get(targetPosition.tripId);
+            preAdvancePositions.set(targetPosition.tripId, prev?.renderedLinearPosition);
+        }
+
         // Update smoothed positions toward targets
         // Pass linearized route for route-based smoothing with forward-only clamping
         for (const { position: targetPosition, routeId } of allPositions) {
@@ -422,12 +466,14 @@ export class VehicleRenderer {
             const sp = this.smoothedPositions.get(targetPosition.tripId);
             if (!sp) continue;
 
-            // Compute schedule-derived speed from target position data
+            // Use PRE-ADVANCE position for schedule speed to match the distance
+            // base that the smoothing function used. Using post-advance position
+            // would undercount remaining distance and report inflated speed ratios.
+            const preLinear = preAdvancePositions.get(targetPosition.tripId);
             let scheduleSpeedMps: number | undefined;
             let distToNextStop: number | undefined;
-            if (targetPosition.nextStopLinearPosition !== undefined &&
-                sp.renderedLinearPosition !== undefined) {
-                distToNextStop = targetPosition.nextStopLinearPosition - sp.renderedLinearPosition;
+            if (targetPosition.nextStopLinearPosition !== undefined && preLinear !== undefined) {
+                distToNextStop = targetPosition.nextStopLinearPosition - preLinear;
             }
             if (distToNextStop !== undefined &&
                 targetPosition.msToNextStop !== undefined &&

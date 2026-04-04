@@ -60,6 +60,8 @@ describe("VehicleRenderer time interpolation", () => {
             createMockLayerManager(),
             new Map(),
             new Map(),
+            new Map(),
+            new Map(),
         );
         mockPerformanceNow = vi.spyOn(performance, "now");
     });

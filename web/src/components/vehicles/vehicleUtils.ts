@@ -802,12 +802,18 @@ export interface SmoothedVehiclePosition extends VehiclePosition {
     /** Track which segment we're on to detect backward teleporting from GTFS-RT updates */
     prevStopIfopt?: string;
     nextStopIfopt?: string;
+    /** Smoothed required speed (m/s) — prevents spikes after GTFS-RT updates */
+    smoothedSpeed?: number;
 }
 
 // Thresholds for position smoothing
 const SNAP_DISTANCE_METERS = 1000; // Distance above which we snap instead of smooth (route change/restart)
 // Bearing smoothing: exponential decay half-life in ms
 const BEARING_HALF_LIFE_MS = 200;
+/** Speed smoothing half-life in ms. Prevents abrupt speed spikes when GTFS-RT
+ * updates change estimated arrival times. At 500ms half-life, a 2x speed jump
+ * takes ~1.5 seconds to fully catch up — visually imperceptible. */
+const SPEED_HALF_LIFE_MS = 500;
 /** Maximum rendered vehicle speed in m/s (70 km/h).
  * Clamps the per-frame linear position delta so that even large target jumps
  * (from GTFS-RT time corrections) don't cause the vehicle to visually "speed"
@@ -920,7 +926,9 @@ export function updateSmoothedPosition(
         // Arrival-time-based speed: advance at the speed needed to reach the next
         // stop by its scheduled arrival time.  When GTFS-RT updates change times,
         // only the *speed* changes — the rendered position never jumps.
+        // Speed itself is exponentially smoothed to prevent visual spikes.
         let smoothedLinear: number;
+        let newSmoothedSpeed = current.smoothedSpeed;
         const simDeltaMs = deltaMs * timeSpeed;
         if (isInTransit &&
             target.nextStopLinearPosition !== undefined &&
@@ -930,7 +938,12 @@ export function updateSmoothedPosition(
             const timeToStopSec = target.msToNextStop / 1000;
             const requiredSpeed = Math.max(0, distToStop / timeToStopSec);
             const clampedSpeed = Math.min(requiredSpeed, MAX_RENDERED_SPEED_MS);
-            smoothedLinear = current.renderedLinearPosition + clampedSpeed * (simDeltaMs / 1000);
+            // Smooth the speed change to prevent visual spikes after GTFS-RT updates
+            const prevSpeed = current.smoothedSpeed ?? clampedSpeed;
+            const speedDecay = 1 - Math.pow(0.5, deltaMs / SPEED_HALF_LIFE_MS);
+            const effectiveSpeed = prevSpeed + (clampedSpeed - prevSpeed) * speedDecay;
+            newSmoothedSpeed = effectiveSpeed;
+            smoothedLinear = current.renderedLinearPosition + effectiveSpeed * (simDeltaMs / 1000);
         } else {
             // At stop, waiting, or missing schedule info: advance toward target
             // at max speed instead of snapping, to prevent forward teleportation
@@ -967,6 +980,7 @@ export function updateSmoothedPosition(
                     renderedBearing: newBearing,
                     lastUpdateTime: Date.now(),
                     renderedLinearPosition: smoothedLinear,
+                    smoothedSpeed: newSmoothedSpeed,
                     prevStopIfopt: current.prevStopIfopt,
                     nextStopIfopt: current.nextStopIfopt,
                 };
@@ -980,6 +994,7 @@ export function updateSmoothedPosition(
             renderedBearing: newBearing,
             lastUpdateTime: Date.now(),
             renderedLinearPosition: smoothedLinear,
+            smoothedSpeed: newSmoothedSpeed,
             prevStopIfopt: target.currentStop?.stop_ifopt,
             nextStopIfopt: target.nextStop?.stop_ifopt,
         };
