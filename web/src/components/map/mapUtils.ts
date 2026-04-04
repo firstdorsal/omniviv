@@ -2,9 +2,16 @@ import type { StationPlatform, StationStopPosition } from "../api";
 
 // Extract platform identifier from ref, or from IFOPT ID (last segment after colon)
 export function getPlatformDisplayName(platform: StationPlatform | StationStopPosition): string {
-    if (platform.ref) return platform.ref;
+    if (platform.ref) {
+        // Split compound refs like "A;B" and return first part
+        // The full compound ref should be handled by callers that need all parts
+        const first = platform.ref.split(";")[0].trim();
+        if (first) return first;
+    }
     if (platform.ref_ifopt) {
-        const lastSegment = platform.ref_ifopt.split(":").pop();
+        // Split compound IFOPTs like "de:...:A;de:...:B" and use suffix of first
+        const firstIfopt = platform.ref_ifopt.split(";")[0].trim();
+        const lastSegment = firstIfopt.split(":").pop();
         if (lastSegment) return lastSegment.toUpperCase();
     }
     // Use last 3 digits of OSM ID as a short numeric label

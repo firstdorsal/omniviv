@@ -1,9 +1,12 @@
 import { Clock, LocateFixed, MapPinned, Star, X } from "lucide-react";
+import { DebugLogButton } from "./DebugLogButton";
 import { PinheadIcon, getPinheadIconName } from "./PinheadIcon";
+import { TramIcon, BusIcon, TrainIcon, UBahnIcon, SBahnIcon } from "./TransitIcons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Station } from "../api";
 import { getConfig } from "../config";
 import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover";
+import { toast } from "sonner";
 
 /** Type of resolved location entity */
 export type LocationType = "station" | "address" | "poi" | "gps" | "map" | "coordinates";
@@ -56,6 +59,8 @@ export interface GeocodeSuggestion {
     /** Specific Pinhead icon name from MOTIS category */
     iconName?: string;
     detail?: string;
+    /** Transport modes serving this station (e.g. ["tram", "bus"]) */
+    transportModes?: string[];
 }
 
 // -- Bookmarks (localStorage) ------------------------------------------------
@@ -67,6 +72,8 @@ export interface LocationBookmark {
     type: LocationType;
     iconName?: string;
     detail?: string;
+    /** How often this location was selected — used for sorting by frequency */
+    useCount?: number;
 }
 
 export const BOOKMARKS_KEY = "omniviv-location-bookmarks";
@@ -74,10 +81,21 @@ export const BOOKMARKS_KEY = "omniviv-location-bookmarks";
 export function loadBookmarks(): LocationBookmark[] {
     try {
         const raw = localStorage.getItem(BOOKMARKS_KEY);
-        return raw ? JSON.parse(raw) : [];
+        const bookmarks: LocationBookmark[] = raw ? JSON.parse(raw) : [];
+        return bookmarks.sort((a, b) => (b.useCount ?? 0) - (a.useCount ?? 0));
     } catch {
         return [];
     }
+}
+
+/** Increment the use count for a bookmarked location. */
+export function incrementBookmarkUseCount(bookmarks: LocationBookmark[], loc: { lat: number; lon: number }): LocationBookmark[] {
+    return bookmarks.map(b => {
+        if (Math.abs(b.lat - loc.lat) < 1e-6 && Math.abs(b.lon - loc.lon) < 1e-6) {
+            return { ...b, useCount: (b.useCount ?? 0) + 1 };
+        }
+        return b;
+    });
 }
 
 export function saveBookmarks(bookmarks: LocationBookmark[]) {
@@ -97,7 +115,8 @@ const MAX_RECENTS = 10;
 export function loadRecents(): LocationBookmark[] {
     try {
         const raw = localStorage.getItem(RECENTS_KEY);
-        return raw ? JSON.parse(raw) : [];
+        const recents: LocationBookmark[] = raw ? JSON.parse(raw) : [];
+        return recents.sort((a, b) => (b.useCount ?? 0) - (a.useCount ?? 0));
     } catch {
         return [];
     }
@@ -105,20 +124,30 @@ export function loadRecents(): LocationBookmark[] {
 
 export function saveRecent(location: GeocodeSuggestion) {
     const recents = loadRecents();
-    // Remove existing entry for the same location (by proximity)
-    const filtered = recents.filter(
-        r => !(Math.abs(r.lat - location.lat) < 1e-6 && Math.abs(r.lon - location.lon) < 1e-6),
+    const existingIdx = recents.findIndex(
+        r => Math.abs(r.lat - location.lat) < 1e-6 && Math.abs(r.lon - location.lon) < 1e-6,
     );
-    // Prepend new entry (MRU order), trim to max
-    const entry: LocationBookmark = {
-        name: location.name,
-        lat: location.lat,
-        lon: location.lon,
-        type: location.type,
-        iconName: location.iconName,
-        detail: location.detail,
-    };
-    const updated = [entry, ...filtered].slice(0, MAX_RECENTS);
+    let updated: LocationBookmark[];
+    if (existingIdx >= 0) {
+        // Increment use count for existing entry
+        updated = recents.map((r, i) =>
+            i === existingIdx ? { ...r, useCount: (r.useCount ?? 0) + 1 } : r,
+        );
+    } else {
+        // Add new entry with useCount 1, trim to max
+        const entry: LocationBookmark = {
+            name: location.name,
+            lat: location.lat,
+            lon: location.lon,
+            type: location.type,
+            iconName: location.iconName,
+            detail: location.detail,
+            useCount: 1,
+        };
+        updated = [entry, ...recents].slice(0, MAX_RECENTS);
+    }
+    // Sort by frequency
+    updated.sort((a, b) => (b.useCount ?? 0) - (a.useCount ?? 0));
     localStorage.setItem(RECENTS_KEY, JSON.stringify(updated));
     window.dispatchEvent(new CustomEvent(RECENTS_CHANGED_EVENT));
 }
@@ -184,9 +213,24 @@ function mapMotisType(motisType: string): LocationType {
  * MOTIS categories have a size suffix (e.g. "restaurant_14", "cafe_16")
  * that we strip to get the base category name which maps directly to
  * Maki/Temaki icon names.
+ *
+ * For `place_*` categories the suffix encodes the zoom level and distinguishes
+ * cities (≤6), towns (≤8), and villages (>8). We map these to specific types
+ * instead of the generic "place" fallback.
  */
 function motisCategoryToIconName(category: string | undefined): string | undefined {
     if (!category) return undefined;
+
+    // place_* and place_capital_*: use zoom-level suffix to pick city/town/village
+    if (category.startsWith("place_capital")) return "city";
+    const placeMatch = category.match(/^place_(\d+)$/);
+    if (placeMatch) {
+        const zoom = parseInt(placeMatch[1]);
+        if (zoom <= 6) return "city";
+        if (zoom <= 8) return "town";
+        return "village";
+    }
+
     // Strip size suffix: "restaurant_14" → "restaurant"
     return category.replace(/_\d+$/, "");
 }
@@ -214,6 +258,17 @@ export function formatArea(areas: Array<{ name: string; adminLevel: number; defa
  */
 export function categoryToLabel(category: string | undefined): string | undefined {
     if (!category || category === "none") return undefined;
+
+    // place_* categories: map zoom-level suffix to a specific place label
+    if (category.startsWith("place_capital")) return "Stadt";
+    const placeMatch = category.match(/^place_(\d+)$/);
+    if (placeMatch) {
+        const zoom = parseInt(placeMatch[1]);
+        if (zoom <= 6) return "Stadt";
+        if (zoom <= 8) return "Kleinstadt";
+        return "Dorf";
+    }
+
     const base = category.replace(/_\d+$/, "");
     if (HIDDEN_CATEGORIES.has(base)) return undefined;
     return CATEGORY_LABELS[base] ?? base.replace(/_/g, " ");
@@ -530,11 +585,14 @@ export function LocationSearch({
     const showActions = showGps || (showMapPick && !!onPickOnMap);
     const hasContent = visibleItems.length > 0 || showActions;
 
-    // Reset active index when the dropdown content changes.
-    // Use stable state refs (not derived arrays which create new refs each render).
+    // Always highlight the first visible item so the user can confirm with Enter.
     useEffect(() => {
-        setActiveIndex(-1);
-    }, [suggestions, bookmarks, recents]);
+        if (visibleItems.length > 0 && isOpen) {
+            setActiveIndex(0);
+        } else {
+            setActiveIndex(-1);
+        }
+    }, [suggestions, bookmarks, recents, query, isOpen]);
 
     const handleToggleBookmark = (e: React.MouseEvent, suggestion: GeocodeSuggestion) => {
         e.stopPropagation();
@@ -620,6 +678,7 @@ export function LocationSearch({
                     lon: s.lon,
                     type: "station" as const,
                     detail: parts.join(" · "),
+                    transportModes: s.transport_modes,
                 };
             });
 
@@ -662,12 +721,17 @@ export function LocationSearch({
         setQuery(suggestion.name);
         setIsOpen(false);
         setActiveIndex(-1);
-        // Save to recents (skip GPS/map picks as they have transient coordinates).
-        // The RECENTS_CHANGED_EVENT listener updates our local state.
         if (suggestion.type !== "gps" && suggestion.type !== "map") {
+            // Increment bookmark use count if this location is bookmarked
+            if (isBookmarked(bookmarks, suggestion)) {
+                const updated = incrementBookmarkUseCount(bookmarks, suggestion);
+                setBookmarks(updated);
+                saveBookmarks(updated);
+            }
+            // Save/increment in recents
             saveRecent(suggestion);
         }
-    }, [onChange]);
+    }, [onChange, bookmarks]);
 
     const handleClear = () => {
         setQuery("");
@@ -678,7 +742,12 @@ export function LocationSearch({
     };
 
     const handleGps = () => {
-        if (!navigator.geolocation) return;
+        if (!navigator.geolocation) {
+            toast.error("Standortbestimmung nicht verfügbar", {
+                description: "Dein Browser unterstützt keine Standortbestimmung.",
+            });
+            return;
+        }
         navigator.geolocation.getCurrentPosition(
             (pos) => {
                 handleSelect({
@@ -688,7 +757,25 @@ export function LocationSearch({
                     type: "gps",
                 });
             },
-            () => { /* ignore errors silently */ },
+            (error) => {
+                switch (error.code) {
+                    case error.PERMISSION_DENIED:
+                        toast.error("Standortzugriff blockiert", {
+                            description: "Erlaube den Standortzugriff in den Browser-Einstellungen.",
+                        });
+                        break;
+                    case error.POSITION_UNAVAILABLE:
+                        toast.error("Standort nicht verfügbar", {
+                            description: "Dein Standort konnte nicht ermittelt werden.",
+                        });
+                        break;
+                    case error.TIMEOUT:
+                        toast.error("Standortabfrage Timeout", {
+                            description: "Die Standortabfrage hat zu lange gedauert. Versuche es erneut.",
+                        });
+                        break;
+                }
+            },
         );
     };
 
@@ -800,7 +887,7 @@ export function LocationSearch({
                     </div>
                 </PopoverAnchor>
                 <PopoverContent
-                    className="p-0 w-[var(--radix-popover-trigger-width)]"
+                    className="p-0 min-w-[var(--radix-popover-trigger-width)] w-max max-w-[90vw]"
                     align="start"
                     onOpenAutoFocus={(e) => e.preventDefault()}
                     onCloseAutoFocus={(e) => e.preventDefault()}
@@ -913,6 +1000,13 @@ export function LocationSearch({
     );
 }
 
+const TRANSPORT_MODE_ICONS: Record<string, typeof TramIcon> = {
+    tram: TramIcon,
+    bus: BusIcon,
+    train: TrainIcon,
+    subway: UBahnIcon,
+};
+
 function SuggestionRow({
     id,
     suggestion,
@@ -944,9 +1038,19 @@ function SuggestionRow({
             <LocationTypeIcon type={suggestion.type} iconName={suggestion.iconName} className="h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 flex-1">
                 <div className="truncate">{suggestion.name}</div>
-                {suggestion.detail && (
-                    <div className="text-xs text-muted-foreground truncate">{suggestion.detail}</div>
-                )}
+                <div className="flex items-center gap-1">
+                    {suggestion.transportModes && suggestion.transportModes.length > 0 && (
+                        <span className="inline-flex items-center gap-0.5 shrink-0">
+                            {suggestion.transportModes.map((mode) => {
+                                const Icon = TRANSPORT_MODE_ICONS[mode];
+                                return Icon ? <Icon key={mode} className="h-3.5 w-3.5" /> : null;
+                            })}
+                        </span>
+                    )}
+                    {suggestion.detail && (
+                        <span className="text-xs text-muted-foreground truncate">{suggestion.detail}</span>
+                    )}
+                </div>
             </div>
             {recent && !bookmarked && onRemoveRecent && (
                 <span
@@ -964,6 +1068,7 @@ function SuggestionRow({
             {recent && !bookmarked && !onRemoveRecent && (
                 <Clock className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             )}
+            <DebugLogButton label="GeocodeSuggestion" data={suggestion} />
             <span
                 role="button"
                 tabIndex={-1}

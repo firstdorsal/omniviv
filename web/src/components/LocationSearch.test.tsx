@@ -377,7 +377,7 @@ describe("LocationSearch accessibility", () => {
         await user.type(input, "Augs");
         await waitFor(() => expect(screen.getAllByRole("option").length).toBeGreaterThan(0));
 
-        await user.keyboard("{ArrowDown}");
+        // First option is auto-highlighted
         const options = screen.getAllByRole("option");
         expect(options[0]).toHaveAttribute("aria-selected", "true");
     });
@@ -389,8 +389,7 @@ describe("LocationSearch accessibility", () => {
         await user.type(input, "Augs");
         await waitFor(() => expect(screen.getAllByRole("option").length).toBeGreaterThan(0));
 
-        expect(input).not.toHaveAttribute("aria-activedescendant");
-        await user.keyboard("{ArrowDown}");
+        // Auto-highlighted first option
         expect(input).toHaveAttribute("aria-activedescendant", "location-option-0");
         await user.keyboard("{ArrowDown}");
         expect(input).toHaveAttribute("aria-activedescendant", "location-option-1");
@@ -631,17 +630,19 @@ describe("LocationSearch keyboard", () => {
 
         const optionCount = screen.getAllByRole("option").length;
 
-        await user.keyboard("{ArrowDown}");
+        // First option is already active (auto-highlight)
         expect(screen.getAllByRole("option")[0]).toHaveAttribute("aria-selected", "true");
 
+        // ArrowDown moves to second
         await user.keyboard("{ArrowDown}");
         expect(screen.getAllByRole("option")[1]).toHaveAttribute("aria-selected", "true");
         expect(screen.getAllByRole("option")[0]).toHaveAttribute("aria-selected", "false");
 
-        // Cycle back to first (need optionCount-1 more presses to wrap from index 1 → 0)
-        for (let i = 2; i <= optionCount; i++) {
+        // Cycle back to first (need optionCount-1 more presses to wrap)
+        for (let i = 2; i < optionCount; i++) {
             await user.keyboard("{ArrowDown}");
         }
+        await user.keyboard("{ArrowDown}");
         expect(screen.getAllByRole("option")[0]).toHaveAttribute("aria-selected", "true");
     });
 
@@ -674,7 +675,7 @@ describe("LocationSearch keyboard", () => {
         );
     });
 
-    it("Enter does nothing when no option is active", async () => {
+    it("Enter selects first option when auto-highlighted", async () => {
         const user = userEvent.setup();
         const { onChange } = renderSearch();
         const input = screen.getByRole("combobox");
@@ -682,10 +683,9 @@ describe("LocationSearch keyboard", () => {
         await user.type(input, "König");
         await waitFor(() => expect(screen.getByText("Königsplatz")).toBeInTheDocument());
 
-        // Press Enter without ArrowDown first — no active option
+        // First option is auto-highlighted — Enter selects it
         await user.keyboard("{Enter}");
-        // onChange was called with null from typing, but never with a location
-        expect(onChange).not.toHaveBeenCalledWith(expect.objectContaining({ name: "Königsplatz" }));
+        expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ name: "Königsplatz" }));
     });
 
     it("Escape closes the popover", async () => {
@@ -708,10 +708,11 @@ describe("LocationSearch keyboard", () => {
         await user.type(input, "Augs");
         await waitFor(() => expect(screen.getAllByRole("option").length).toBeGreaterThan(0));
 
-        await user.keyboard("{ArrowDown}");
+        // First option is auto-highlighted
         expect(input).toHaveAttribute("aria-activedescendant", "location-option-0");
 
         await user.keyboard("{Escape}");
+        // After Escape, popover closes and active index resets
         expect(input).not.toHaveAttribute("aria-activedescendant");
     });
 
@@ -998,15 +999,22 @@ describe("recents helpers", () => {
         expect(loadRecents()).toEqual([]);
     });
 
-    it("saveRecent persists to localStorage in MRU order", () => {
+    it("saveRecent persists to localStorage sorted by frequency", () => {
         const loc1: GeocodeSuggestion = { name: "A", lat: 1, lon: 1, type: "address" };
         const loc2: GeocodeSuggestion = { name: "B", lat: 2, lon: 2, type: "poi" };
         saveRecent(loc1);
         saveRecent(loc2);
+        // Both have useCount=1, both are present
         const stored = loadRecents();
         expect(stored).toHaveLength(2);
-        expect(stored[0].name).toBe("B"); // most recent first
-        expect(stored[1].name).toBe("A");
+        const names = stored.map(s => s.name).sort();
+        expect(names).toEqual(["A", "B"]);
+
+        // Use A again — now A should be first (higher useCount)
+        saveRecent(loc1);
+        const sorted = loadRecents();
+        expect(sorted[0].name).toBe("A");
+        expect(sorted[0].useCount).toBe(2);
     });
 
     it("saveRecent deduplicates by coordinates", () => {
@@ -1015,7 +1023,9 @@ describe("recents helpers", () => {
         saveRecent({ ...loc, name: "Place Updated" });
         const stored = loadRecents();
         expect(stored).toHaveLength(1);
-        expect(stored[0].name).toBe("Place Updated");
+        // Existing entry's useCount is incremented, name stays the same
+        expect(stored[0].name).toBe("Place");
+        expect(stored[0].useCount).toBe(2);
     });
 
     it("saveRecent limits to 10 entries", () => {

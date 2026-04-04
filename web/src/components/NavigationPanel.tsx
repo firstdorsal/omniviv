@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { GripVertical, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, GripVertical, Plus, Trash2 } from "lucide-react";
 import { TbWalk } from "react-icons/tb";
+import { DebugLogButton } from "./DebugLogButton";
 import { Button } from "./ui/button";
 import { DateTimePicker } from "./ui/date-time-picker";
+import { Label } from "./ui/label";
+import { Switch } from "./ui/switch";
 import type { Station } from "../api";
 import { getConfig } from "../config";
 import { Duration } from "./Duration";
 import { LineBadge } from "./LineBadge";
+import { LocationLabel } from "./LocationLabel";
 import { LocationSearch, type ResolvedLocation } from "./LocationSearch";
+import { WaypointMarker } from "./WaypointMarker";
 import { formatTime } from "./map/mapUtils";
 
 type PickMode = "start" | "end" | null;
@@ -25,6 +30,7 @@ interface NavigationPanelProps {
     pickMode: PickMode;
     onPickModeChange: (mode: PickMode) => void;
     onFlyTo?: (lat: number, lon: number) => void;
+    onSelectItinerary?: (itinerary: RouteItinerary | null) => void;
 }
 
 // Keep the old Location type as alias for backwards compatibility
@@ -32,20 +38,30 @@ type Location = ResolvedLocation;
 
 export type { Location, PickMode };
 
-interface RouteLeg {
+interface LegGeometry {
+    points: string;
+    precision?: number;
+    length: number;
+}
+
+export interface RouteLeg {
     mode: string;
     routeShortName?: string;
     routeColor?: string;
     agencyName?: string;
-    from: { name: string };
-    to: { name: string };
+    headsign?: string;
+    from: { name: string; lat?: number; lon?: number; platformCode?: string | null; track?: string | null };
+    to: { name: string; lat?: number; lon?: number; platformCode?: string | null; track?: string | null };
+    /** Intermediate stops between from and to (transit legs only) */
+    intermediateStops?: { name: string; lat?: number; lon?: number; platformCode?: string | null; track?: string | null }[];
     duration: number;
     startTime: string;
     endTime: string;
     distance?: number;
+    legGeometry?: LegGeometry;
 }
 
-interface RouteItinerary {
+export interface RouteItinerary {
     duration: number;
     startTime: string;
     endTime: string;
@@ -66,12 +82,16 @@ export function NavigationPanel({
     onIntermediateStopsChange: setIntermediateStops,
     onPickModeChange,
     onFlyTo,
+    onSelectItinerary,
 }: NavigationPanelProps) {
     const [isSearching, setIsSearching] = useState(false);
     const [itineraries, setItineraries] = useState<RouteItinerary[]>([]);
+    const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+    const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [departureDateTime, setDepartureDateTime] = useState<Date | undefined>(() => new Date());
     const [arriveBy, setArriveBy] = useState(false);
+    const [deutschlandTicket, setDeutschlandTicket] = useState(false);
 
     // Stable keys for each LocationSearch slot — survive reordering so React
     // keeps internal component state (query text, popover, etc.) with the data.
@@ -177,35 +197,78 @@ export function NavigationPanel({
         }
     };
 
+    /** Check if a leg is NOT covered by the Deutschland-Ticket. */
+    const isLongDistance = (leg: RouteLeg): boolean => {
+        if (leg.mode === "WALK") return false;
+        const name = (leg.routeShortName ?? "").toUpperCase();
+        // Long-distance rail prefixes
+        if (/^(ICE|IC|EC|TGV|RJX|RJ|THA|NJ|EN)\b/.test(name)) return true;
+        // Long-distance operators
+        const agency = (leg.agencyName ?? "").toLowerCase();
+        if (/flixbus|flixtrain|flix|db fernverkehr|blablabus/.test(agency)) return true;
+        return false;
+    };
+
     const handleSearch = useCallback(async () => {
         if (!startLocation || !endLocation || !departureDateTime) return;
         setIsSearching(true);
         setError(null);
         setItineraries([]);
+        setSelectedIndex(null);
+        setExpandedIndex(null);
+        onSelectItinerary?.(null);
 
         try {
-            const params = new URLSearchParams({
+            const baseParams: Record<string, string> = {
                 fromPlace: `${startLocation.lat},${startLocation.lon}`,
                 toPlace: `${endLocation.lat},${endLocation.lon}`,
                 time: departureDateTime.toISOString(),
                 arriveBy: String(arriveBy),
-                mode: "TRANSIT,WALK",
-            });
-            for (const stop of intermediateStops) {
-                if (stop) params.append("intermediatePlaces", `${stop.lat},${stop.lon}`);
+            };
+
+            // When D-Ticket is active, use v2 API with more results for better
+            // coverage of Nahverkehr-only itineraries, then filter client-side.
+            let url: string;
+            if (deutschlandTicket) {
+                const params = new URLSearchParams({
+                    ...baseParams,
+                    transitModes: "TRAM,BUS,SUBWAY,SUBURBAN,REGIONAL_RAIL,FERRY,FUNICULAR",
+                    numItineraries: "5",
+                });
+                for (const stop of intermediateStops) {
+                    if (stop) params.append("intermediatePlaces", `${stop.lat},${stop.lon}`);
+                }
+                url = `${getConfig().motisUrl}/api/v2/plan?${params}`;
+            } else {
+                const params = new URLSearchParams({
+                    ...baseParams,
+                    mode: "TRANSIT,WALK",
+                });
+                for (const stop of intermediateStops) {
+                    if (stop) params.append("intermediatePlaces", `${stop.lat},${stop.lon}`);
+                }
+                url = `${getConfig().motisUrl}/api/v1/plan?${params}`;
             }
-            const url = `${getConfig().motisUrl}/api/v1/plan?${params}`;
+
             const response = await fetch(url);
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const data = await response.json();
             const transit = data.itineraries ?? [];
             const direct = data.direct ?? [];
-            const itins = [...transit, ...direct].sort(
-                (a, b) => new Date(a.endTime).getTime() - new Date(b.endTime).getTime(),
+            let itins: RouteItinerary[] = [...transit, ...direct].sort(
+                (a: RouteItinerary, b: RouteItinerary) => new Date(a.endTime).getTime() - new Date(b.endTime).getTime(),
             );
+            if (deutschlandTicket) {
+                itins = itins.filter((it: RouteItinerary) => !it.legs.some(isLongDistance));
+            }
             setItineraries(itins);
-            if (itins.length === 0) {
-                setError("Keine Verbindungen gefunden");
+            if (itins.length > 0) {
+                setSelectedIndex(0);
+                onSelectItinerary?.(itins[0]);
+            } else {
+                setError(deutschlandTicket
+                    ? "Keine Verbindungen nur mit Nahverkehr gefunden"
+                    : "Keine Verbindungen gefunden");
             }
         } catch (err) {
             setError("Routensuche fehlgeschlagen");
@@ -213,12 +276,23 @@ export function NavigationPanel({
         } finally {
             setIsSearching(false);
         }
-    }, [startLocation, endLocation, intermediateStops, departureDateTime, arriveBy]);
+    }, [startLocation, endLocation, intermediateStops, departureDateTime, arriveBy, deutschlandTicket]);
 
     // Auto-search when the component mounts with valid locations (e.g. tab switch,
     // page reload with URL params) or when locations/parameters change.
     const prevSearchKey = useRef<string | null>(null);
     const hasMounted = useRef(false);
+    // Clear results when a location is removed
+    useEffect(() => {
+        if (!startLocation || !endLocation) {
+            setItineraries([]);
+            setSelectedIndex(null);
+            setExpandedIndex(null);
+            onSelectItinerary?.(null);
+            setError(null);
+        }
+    }, [startLocation, endLocation, onSelectItinerary]);
+
     useEffect(() => {
         if (!startLocation || !endLocation) return;
         // Build a stable key from all search-relevant inputs to avoid duplicate requests
@@ -226,7 +300,7 @@ export function NavigationPanel({
             .filter((s): s is ResolvedLocation => s !== null)
             .map(s => `${s.lat},${s.lon}`)
             .join(";");
-        const key = `${startLocation.lat},${startLocation.lon}|${endLocation.lat},${endLocation.lon}|${viaKey}|${departureDateTime?.toISOString() ?? ""}|${arriveBy}`;
+        const key = `${startLocation.lat},${startLocation.lon}|${endLocation.lat},${endLocation.lon}|${viaKey}|${departureDateTime?.toISOString() ?? ""}|${arriveBy}|${deutschlandTicket}`;
         if (key === prevSearchKey.current) return;
         prevSearchKey.current = key;
 
@@ -240,7 +314,16 @@ export function NavigationPanel({
             handleSearch();
         }, 300);
         return () => clearTimeout(timer);
-    }, [startLocation, endLocation, intermediateStops, departureDateTime, arriveBy, handleSearch]);
+    }, [startLocation, endLocation, intermediateStops, departureDateTime, arriveBy, deutschlandTicket, handleSearch]);
+
+    /** Resolve the display color for a transit leg */
+    const legColor = (leg: RouteLeg): string | undefined => {
+        if (leg.routeColor) return leg.routeColor.startsWith('#') ? leg.routeColor : `#${leg.routeColor}`;
+        if (!leg.routeShortName) return undefined;
+        return (leg.agencyName ? routeColors.get(`${leg.agencyName}:${leg.routeShortName}`) : undefined)
+            ?? routeColors.get(`${leg.mode?.toLowerCase()}:${leg.routeShortName}`)
+            ?? routeColors.get(leg.routeShortName);
+    };
 
     return (
         <div className="p-4">
@@ -305,12 +388,11 @@ export function NavigationPanel({
                                         <GripVertical className="h-4 w-4 text-muted-foreground" />
                                     </div>
                                     {/* Circle with letter — click to zoom on map */}
-                                    <div
-                                        className={`w-6 h-6 rounded-full border-2 border-foreground flex items-center justify-center shrink-0 ${location ? "cursor-pointer hover:bg-foreground hover:text-background transition-colors" : ""}`}
-                                        onClick={() => { if (location && onFlyTo) onFlyTo(location.lat, location.lon); }}
-                                    >
-                                        <span className="text-[10px] font-bold select-none">{String.fromCharCode(65 + i)}</span>
-                                    </div>
+                                    <WaypointMarker
+                                        index={i}
+                                        size={24}
+                                        onClick={location && onFlyTo ? () => onFlyTo(location.lat, location.lon) : undefined}
+                                    />
                                     {/* Input — disable pointer events during drag to prevent popover interference */}
                                     <div className={`flex-1 min-w-0 ${dragIndex !== null ? "pointer-events-none" : ""}`}>
                                         <LocationSearch
@@ -399,6 +481,17 @@ export function NavigationPanel({
                     </Button>
                 </div>
 
+                <div className="flex items-center gap-2">
+                    <Switch
+                        id="deutschland-ticket"
+                        checked={deutschlandTicket}
+                        onCheckedChange={setDeutschlandTicket}
+                    />
+                    <Label htmlFor="deutschland-ticket" className="text-sm cursor-pointer">
+                        Nur Deutschland-Ticket
+                    </Label>
+                </div>
+
                 <Button
                     className="w-full"
                     disabled={!startLocation || !endLocation || isSearching}
@@ -413,24 +506,43 @@ export function NavigationPanel({
 
                 {itineraries.length > 0 && (
                     <div className="space-y-3" data-testid="route-results">
-                        {itineraries.map((itinerary, i) => (
-                            <div key={i} className="@container border rounded-lg p-3 space-y-2" data-testid={`itinerary-${i}`}>
+                        {itineraries.map((itinerary, i) => {
+                            const isExpanded = expandedIndex === i;
+                            return (
+                            <div
+                                key={i}
+                                className={`border rounded-lg p-3 space-y-2 transition-colors ${isExpanded ? "cursor-default" : "cursor-pointer"} ${selectedIndex === i ? "border-primary bg-primary/5" : "hover:bg-muted/50"}`}
+                                data-testid={`itinerary-${i}`}
+                                onClick={() => {
+                                    setExpandedIndex(isExpanded ? null : i);
+                                    setSelectedIndex(i);
+                                    onSelectItinerary?.(itinerary);
+                                }}
+                            >
+                                {/* Summary row */}
                                 <div className="flex items-center justify-between text-sm">
                                     <span className="font-medium">
                                         {formatTime(itinerary.startTime, false)} - {formatTime(itinerary.endTime, false)}
                                     </span>
-                                    <Duration seconds={itinerary.duration} className="text-foreground" />
+                                    <div className="flex items-center gap-1">
+                                        <DebugLogButton label="RouteItinerary" data={itinerary} />
+                                        <Duration seconds={itinerary.duration} short className="text-foreground" />
+                                        <ChevronDown className={`h-5 w-5 text-muted-foreground transition-transform cursor-pointer ${isExpanded ? "rotate-180" : ""}`} />
+                                    </div>
                                 </div>
+                                {/* Compact leg badges */}
                                 <div className="flex items-center gap-1.5">
-                                    <div className="relative min-w-0 flex-1 overflow-hidden max-h-8">
+                                    <div
+                                        className="min-w-0 flex-1 overflow-hidden max-h-8"
+                                        style={{ maskImage: "linear-gradient(to right, black calc(100% - 2rem), transparent)" }}
+                                    >
                                         <div className="flex items-center gap-1.5 flex-nowrap">
                                             {itinerary.legs.map((leg, j) => {
                                                 if (leg.mode === "WALK") {
-                                                    const walkMin = Math.round(leg.duration / 60);
                                                     return (
                                                         <span key={j} className="inline-flex items-start text-muted-foreground shrink-0">
                                                             <TbWalk className="h-5 w-5" />
-                                                            <span className="text-[10px] -ml-1 -mt-0.5">{walkMin}</span>
+                                                            <Duration seconds={leg.duration} bare className="text-[10px] -ml-1 -mt-0.5" />
                                                         </span>
                                                     );
                                                 }
@@ -438,20 +550,14 @@ export function NavigationPanel({
                                                     <LineBadge
                                                         key={j}
                                                         line={leg.routeShortName || leg.mode}
-                                                        color={leg.routeColor
-                                                            ? (leg.routeColor.startsWith('#') ? leg.routeColor : `#${leg.routeColor}`)
-                                                            : leg.routeShortName ? (
-                                                                (leg.agencyName ? routeColors.get(`${leg.agencyName}:${leg.routeShortName}`) : undefined)
-                                                                ?? routeColors.get(`${leg.mode?.toLowerCase()}:${leg.routeShortName}`)
-                                                                ?? routeColors.get(leg.routeShortName)
-                                                            ) : undefined}
+                                                        color={legColor(leg)}
                                                         mode={leg.mode || (leg.routeShortName ? routeTypes.get(leg.routeShortName) : undefined)}
+                                                        operator={leg.agencyName}
                                                         className="shrink-0"
                                                     />
                                                 );
                                             })}
                                         </div>
-                                        <div className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-background to-transparent" />
                                     </div>
                                     {itinerary.transfers > 0 && (
                                         <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">
@@ -459,8 +565,139 @@ export function NavigationPanel({
                                         </span>
                                     )}
                                 </div>
+
+                                {/* Expanded detail view */}
+                                {isExpanded && (() => {
+                                    const totalStops = 2 + intermediateStops.length;
+                                    const endLetter = String.fromCharCode(65 + totalStops - 1);
+                                    return (
+                                    <div
+                                        className="pt-2 border-t space-y-0"
+                                        data-testid={`itinerary-detail-${i}`}
+                                        onClick={(e) => e.stopPropagation()}
+                                    >
+                                        {itinerary.legs.map((leg, j) => {
+                                            const isWalk = leg.mode === "WALK";
+                                            const color = legColor(leg);
+                                            const stopCount = leg.intermediateStops?.length ?? 0;
+                                            const isFirstLeg = j === 0;
+                                            const isLastLeg = j === itinerary.legs.length - 1;
+
+                                            // Resolve "START"/"END" placeholders to actual locations
+                                            const fromLocation: ResolvedLocation = leg.from.name === "START" && startLocation
+                                                ? startLocation
+                                                : { name: leg.from.name, lat: leg.from.lat ?? 0, lon: leg.from.lon ?? 0, type: "station" };
+                                            const toLocation: ResolvedLocation = leg.to.name === "END" && endLocation
+                                                ? endLocation
+                                                : { name: leg.to.name, lat: leg.to.lat ?? 0, lon: leg.to.lon ?? 0, type: "station" };
+
+                                            {/* The timeline line runs behind markers via relative/absolute positioning.
+                                                Markers use z-10 + bg-background to sit on top. */}
+                                            return (
+                                                <div key={j} className="grid grid-cols-[3rem_1.5rem_1fr] text-xs relative">
+                                                    {/* Timeline line — runs behind everything */}
+                                                    <div
+                                                        className="absolute w-1 -translate-x-1/2"
+                                                        style={{
+                                                            left: "3.75rem", /* center of 2nd column: 3rem + 1.5rem/2 */
+                                                            top: "0.625rem",
+                                                            bottom: isLastLeg ? "0.625rem" : "-0.625rem",
+                                                            ...(isWalk ? {
+                                                                backgroundImage: "repeating-linear-gradient(to bottom, var(--muted-foreground) 0, var(--muted-foreground) 3px, transparent 3px, transparent 6px)",
+                                                            } : {
+                                                                backgroundColor: color ?? "var(--muted-foreground)",
+                                                            }),
+                                                        }}
+                                                    />
+
+                                                    {/* Departure row — single hoverable/clickable element spanning all columns */}
+                                                    <div
+                                                        className="col-span-3 grid grid-cols-subgrid h-5 cursor-pointer group/dep"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            if (fromLocation.lat && fromLocation.lon) onFlyTo?.(fromLocation.lat, fromLocation.lon);
+                                                        }}
+                                                    >
+                                                        <div className="flex items-center justify-end pr-2">
+                                                            <span className="text-muted-foreground tabular-nums">{formatTime(leg.startTime, false)}</span>
+                                                        </div>
+                                                        <div className="flex items-center justify-center z-10">
+                                                            {isFirstLeg ? (
+                                                                <WaypointMarker index={0} size={20} className="transition-transform group-hover/dep:scale-125" />
+                                                            ) : (
+                                                                <div className="w-3.5 h-3.5 rounded-full border-2 border-foreground bg-background shrink-0 transition-transform group-hover/dep:scale-125" />
+                                                            )}
+                                                        </div>
+                                                        <div className="flex items-center pl-2 group-hover/dep:underline">
+                                                            <LocationLabel location={fromLocation} platform={leg.from.platformCode ?? leg.from.track} className="font-semibold text-sm" />
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Leg info row */}
+                                                    <div className="col-start-3 min-h-14 flex items-center pl-2 py-3">
+                                                        {isWalk ? (() => {
+                                                            const nextLeg = itinerary.legs[j + 1];
+                                                            const transferSeconds = nextLeg && !isLastLeg
+                                                                ? Math.round((new Date(nextLeg.startTime).getTime() - new Date(leg.endTime).getTime()) / 1000)
+                                                                : 0;
+                                                            return (
+                                                            <span className="text-muted-foreground flex items-center gap-1">
+                                                                <TbWalk className="h-3.5 w-3.5" />
+                                                                <Duration seconds={leg.duration} />
+                                                                {leg.distance ? ` · ${leg.distance >= 1000 ? `${(leg.distance / 1000).toFixed(1)} km` : `${Math.round(leg.distance)} m`}` : ""}
+                                                                {transferSeconds > 0 && !isFirstLeg && (
+                                                                    <span>· <Duration seconds={transferSeconds} /> Umstieg</span>
+                                                                )}
+                                                            </span>
+                                                            );
+                                                        })() : (
+                                                            <span className="flex items-center gap-2 flex-wrap">
+                                                                <LineBadge
+                                                                    line={leg.routeShortName || leg.mode}
+                                                                    color={color}
+                                                                    mode={leg.mode || (leg.routeShortName ? routeTypes.get(leg.routeShortName) : undefined)}
+                                                                    operator={leg.agencyName}
+                                                                />
+                                                                {leg.headsign && (
+                                                                    <span className="text-sm truncate">→ {leg.headsign}</span>
+                                                                )}
+                                                                <span className="text-muted-foreground flex items-center gap-1">
+                                                                    <Duration seconds={leg.duration} />
+                                                                    {stopCount > 0 && <span>· {stopCount} {stopCount === 1 ? "Halt" : "Halte"}</span>}
+                                                                </span>
+                                                            </span>
+                                                        )}
+                                                    </div>
+
+                                                    {/* Arrival row — only on last leg */}
+                                                    {isLastLeg && (
+                                                        <div
+                                                            className="col-span-3 grid grid-cols-subgrid h-5 cursor-pointer group/arr"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                if (toLocation.lat && toLocation.lon) onFlyTo?.(toLocation.lat, toLocation.lon);
+                                                            }}
+                                                        >
+                                                            <div className="flex items-center justify-end pr-2">
+                                                                <span className="text-muted-foreground tabular-nums">{formatTime(leg.endTime, false)}</span>
+                                                            </div>
+                                                            <div className="flex items-center justify-center z-10">
+                                                                <WaypointMarker index={totalStops - 1} size={20} className="transition-transform group-hover/arr:scale-125" />
+                                                            </div>
+                                                            <div className="flex items-center pl-2 group-hover/arr:underline">
+                                                                <LocationLabel location={toLocation} platform={leg.to.platformCode ?? leg.to.track} className="font-semibold text-sm" />
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                    );
+                                })()}
                             </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 )}
             </div>

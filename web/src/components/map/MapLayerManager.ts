@@ -78,21 +78,47 @@ export class MapLayerManager {
             maxzoom: 24,
         });
 
-        // Stop positions (from vector tiles, z15+)
+        // Stop positions (from vector tiles, z15+) — hidden by default, toggled via "Haltepositionen"
         this.map.addLayer({
             id: "stops-circle", type: "circle",
             source: "transit-stations", "source-layer": "stops",
             minzoom: 15,
             maxzoom: 24,
-            paint: { "circle-radius": 5, "circle-color": "#666", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" },
+            paint: { "circle-radius": 5, "circle-color": "#3b82f6", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" },
+            layout: { visibility: "none" },
         });
         this.map.addLayer({
             id: "stops-label", type: "symbol",
             source: "transit-stations", "source-layer": "stops",
             minzoom: 16,
             maxzoom: 24,
-            layout: { "text-field": ["get", "display_name"], "text-font": ["Open Sans Regular"], "text-size": 10, "text-offset": [0, 0.9], "text-anchor": "top" },
+            layout: { "text-field": ["get", "display_name"], "text-font": ["Open Sans Regular"], "text-size": 10, "text-offset": [0, 0.9], "text-anchor": "top", visibility: "none" },
             paint: { "text-color": "#333", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
+        });
+
+        // Platforms from vector tiles (z15+) — orange circles, hidden by default, toggled via "Steige"
+        this.map.addLayer({
+            id: "platforms-vt-circle", type: "circle",
+            source: "transit-stations", "source-layer": "platforms",
+            minzoom: 15,
+            maxzoom: 24,
+            paint: { "circle-radius": 5, "circle-color": "#f97316", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" },
+            layout: { visibility: "none" },
+        });
+        this.map.addLayer({
+            id: "platforms-vt-label", type: "symbol",
+            source: "transit-stations", "source-layer": "platforms",
+            minzoom: 16,
+            maxzoom: 24,
+            layout: {
+                "text-field": ["get", "display_name"],
+                "text-font": ["Open Sans Regular"],
+                "text-size": 10,
+                "text-offset": [0, 0.9],
+                "text-anchor": "top",
+                visibility: "none",
+            },
+            paint: { "text-color": "#c2410c", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
         });
 
         // Legacy GeoJSON sources kept for mapping visualization and click handlers
@@ -128,18 +154,19 @@ export class MapLayerManager {
         });
 
         // Station connections (lines from stops to stations, from vector tiles, z15+)
-        // Added BEFORE labels so text remains on top
+        // Added BEFORE labels so text remains on top. Hidden by default, toggled via "Haltepositionen".
         this.map.addLayer({
             id: "station-connections-vector-line", type: "line",
             source: "transit-stations", "source-layer": "connections",
             minzoom: 15,
             maxzoom: 24,
-            paint: { 
-                "line-color": "#444", 
-                "line-width": 1, 
-                "line-opacity": 0.9, 
-                "line-dasharray": [2, 2] 
+            paint: {
+                "line-color": "#444",
+                "line-width": 1,
+                "line-opacity": 0.9,
+                "line-dasharray": [2, 2]
             },
+            layout: { visibility: "none" },
         }, "stops-circle");
 
         // Stations — from vector tiles, filtered by min_zoom property
@@ -158,6 +185,48 @@ export class MapLayerManager {
             filter: ["<=", ["get", "min_zoom"], ["zoom"]],
             layout: { "text-field": ["get", "name"], "text-font": ["Open Sans Regular"], "text-size": 12, "text-offset": [0, 1.5], "text-anchor": "top" },
             paint: { "text-color": "#065f46", "text-halo-color": "#ffffff", "text-halo-width": 2 },
+        });
+
+        // User-facing steige markers (precalculated platforms + stop_position fallback, z15+)
+        // Toggled by the "Steige" sub-toggle in the Ebenen panel. Hidden by default.
+        this.map.addLayer({
+            id: "steige-circle", type: "circle",
+            source: "transit-stations", "source-layer": "steige",
+            minzoom: 15,
+            maxzoom: 24,
+            paint: { "circle-radius": 5, "circle-color": "#525252", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" },
+            layout: { visibility: "none" },
+        });
+        this.map.addLayer({
+            id: "steige-label", type: "symbol",
+            source: "transit-stations", "source-layer": "steige",
+            minzoom: 15,
+            maxzoom: 24,
+            layout: {
+                "text-field": ["get", "display_name"],
+                "text-font": ["Open Sans Regular"],
+                "text-size": 11,
+                "text-offset": [0, 0.9],
+                "text-anchor": "top",
+                "text-allow-overlap": true,
+                visibility: "none",
+            },
+            paint: { "text-color": "#1e293b", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
+        });
+
+        // Platform outlines (physical platform way geometries, z16+)
+        // Toggled by the "Umrisse" sub-sub-toggle under Steige. Hidden by default.
+        this.map.addLayer({
+            id: "platform-outlines-line", type: "line",
+            source: "transit-stations", "source-layer": "platform_outlines",
+            minzoom: 16,
+            maxzoom: 24,
+            paint: {
+                "line-color": "#525252",
+                "line-width": 3,
+                "line-opacity": 0.8,
+            },
+            layout: { visibility: "none", "line-cap": "round", "line-join": "round" },
         });
 
         // Debug: route segments visualization (ahead=green, behind=red) - added before 3D models so it renders underneath
@@ -214,7 +283,43 @@ export class MapLayerManager {
     /**
      * Update stations and platforms on the map
      */
-    updateStations(stations: Station[], show: boolean, showStopPositions = false, showPlatformElements = false): void {
+    updateStations(
+        stations: Station[],
+        show: boolean,
+        showSteige = false,
+        showOutlines = false,
+        showDebugStops = false,
+        showDebugPlatforms = false,
+    ): void {
+        // Toggle vector tile layers for stations (main station dots + labels)
+        for (const layerId of ["stations-circle", "stations-label"]) {
+            if (this.map.getLayer(layerId)) {
+                this.map.setLayoutProperty(layerId, "visibility", show ? "visible" : "none");
+            }
+        }
+        // User-facing steige markers + connection lines to station
+        for (const layerId of ["steige-circle", "steige-label", "station-connections-vector-line"]) {
+            if (this.map.getLayer(layerId)) {
+                this.map.setLayoutProperty(layerId, "visibility", (show && showSteige) ? "visible" : "none");
+            }
+        }
+        // Platform outlines (sub-sub-toggle of Steige)
+        if (this.map.getLayer("platform-outlines-line")) {
+            this.map.setLayoutProperty("platform-outlines-line", "visibility", (show && showSteige && showOutlines) ? "visible" : "none");
+        }
+        // Debug: raw OSM stop positions (blue dots, controlled from debug panel)
+        for (const layerId of ["stops-circle", "stops-label"]) {
+            if (this.map.getLayer(layerId)) {
+                this.map.setLayoutProperty(layerId, "visibility", showDebugStops ? "visible" : "none");
+            }
+        }
+        // Debug: raw OSM platform markers (orange dots, controlled from debug panel)
+        for (const layerId of ["platforms-vt-circle", "platforms-vt-label"]) {
+            if (this.map.getLayer(layerId)) {
+                this.map.setLayoutProperty(layerId, "visibility", showDebugPlatforms ? "visible" : "none");
+            }
+        }
+
         const stationSource = this.map.getSource("stations") as maplibregl.GeoJSONSource;
         const platformSource = this.map.getSource("platforms") as maplibregl.GeoJSONSource;
         const connectionSource = this.map.getSource("platform-connections") as maplibregl.GeoJSONSource;
