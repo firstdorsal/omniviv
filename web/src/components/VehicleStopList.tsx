@@ -1,5 +1,5 @@
 import { Check, Circle, CircleDot, MapPin } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type { VehicleStop } from "../api";
 import { LiveTime } from "./LiveTime";
 
@@ -105,7 +105,20 @@ interface VehicleStopListProps {
 export function VehicleStopList({ stops, currentTime, disabled }: VehicleStopListProps) {
     const currentStopRef = useRef<HTMLDivElement>(null);
 
-    const stopsWithStatus = computeStopStatuses(stops, currentTime);
+    // Ensure stops are sorted by time before computing statuses.
+    // Route sequence only reflects one direction; reverse-direction trips
+    // need time-based sorting to display in correct chronological order.
+    const sortedStops = useMemo(
+        () => [...stops].sort((a, b) => {
+            const timeA = a.departure_time ?? a.departure_time_estimated ?? a.arrival_time ?? a.arrival_time_estimated;
+            const timeB = b.departure_time ?? b.departure_time_estimated ?? b.arrival_time ?? b.arrival_time_estimated;
+            if (!timeA || !timeB) return a.sequence - b.sequence;
+            return new Date(timeA).getTime() - new Date(timeB).getTime();
+        }),
+        [stops],
+    );
+
+    const stopsWithStatus = computeStopStatuses(sortedStops, currentTime);
 
     // Auto-scroll to current stop
     useEffect(() => {
@@ -114,12 +127,12 @@ export function VehicleStopList({ stops, currentTime, disabled }: VehicleStopLis
         }
     }, [stopsWithStatus.find((s) => s.status === "current")?.stop.sequence]);
 
-    if (stops.length === 0) {
+    if (sortedStops.length === 0) {
         return <div className="text-xs text-muted-foreground p-2">Keine Haltestellen bekannt</div>;
     }
 
     return (
-        <div className={`flex flex-col ${disabled ? "opacity-50" : ""}`}>
+        <div className={`flex flex-col ${disabled ? "opacity-50" : ""}`} data-testid="vehicle-stop-list">
             {stopsWithStatus.map((item, index) => {
                 const { stop, status, progress } = item;
                 const isCurrent = status === "current";

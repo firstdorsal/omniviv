@@ -415,7 +415,7 @@ function MappingEntryCard({
             case MappingStatus.Auto:
                 return (
                     <Badge variant="secondary">
-                        Automatisch {entry.combined_score != null ? `${Math.round(entry.combined_score * 100)}%` : ""}
+                        Automatisch {entry.match_score != null ? `${Math.round(entry.match_score * 100)}%` : ""}
                     </Badge>
                 );
             case MappingStatus.Manual:

@@ -12,9 +12,10 @@ interface PlatformPopupProps {
     onPin?: (osmId: string, displayName: string, stationName?: string, refIfopt?: string | null, lat?: number, lon?: number) => void;
     onUnpin?: (id: string) => void;
     onClose?: () => void;
+    debugMode?: boolean;
 }
 
-export function PlatformPopup({ platform, stationName, routeColors, routeTypes, referenceTime, isPinned, onPin, onUnpin, onClose }: PlatformPopupProps) {
+export function PlatformPopup({ platform, stationName, routeColors, routeTypes, referenceTime, isPinned, onPin, onUnpin, onClose, debugMode }: PlatformPopupProps) {
     const displayName = getPlatformDisplayName(platform);
 
     return (
@@ -30,6 +31,7 @@ export function PlatformPopup({ platform, stationName, routeColors, routeTypes, 
             onPin={onPin ? () => onPin(String(platform.osm_id), `Steig ${displayName}`, stationName, platform.ref_ifopt, platform.lat, platform.lon) : undefined}
             onUnpin={onUnpin ? () => onUnpin(String(platform.osm_id)) : undefined}
             onClose={onClose}
+            debugMode={debugMode}
         />
     );
 }

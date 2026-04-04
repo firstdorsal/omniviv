@@ -27,6 +27,7 @@ function buildMappingStatusResponse(
 ): MappingStatusResponse {
     return {
         total_ifopt_count: 100,
+        total_osm_stop_count: 500,
         mapped_count: 60,
         manual_count: 10,
         auto_count: 50,
@@ -39,6 +40,8 @@ function buildMappingStatusResponse(
 
 function buildEntry(overrides: Partial<MappingEntry> = {}): MappingEntry {
     return {
+        osm_id: 12345678,
+        osm_type: "platform",
         ifopt: "de:08111:6115:0:1",
         name: "Hauptbahnhof",
         lat: 48.7758,
@@ -46,7 +49,10 @@ function buildEntry(overrides: Partial<MappingEntry> = {}): MappingEntry {
         status: MappingStatus.Unmapped,
         gtfs_stop_id: null,
         gtfs_stop_name: null,
-        combined_score: null,
+        gtfs_stop_lat: null,
+        gtfs_stop_lon: null,
+        match_method: null,
+        match_score: null,
         candidates: [],
         ...overrides,
     };
@@ -181,7 +187,7 @@ describe("MappingManager", () => {
                 status: MappingStatus.Auto,
                 gtfs_stop_id: "gtfs-123",
                 gtfs_stop_name: "Marienplatz GTFS",
-                combined_score: 0.95,
+                match_score: 0.95,
             }),
         ]);
         mockFetchResponse("/api/mapping/status", response);
@@ -326,7 +332,7 @@ describe("MappingManager", () => {
             status: MappingStatus.Auto,
             gtfs_stop_id: "gtfs-stop-1",
             gtfs_stop_name: "Hauptbahnhof GTFS",
-            combined_score: 0.95,
+            match_score: 0.95,
             candidates: [],
         });
         vi.restoreAllMocks();
@@ -796,7 +802,7 @@ describe("MappingManager", () => {
 
         const entry = buildEntry({
             status: MappingStatus.Auto,
-            combined_score: 0.87,
+            match_score: 0.87,
             gtfs_stop_id: "gtfs-1",
             gtfs_stop_name: "Auto Stop",
         });

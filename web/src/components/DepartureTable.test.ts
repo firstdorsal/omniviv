@@ -168,4 +168,45 @@ describe("buildTripEvents", () => {
         expect(result).toHaveLength(1);
         expect(result[0].tripId).toBe("trip1");
     });
+
+    it("propagates color from departure to trip event", () => {
+        const events: Departure[] = [
+            makeDeparture({ trip_id: "trip1", line_number: "1", color: "#ee1d23" }),
+        ];
+        const result = buildTripEvents(events);
+        expect(result[0].color).toBe("#ee1d23");
+    });
+
+    it("propagates operator from departure to trip event", () => {
+        const events: Departure[] = [
+            makeDeparture({ trip_id: "trip1", line_number: "RE9", operator: "GYRE Arverio Bayern GmbH" }),
+        ];
+        const result = buildTripEvents(events);
+        expect(result[0].operator).toBe("GYRE Arverio Bayern GmbH");
+    });
+
+    it("propagates gtfs_route_type from departure to trip event", () => {
+        const events: Departure[] = [
+            makeDeparture({ trip_id: "trip1", line_number: "1", gtfs_route_type: 0 }),
+        ];
+        const result = buildTripEvents(events);
+        expect(result[0].gtfsRouteType).toBe(0);
+    });
+
+    it("sets is_first_stop and is_last_stop correctly", () => {
+        const events: Departure[] = [
+            makeDeparture({ trip_id: "trip1", line_number: "1", is_first_stop: true, is_last_stop: false }),
+        ];
+        const result = buildTripEvents(events);
+        expect(result[0].isFirstStop).toBe(true);
+        expect(result[0].isLastStop).toBe(false);
+    });
+
+    it("defaults operator to null when not provided", () => {
+        const events: Departure[] = [
+            makeDeparture({ trip_id: "trip1", line_number: "1" }),
+        ];
+        const result = buildTripEvents(events);
+        expect(result[0].operator).toBeNull();
+    });
 });

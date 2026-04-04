@@ -75,10 +75,9 @@ export function buildTripEvents(events: Departure[]): TripEvent[] {
             if (event.is_first_stop) existing.isFirstStop = true;
             if (event.is_last_stop) existing.isLastStop = true;
             
-            // Fallback: If flags are missing from API (old backend), use identical time heuristic
+            // Fallback: If flags are missing from API, use identical time heuristic
             if (existing.arrivalTime && existing.departureTime && existing.arrivalTime === existing.departureTime) {
-                // If it's the destination, it's almost certainly the last stop
-                if (existing.destination.includes(event.stop_ifopt) || existing.destination.includes("Göggingen")) {
+                if (existing.destination.includes(event.stop_ifopt)) {
                     existing.isLastStop = true;
                 }
             }
@@ -106,7 +105,7 @@ export function buildTripEvents(events: Departure[]): TripEvent[] {
             const current = tripMap.get(event.trip_id)!;
             // Fallback for first/last stop if flags missing
             if (current.arrivalTime && current.departureTime && current.arrivalTime === current.departureTime) {
-                if (current.destination.includes("Göggingen")) {
+                if (current.destination.includes(event.stop_ifopt)) {
                     current.isLastStop = true;
                 }
             }

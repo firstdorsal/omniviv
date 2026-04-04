@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Cpu, Moon, Sun } from "lucide-react";
+import { Bug, Cpu, Moon, Sun } from "lucide-react";
 import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
 import { Label } from "./ui/label";
@@ -14,6 +14,8 @@ interface FeaturesPanelProps {
     onRendezvousChange: (enabled: boolean) => void;
     rendezvousState: RendezvousState | null;
     shouldFlash: boolean;
+    debugMode: boolean;
+    onDebugModeChange: (enabled: boolean) => void;
 }
 
 export function FeaturesPanel({
@@ -23,6 +25,8 @@ export function FeaturesPanel({
     onRendezvousChange,
     rendezvousState,
     shouldFlash,
+    debugMode,
+    onDebugModeChange,
 }: FeaturesPanelProps) {
     const [features, setFeatures] = useState(featureManager.getAllFeatures());
     const [espDialogOpen, setEspDialogOpen] = useState(false);
@@ -121,6 +125,31 @@ export function FeaturesPanel({
                             </div>
                         </div>
                     ))}
+                </div>
+            </div>
+
+            {/* Developer */}
+            <div className="mt-6 pt-4 border-t">
+                <h3 className="text-sm font-medium text-muted-foreground mb-3">Entwickler</h3>
+                <div className="space-y-4">
+                    <div className="flex items-start gap-3">
+                        <Switch
+                            id="debug-mode"
+                            checked={debugMode}
+                            onCheckedChange={onDebugModeChange}
+                        />
+                        <div className="space-y-1 flex-1">
+                            <div className="flex items-center gap-2">
+                                <Bug className="h-4 w-4" />
+                                <Label htmlFor="debug-mode" className="font-medium cursor-pointer">
+                                    Debug-Modus
+                                </Label>
+                            </div>
+                            <p className="text-sm text-muted-foreground">
+                                Zeigt Konsolenausgabe-Buttons an Datenobjekten und das Debug-Panel in der Seitenleiste
+                            </p>
+                        </div>
+                    </div>
                 </div>
             </div>
 

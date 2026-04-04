@@ -2,6 +2,7 @@ import { X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type Departure } from "../api";
 import { getApiClient } from "../apiClient";
+import { DebugLogButtonDirect } from "./DebugLogButton";
 import { DepartureMonitorHeader } from "./DepartureMonitorHeader";
 import { DepartureTable } from "./DepartureTable";
 
@@ -15,9 +16,10 @@ interface GtfsStopPopupProps {
     routeTypes?: globalThis.Map<string, string>;
     referenceTime?: Date;
     onClose?: () => void;
+    debugMode?: boolean;
 }
 
-export function GtfsStopPopup({ stopId, stopName, ifopt, isAssigned, routeColors, routeTypes, referenceTime, onClose }: GtfsStopPopupProps) {
+export function GtfsStopPopup({ stopId, stopName, ifopt, isAssigned, routeColors, routeTypes, referenceTime, onClose, debugMode = false }: GtfsStopPopupProps) {
     const [events, setEvents] = useState<Departure[]>([]);
     const [loading, setLoading] = useState(true);
     const abortRef = useRef<AbortController | null>(null);
@@ -79,11 +81,14 @@ export function GtfsStopPopup({ stopId, stopName, ifopt, isAssigned, routeColors
                                 <div className="text-xs text-orange-500 mt-0.5">Nicht zugeordnet</div>
                             )}
                         </>}
-                        actions={onClose && (
-                            <button onClick={onClose} className="shrink-0 p-1 text-muted-foreground hover:text-foreground hover:bg-secondary rounded" title="Schließen">
-                                <X className="w-4 h-4" />
-                            </button>
-                        )}
+                        actions={<>
+                            <DebugLogButtonDirect label="GtfsStop" data={{ stopId, stopName, ifopt, isAssigned, departures: events }} enabled={debugMode} />
+                            {onClose && (
+                                <button onClick={onClose} className="shrink-0 p-1 text-muted-foreground hover:text-foreground hover:bg-secondary rounded" title="Schließen">
+                                    <X className="w-4 h-4" />
+                                </button>
+                            )}
+                        </>}
                     />
                 </div>
                 <div className="border-t border-border px-4 py-2">

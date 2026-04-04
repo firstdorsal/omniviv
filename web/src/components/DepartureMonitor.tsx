@@ -2,6 +2,8 @@ import { LocateFixed, Pin, PinOff, X } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import type { Departure } from "../api";
 import { getApiClient } from "../apiClient";
+import { DebugLogButton } from "./DebugLogButton";
+import { DebugLogButtonDirect } from "./DebugLogButton";
 import { DepartureMonitorHeader } from "./DepartureMonitorHeader";
 import { DepartureTable } from "./DepartureTable";
 import { Button } from "./ui/button";
@@ -31,9 +33,11 @@ interface DepartureMonitorProps {
     onLocate?: () => void;
     /** Extra content below IDs in the header */
     headerExtra?: ReactNode;
+    /** Debug mode (for popup context where React context is unavailable) */
+    debugMode?: boolean;
 }
 
-export function DepartureMonitor({ osmId, title, stationName, refIfopt, routeColors, routeTypes, referenceTime, isPinned, onPin, onUnpin, onClose, onLocate, headerExtra }: DepartureMonitorProps) {
+export function DepartureMonitor({ osmId, title, stationName, refIfopt, routeColors, routeTypes, referenceTime, isPinned, onPin, onUnpin, onClose, onLocate, headerExtra, debugMode }: DepartureMonitorProps) {
     const [events, setEvents] = useState<Departure[]>([]);
     const [gtfsStopId, setGtfsStopId] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
@@ -86,8 +90,14 @@ export function DepartureMonitor({ osmId, title, stationName, refIfopt, routeCol
         return () => clearInterval(interval);
     }, [fetchDepartures]);
 
+    const debugData = { osmId, title, stationName, refIfopt, gtfsStopId, departures: events };
+
     const actions = (
         <>
+            {debugMode !== undefined
+                ? <DebugLogButtonDirect label="DepartureMonitor" data={debugData} enabled={debugMode} />
+                : <DebugLogButton label="DepartureMonitor" data={debugData} />
+            }
             {onLocate && (
                 <Button
                     variant="ghost"

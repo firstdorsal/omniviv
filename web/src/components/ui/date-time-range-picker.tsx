@@ -1,7 +1,7 @@
 import * as React from "react";
 import type { DayButton } from "react-day-picker";
 
-import { cn } from "@/lib/utils";
+import { cn } from "../../lib/utils";
 import {
     Popover,
     PopoverAnchor,

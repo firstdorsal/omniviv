@@ -52,85 +52,87 @@ interface LineBadgeProps {
     operator?: string | null;
     /** Display variant */
     variant?: "inline" | "pill" | "circle" | "text";
+    /** Size variant for different contexts */
+    size?: "sm" | "md";
     className?: string;
 }
 
 const FALLBACK_COLOR = "#6b7280";
-
-/** Check if a line is a regional train (RE/RB/IRE) */
-function isRegionalTrain(line: string): boolean {
-    return /^(RE|RB|IRE)\d/i.test(line);
-}
 
 /**
  * Reusable transit line badge with optional German transit mode icon inside.
  * For regional trains (RE/RB), shows the operator logo before the badge
  * when the operator is not DB Regio (which already uses the DB icon).
  */
-export function LineBadge({ line, color, mode, operator, variant = "inline", className = "" }: LineBadgeProps) {
+export function LineBadge({ line, color, mode, operator, variant = "inline", size = "sm", className = "" }: LineBadgeProps) {
     const bg = color || FALLBACK_COLOR;
     const Icon = getModeIcon(mode, line);
     const textColor = contrastTextColor(bg);
 
-    // Show operator logo for regional trains with non-DB operators
-    const OperatorLogo = isRegionalTrain(line) ? getOperatorLogo(operator) : null;
+    // Show operator logo when a matching non-DB operator is detected
+    const OperatorLogo = getOperatorLogo(operator);
 
-    const badge = (() => {
-        switch (variant) {
-            case "circle":
-                return (
-                    <div
-                        className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg shrink-0 ${OperatorLogo ? "" : className}`}
-                        style={{ backgroundColor: bg, color: textColor }}
-                    >
-                        {Icon ? <Icon className="h-5 w-5 shrink-0" /> : null}
-                        {line}
-                    </div>
-                );
-            case "pill":
-                return (
-                    <span
-                        className={`inline-flex items-center gap-1 rounded-md text-xs font-mono font-semibold px-1.5 h-6 border ${OperatorLogo ? "" : className}`}
-                        style={{ borderColor: bg, backgroundColor: bg, color: textColor }}
-                    >
-                        {Icon ? <Icon className="h-4 w-4 shrink-0" /> : null}
-                        {line}
-                    </span>
-                );
-            case "text":
-                return (
-                    <span
-                        className={`inline-flex items-center gap-1 h-6 font-mono font-semibold ${OperatorLogo ? "" : className}`}
-                        style={{ color: bg }}
-                    >
-                        {Icon ? <Icon className="h-4 w-4 shrink-0" /> : null}
-                        {line}
-                    </span>
-                );
-            default: // inline
-                return (
-                    <span
-                        className={`inline-flex items-center gap-1 rounded px-1.5 h-6 font-mono font-bold text-xs leading-none ${OperatorLogo ? "" : className}`}
-                        style={{ backgroundColor: bg, color: textColor }}
-                        data-testid={`line-badge-${line}`}
-                        data-line={line}
-                        data-color={bg}
-                    >
-                        {Icon ? <Icon className="h-4 w-4 shrink-0" /> : null}
-                        {line}
-                    </span>
-                );
-        }
-    })();
+    // Use operator logo inside the badge when available, otherwise the mode icon
+    const LogoOrIcon = OperatorLogo ?? Icon;
 
-    if (OperatorLogo) {
-        return (
-            <span className={`inline-flex items-center gap-1 ${className}`} title={operator ?? undefined}>
-                <OperatorLogo className="h-5 w-auto shrink-0" />
-                {badge}
-            </span>
-        );
+    const iconH = size === "md" ? "h-5" : "h-4";
+    // 1.5:1 wide container for icons — operator logos fill it, square icons center in it
+    const iconContainerClass = size === "md" ? "w-[1.875rem] h-5 shrink-0" : "w-6 h-4 shrink-0";
+
+    switch (variant) {
+        case "circle":
+            return (
+                <div
+                    className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg shrink-0 ${className}`}
+                    style={{ backgroundColor: bg, color: textColor }}
+                    title={OperatorLogo ? (operator ?? undefined) : undefined}
+                >
+                    {LogoOrIcon ? <LogoOrIcon className="h-5 w-5 shrink-0" /> : null}
+                    {line}
+                </div>
+            );
+        case "pill":
+            return (
+                <span
+                    className={`inline-flex items-center gap-1 rounded-md text-xs font-mono font-semibold px-1.5 h-6 border ${className}`}
+                    style={{ borderColor: bg, backgroundColor: bg, color: textColor }}
+                    data-testid={`line-badge-${line}`}
+                    data-line={line}
+                    data-color={bg}
+                    title={OperatorLogo ? (operator ?? undefined) : undefined}
+                >
+                    {LogoOrIcon ? <LogoOrIcon className="h-4 w-4 shrink-0" /> : null}
+                    {line}
+                </span>
+            );
+        case "text":
+            return (
+                <span
+                    className={`inline-flex items-center gap-1 h-6 font-mono font-semibold ${className}`}
+                    style={{ color: bg }}
+                    title={OperatorLogo ? (operator ?? undefined) : undefined}
+                >
+                    {LogoOrIcon ? <LogoOrIcon className="h-4 w-4 shrink-0" /> : null}
+                    {line}
+                </span>
+            );
+        default: // inline
+            return (
+                <span
+                    className={`inline-flex items-center gap-1 rounded px-1.5 h-6 font-mono font-bold text-xs leading-none ${className}`}
+                    style={{ backgroundColor: bg, color: textColor }}
+                    data-testid={`line-badge-${line}`}
+                    data-line={line}
+                    data-color={bg}
+                    title={OperatorLogo ? (operator ?? undefined) : undefined}
+                >
+                    {LogoOrIcon ? (
+                        <span className={`inline-flex items-center justify-center ${iconContainerClass}`}>
+                            <LogoOrIcon className="h-full w-auto max-w-full shrink-0" />
+                        </span>
+                    ) : null}
+                    {line}
+                </span>
+            );
     }
-
-    return badge;
 }
