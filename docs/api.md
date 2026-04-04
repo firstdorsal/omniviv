@@ -47,7 +47,13 @@ Returns statistics for an area (station count, route count, etc.).
 GET /api/stations
 ```
 
-Returns all stations with their platforms and stop positions.
+Returns stations with their platforms and stop positions, optionally filtered by bounding box.
+
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| bbox | string | no | Bounding box filter: `west,south,east,north` (comma-separated) |
 
 **Response:**
 ```json
@@ -55,16 +61,51 @@ Returns all stations with their platforms and stop positions.
     "stations": [
         {
             "osm_id": 12345,
+            "osm_type": "relation",
             "name": "Königsplatz",
             "ref_ifopt": "de:09761:1234",
             "lat": 48.3657,
             "lon": 10.8945,
+            "min_zoom": 10,
+            "transport_modes": ["tram", "bus"],
             "platforms": [...],
-            "stop_positions": [...]
+            "stop_positions": [...],
+            "platform_ways": [...]
         }
     ]
 }
 ```
+
+**Station fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| osm_id | integer | OSM ID of the station (stop_area relation) |
+| osm_type | string | OSM element type (e.g. `relation`) |
+| name | string or null | Station name |
+| ref_ifopt | string or null | IFOPT identifier |
+| lat | float | Latitude |
+| lon | float | Longitude |
+| min_zoom | integer | Minimum map zoom level at which the station should be displayed |
+| transport_modes | string[] | Transit modes serving this station (e.g. `["tram", "bus"]`). Omitted when empty. |
+| platforms | array | Platform elements linked to the station |
+| stop_positions | array | Stop position nodes linked to the station |
+| platform_ways | array | Platform way outlines linked to the station |
+
+#### Get Station
+```
+GET /api/stations/{osm_id}
+```
+
+Returns a single station by its OSM ID, including all linked platforms, stop positions, and GTFS stop mappings.
+
+**Path Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| osm_id | integer | OSM ID of the station (stop_area relation) |
+
+**Response:** Same structure as a single entry in the list response above.
 
 ---
 
@@ -89,7 +130,128 @@ Returns route details including stops.
 GET /api/routes/{id}/geometry
 ```
 
-Returns GeoJSON geometry for the route.
+Returns the geometry for a route as line segments. The response is a JSON object with a `route_id` and an array of `segments`, where each segment is an array of `[lon, lat]` coordinate pairs.
+
+**Response:**
+```json
+{
+    "route_id": 12345678,
+    "segments": [
+        [[10.8945, 48.3657], [10.8950, 48.3660], [10.8960, 48.3665]],
+        [[10.8960, 48.3665], [10.8970, 48.3670]]
+    ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| route_id | integer | OSM ID of the route |
+| segments | array of arrays | Each segment is an array of `[lon, lat]` pairs forming a line string |
+
+#### Get Route Colors
+```
+GET /api/routes/colors
+```
+
+Returns distinct route line colors and types. Lightweight endpoint intended for color lookups in the frontend without fetching full route geometry.
+
+**Response:**
+```json
+{
+    "entries": [
+        {
+            "ref": "1",
+            "route_type": "tram",
+            "color": "#E30613",
+            "operator": "Stadtwerke Augsburg",
+            "network": "AVV"
+        }
+    ]
+}
+```
+
+#### Search Routes
+```
+POST /api/routes/search
+```
+
+Searches routes using filters provided in the request body. This is the POST equivalent of the query-parameter filters on `GET /api/routes`, useful when filter values contain special characters.
+
+**Request:**
+```json
+{
+    "route_type": "tram",
+    "ref": "1",
+    "name_contains": "München",
+    "operator": "Stadtwerke",
+    "near_lat": 48.3657,
+    "near_lon": 10.8945
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| route_type | string | no | Filter by route type (e.g. `"tram"`, `"bus"`) |
+| ref | string | no | Filter by route ref (e.g. `"RE 9"`, `"506"`). Spaces are ignored for matching. |
+| name_contains | string | no | Substring search on route name |
+| operator | string | no | Substring match on operator name |
+| near_lat | float | no | Latitude to search near (~30km radius). Only filters when `ref`, `name_contains`, or `operator` is also provided. |
+| near_lon | float | no | Longitude to search near (~30km radius). Only filters when `ref`, `name_contains`, or `operator` is also provided. |
+
+**Response:**
+```json
+{
+    "routes": [
+        {
+            "osm_id": 12345678,
+            "osm_type": "relation",
+            "name": "Linie 1",
+            "ref": "1",
+            "route_type": "tram",
+            "operator": "Stadtwerke Augsburg",
+            "network": "AVV",
+            "color": "#E30613"
+        }
+    ]
+}
+```
+
+#### Get Visible Routes
+```
+POST /api/routes/visible
+```
+
+Returns routes with their geometry that intersect the given viewport at the given zoom level. Routes with a `min_zoom` greater than the requested zoom are excluded.
+
+**Request:**
+```json
+{
+    "bbox": [10.85, 48.34, 10.93, 48.40],
+    "zoom": 13
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| bbox | [float, float, float, float] | yes | Bounding box as `[west, south, east, north]` in WGS84 |
+| zoom | integer | yes | Current map zoom level |
+
+**Response:**
+```json
+{
+    "routes": [
+        {
+            "osm_id": 12345678,
+            "name": "Linie 1",
+            "ref": "1",
+            "route_type": "tram",
+            "color": "#E30613",
+            "min_zoom": 10,
+            "segments": [[[10.89, 48.36], [10.90, 48.37]]]
+        }
+    ]
+}
+```
 
 ---
 
@@ -144,6 +306,7 @@ POST /api/departures/by-stop
 ```json
 {
     "stop_ifopt": "de:09761:1234:0:1",
+    "mapped_gtfs_stop_id": "de:09761:1234:0:1",
     "departures": [...]
 }
 ```
@@ -175,6 +338,52 @@ Returns departures for a specific GTFS stop by its stop_id, bypassing IFOPT mapp
     "departures": [...]
 }
 ```
+
+#### Get Departures by Coordinates
+```
+POST /api/departures/by-coordinates
+```
+
+Returns departures for the nearest OSM stop position or platform to the given coordinates.
+
+**Request:**
+```json
+{
+    "lat": 48.3657,
+    "lon": 10.8945,
+    "reference_time": "2025-02-06T14:00:00Z"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| lat | float | yes | Latitude (WGS84) |
+| lon | float | yes | Longitude (WGS84) |
+| reference_time | string | no | ISO 8601 timestamp for time simulation. Defaults to current time. |
+
+**Response:** Same structure as the by-stop response.
+
+#### Get Departures by OSM ID
+```
+POST /api/departures/by-osm-id
+```
+
+Returns departures for an OSM stop position or platform identified by its OSM node/way/relation ID. Uses the `osm_gtfs_stop_mapping` table directly.
+
+**Request:**
+```json
+{
+    "osm_id": 123456789,
+    "reference_time": "2025-02-06T14:00:00Z"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| osm_id | integer | yes | OSM ID of the stop position or platform |
+| reference_time | string | no | ISO 8601 timestamp for time simulation. Defaults to current time. |
+
+**Response:** Same structure as the by-stop response.
 
 ---
 
@@ -305,28 +514,35 @@ GET /api/gtfs-stops?min_lat=48.3&max_lat=48.4&min_lon=10.8&max_lon=10.9&limit=50
 
 ### Mapping
 
-Endpoints for managing IFOPT-to-GTFS stop mappings. These allow manual curation of the stop mappings used to link OSM stops (identified by IFOPT) to GTFS stops.
+Endpoints for managing OSM-to-GTFS stop mappings. These allow manual curation of the stop mappings used to link OSM stops to GTFS stops. OSM stops are identified primarily by their OSM ID; IFOPT is supported for backwards compatibility.
 
 #### Set Manual Mapping
 ```
 POST /api/mapping/set
 ```
 
-Creates or replaces a mapping for the given IFOPT with a user-curated GTFS stop assignment. Manual mappings are preserved across auto-rebuild cycles. Enforces a 1:1 relationship -- if the GTFS stop was previously mapped to a different IFOPT, that mapping is evicted.
+Creates or replaces a mapping for the given OSM stop with a user-curated GTFS stop assignment. Manual mappings are preserved across auto-rebuild cycles. Enforces a 1:1 relationship -- if the GTFS stop was previously mapped to a different OSM stop, that mapping is evicted. At least one of `osm_id` or `ifopt` must be provided.
 
 **Request:**
 ```json
 {
+    "osm_id": 123456789,
     "ifopt": "de:09761:1234:0:1",
     "gtfs_stop_id": "de:09761:1234:0:1"
 }
 ```
 
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| osm_id | integer | one of osm_id/ifopt | OSM ID of the stop (primary identifier) |
+| ifopt | string | one of osm_id/ifopt | IFOPT identifier of the stop (backwards compatibility) |
+| gtfs_stop_id | string | yes | The GTFS stop ID to map to |
+
 **Response:**
 ```json
 {
     "success": true,
-    "message": "Mapped de:09761:1234:0:1 -> de:09761:1234:0:1"
+    "message": "Mapped 123456789 -> de:09761:1234:0:1"
 }
 ```
 
@@ -335,14 +551,20 @@ Creates or replaces a mapping for the given IFOPT with a user-curated GTFS stop 
 POST /api/mapping/remove
 ```
 
-Removes a manual (user-curated) mapping. The IFOPT will be re-matched automatically on the next auto-rebuild cycle. Only removes manual mappings, not auto-generated ones.
+Removes a manual (user-curated) mapping. The OSM stop will be re-matched automatically on the next auto-rebuild cycle. Only removes manual mappings, not auto-generated ones. At least one of `osm_id` or `ifopt` must be provided.
 
 **Request:**
 ```json
 {
+    "osm_id": 123456789,
     "ifopt": "de:09761:1234:0:1"
 }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| osm_id | integer | one of osm_id/ifopt | OSM ID of the stop (primary identifier) |
+| ifopt | string | one of osm_id/ifopt | IFOPT identifier of the stop (backwards compatibility) |
 
 **Response:**
 ```json
@@ -356,7 +578,7 @@ Removes a manual (user-curated) mapping. The IFOPT will be re-matched automatica
 POST /api/mapping/status
 ```
 
-Returns a summary of IFOPT-to-GTFS mapping statistics and a paginated list of mapping entries. Each entry includes the OSM stop info, current mapping status, and optionally nearby GTFS candidate stops.
+Returns a summary of OSM-to-GTFS mapping statistics and a paginated list of mapping entries. Each entry includes the OSM stop info, current mapping status, and optionally nearby GTFS candidate stops.
 
 **Request:**
 ```json
@@ -372,16 +594,17 @@ Returns a summary of IFOPT-to-GTFS mapping statistics and a paginated list of ma
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| unmapped_only | bool | no | Only return unmapped IFOPTs (default: false) |
+| unmapped_only | bool | no | Only return unmapped OSM stops (default: false) |
 | include_candidates | bool | no | Include nearby GTFS candidate stops for each entry (default: false) |
 | filter | string | no | Filter by mapping type: `manual` or `auto` |
-| search | string | no | Case-insensitive search on IFOPT name or identifier |
+| search | string | no | Case-insensitive search on IFOPT, name, or OSM ID |
 | limit | int | no | Maximum entries to return (default: 50, max: 200) |
 | offset | int | no | Offset for pagination (default: 0) |
 
 **Response:**
 ```json
 {
+    "total_osm_stop_count": 300,
     "total_ifopt_count": 200,
     "mapped_count": 150,
     "manual_count": 10,
@@ -389,6 +612,8 @@ Returns a summary of IFOPT-to-GTFS mapping statistics and a paginated list of ma
     "unmapped_count": 50,
     "entries": [
         {
+            "osm_id": 123456789,
+            "osm_type": "node",
             "ifopt": "de:09761:1234:0:1",
             "name": "Konigsplatz",
             "lat": 48.3657,
@@ -398,7 +623,8 @@ Returns a summary of IFOPT-to-GTFS mapping statistics and a paginated list of ma
             "gtfs_stop_name": "Konigsplatz",
             "gtfs_stop_lat": 48.3658,
             "gtfs_stop_lon": 10.8946,
-            "combined_score": 1.0,
+            "match_method": "ifopt",
+            "match_score": 1.0,
             "candidates": [
                 {
                     "stop_id": "de:09761:1234:0:2",
@@ -413,6 +639,25 @@ Returns a summary of IFOPT-to-GTFS mapping statistics and a paginated list of ma
     "has_more": true
 }
 ```
+
+`MappingEntry` fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| osm_id | integer | OSM ID of the stop |
+| osm_type | string | OSM element type: `platform` or `stop_position` |
+| ifopt | string or null | IFOPT identifier (if the stop has one) |
+| name | string or null | Name of the OSM stop |
+| lat | float | Latitude |
+| lon | float | Longitude |
+| status | string | Mapping status: `unmapped`, `auto`, or `manual` |
+| gtfs_stop_id | string or null | Mapped GTFS stop ID (if mapped) |
+| gtfs_stop_name | string or null | Mapped GTFS stop name (if mapped) |
+| gtfs_stop_lat | float or null | Latitude of the mapped GTFS stop (if mapped) |
+| gtfs_stop_lon | float or null | Longitude of the mapped GTFS stop (if mapped) |
+| match_method | string or null | Method used for matching: `ifopt`, `geographic`, or `manual` |
+| match_score | float or null | Matching score (if auto-mapped) |
+| candidates | array | Nearby GTFS candidate stops (only when `include_candidates` is true) |
 
 ---
 

@@ -58,7 +58,7 @@ api/src/
 │   ├── departures/     # Real-time departure data
 │   ├── gtfs_stops/     # GTFS stop queries
 │   ├── issues/         # OSM data quality issues
-│   ├── mapping/        # IFOPT-to-GTFS stop mapping
+│   ├── mapping/        # OSM-to-GTFS stop mapping
 │   ├── routes/         # Transit route geometries
 │   ├── stations/       # Station and platform info
 │   ├── vehicles/       # Vehicle tracking
@@ -73,10 +73,17 @@ api/src/
 │   ├── osm.rs          # OpenStreetMap data fetching
 │   └── timetables/     # Timetable API integrations
 │       └── gtfs/
-│           ├── mod.rs         # GtfsProvider (schedule + RT)
-│           ├── static_data.rs # GTFS ZIP download/parsing
-│           ├── realtime.rs    # GTFS-RT protobuf processing
-│           └── error.rs       # GTFS error types
+│           ├── mod.rs              # GtfsProvider (schedule + RT)
+│           ├── static_data/        # GTFS ZIP download, parsing, and mapping
+│           │   ├── mod.rs          # Module re-exports
+│           │   ├── types.rs        # GTFS data types
+│           │   ├── csv.rs          # CSV parsing from GTFS ZIP
+│           │   ├── db.rs           # Schedule DB load/query
+│           │   ├── download.rs     # ZIP download with HTTP caching
+│           │   ├── mapping.rs      # OSM-to-GTFS stop mapping logic
+│           │   └── utils.rs        # Internal utilities
+│           ├── realtime.rs         # GTFS-RT protobuf processing
+│           └── error.rs            # GTFS error types
 ├── sync/               # Background synchronization
 │   ├── mod.rs          # SyncManager orchestration
 │   ├── types.rs        # Shared types (Departure, etc.)
@@ -96,9 +103,16 @@ api/src/
 
 ### Initial Load
 1. Frontend loads configuration from `/config.json`
-2. Frontend requests station, route, and area data from API
-3. API queries PostgreSQL database (populated by sync)
-4. Frontend renders map with stations and routes
+2. Frontend loads route colors/types from `/api/routes/colors`
+3. Stations and route line geometry are loaded via Martin vector tiles (not API)
+4. Frontend renders map with stations and routes from vector tiles
+
+### Vehicle Display (Viewport-Aware)
+1. Map fires viewport changes (bbox + zoom) on pan/zoom
+2. Frontend queries `POST /api/routes/visible` with bbox and zoom (debounced 300ms)
+3. Only routes with `min_zoom <= zoom` in the viewport are returned
+4. Frontend subscribes to those route IDs via WebSocket (`/api/ws/vehicles`)
+5. Tracked/pinned vehicles are always included in the subscription regardless of viewport
 
 ### Real-time Updates
 1. SyncManager loads static GTFS schedule on startup (downloaded ZIP, cached on disk)
@@ -106,12 +120,21 @@ api/src/
 3. Schedule-only departures are generated for trips without RT data
 4. Vehicle positions are calculated from departure/arrival times
 5. Updates broadcast via WebSocket (`/api/ws/vehicles`)
-6. Frontend interpolates vehicle positions between updates
+6. Frontend interpolates vehicle positions between updates using route geometry
 
 ### OSM Data Sync
-1. On startup, API fetches transit data from Overpass API
-2. Stations, platforms, stop positions, and routes are stored in PostgreSQL
-3. Missing stop references are tracked as issues
+
+OSM data is sourced from two paths:
+
+- **Stations, platforms, stop positions**: Fetched live from the Overpass API per configured area bounding box. This provides fine-grained stop-level topology.
+- **Routes and route geometry**: Imported Germany-wide from a PBF extract via `osm2pgsql` (runs as a separate init container). This provides route relations with their full geometry (ways).
+
+Both data sources are stored in PostgreSQL. During sync:
+1. On startup, API fetches stop-level data from Overpass API for each configured area
+2. Route data is already present from the PBF import (route_stops, route_ways)
+3. Relations between stations, platforms, and routes are resolved
+4. Missing stop references are tracked as issues
+5. `min_zoom` is precomputed per station for fast tile rendering
 
 ## WebSocket Channels
 
@@ -134,6 +157,10 @@ Returns the service health status including GTFS schedule load state:
 }
 ```
 
+`healthy` is `true` only when the database is reachable. Reachability is
+checked with a `SELECT 1` query that must complete within a 2-second timeout.
+If the timeout is exceeded or the query fails, `healthy` is `false`.
+
 ### Infrastructure Health
 
 Docker Compose configures health checks for each service:
@@ -148,24 +175,36 @@ Docker Compose configures health checks for each service:
 
 PostgreSQL stores:
 
-**OSM data tables (migration 0001):**
+**Migration structure:**
+- `0001_init.sql` — all tables (OSM data, GTFS data, mapping tables, PostGIS vector tile functions)
+- `0002_gtfs_agencies.sql` — adds the `gtfs_agencies` table and the `agency_id` column on `gtfs_routes`
+
+**OSM data tables (`0001_init.sql`):**
 - **areas**: Configured service areas with bounding boxes
-- **stations**: Transit stations with coordinates
-- **platforms**: Platform nodes within stations
+- **stations**: Transit stations with coordinates; has a `geom` (Point) column for PostGIS queries
+- **platforms**: Platform nodes within stations; has a `geom` (Point) column
+- **platform_ways**: Physical platform outlines stored as centroids (separate from `platforms` to avoid OSM node/way ID collisions); has a `geom` (Point) column
 - **stop_positions**: Exact stop locations
 - **routes**: Transit routes with geometry
 - **route_ways**: Route geometry as ordered way segments
 - **route_stops**: Stop sequence for each route
 
-**GTFS data tables (migration 0002):**
-- **gtfs_stops**: GTFS stops from stops.txt (~680k rows for the Germany feed)
-- **gtfs_routes**: GTFS routes from routes.txt
+**GTFS data tables (`0001_init.sql` + `0002_gtfs_agencies.sql`):**
+- **gtfs_stops**: GTFS stops from stops.txt (~680k rows for the Germany feed); has a `geom` (Point) column populated from lat/lon after insert
+- **gtfs_routes**: GTFS routes from routes.txt; includes `route_color` and `agency_id` columns
 - **gtfs_trips**: GTFS trips from trips.txt (~1.5M rows)
 - **gtfs_stop_times**: GTFS stop times from stop_times.txt (~31.5M rows)
 - **gtfs_calendar**: Service calendars from calendar.txt
 - **gtfs_calendar_dates**: Calendar exceptions from calendar_dates.txt
-- **ifopt_gtfs_mapping**: IFOPT-to-GTFS stop mappings (auto-generated and manual)
+- **gtfs_agencies**: Transit agencies from agency.txt (`agency_id`, `agency_name`)
 - **gtfs_feed_meta**: Singleton row tracking GTFS load state and counts
+
+**OSM-to-GTFS mapping tables (`0001_init.sql`):**
+- **osm_gtfs_stop_mapping**: Primary mapping table keyed by `osm_id` + `osm_type`; maps OSM platforms and stop positions to GTFS stops with `match_method`, `match_score`, and optional `ref_ifopt` metadata
+- **osm_gtfs_route_mapping**: Maps OSM route relations to GTFS routes by `ref` match, stop overlap, or manual assignment
+
+**Legacy mapping table (`0001_init.sql`, transitional):**
+- **ifopt_gtfs_mapping**: IFOPT-to-GTFS stop mappings keyed by IFOPT string; kept during the migration period to `osm_gtfs_stop_mapping`
 
 Departures for real-time display are held in-memory (DepartureStore), while the full GTFS
 static schedule is stored in PostgreSQL and cached in-memory per stop with a 5-minute TTL
