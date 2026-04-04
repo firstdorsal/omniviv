@@ -319,6 +319,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, _guard: super::state:
     });
 
     // Handle incoming messages from client
+    let mut last_subscribe_time = std::time::Instant::now() - std::time::Duration::from_secs(10);
+    let min_subscribe_interval = std::time::Duration::from_secs(1);
+
     while let Some(msg) = receiver.next().await {
         match msg {
             Ok(Message::Text(text)) => {
@@ -330,6 +333,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, _guard: super::state:
                                 let _ = sub_tx.send(SubscriptionCommand::SendError { message: error_msg }).await;
                                 continue;
                             }
+                            let now = std::time::Instant::now();
+                            if now.duration_since(last_subscribe_time) < min_subscribe_interval {
+                                let _ = sub_tx.send(SubscriptionCommand::SendError {
+                                    message: "Subscribe rate limited (min 1s interval)".to_string(),
+                                }).await;
+                                continue;
+                            }
+                            last_subscribe_time = now;
                             let _ = sub_tx.send(SubscriptionCommand::SubscribeRoutes { route_ids, reference_time }).await;
                         }
                     },

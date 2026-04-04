@@ -1,14 +1,15 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
     Json,
+    response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use tracing::error;
 use utoipa::{IntoParams, ToSchema};
 
-use crate::api::{ErrorResponse, internal_error};
+use crate::api::{ErrorResponse, bad_request, internal_error};
 
 #[derive(Debug, Serialize, ToSchema, FromRow)]
 pub struct Route {
@@ -33,6 +34,17 @@ pub struct RouteListResponse {
 pub struct RouteQuery {
     /// Filter by route type (e.g., "tram", "bus")
     pub route_type: Option<String>,
+    /// Filter by route ref (e.g., "RE 9", "506"). Spaces are ignored for matching.
+    #[serde(rename = "ref")]
+    pub route_ref: Option<String>,
+    /// Search routes whose name contains this text (e.g., "München")
+    pub name_contains: Option<String>,
+    /// Filter by operator (substring match, e.g., "Augsburger" matches "Augsburger Verkehrsgesellschaft")
+    pub operator: Option<String>,
+    /// Filter to routes near this latitude (used with `near_lon`, searches within ~30km)
+    pub near_lat: Option<f64>,
+    /// Filter to routes near this longitude (used with `near_lat`, searches within ~30km)
+    pub near_lon: Option<f64>,
 }
 
 /// List all routes, optionally filtered by type
@@ -50,7 +62,47 @@ pub async fn list_routes(
     State(pool): State<PgPool>,
     Query(query): Query<RouteQuery>,
 ) -> Result<Json<RouteListResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let routes: Vec<Route> = if let Some(route_type) = query.route_type.as_deref() {
+    const MAX_SEARCH_LEN: usize = 200;
+    let routes: Vec<Route> = if query.route_ref.is_some() || query.name_contains.is_some() || query.operator.is_some() {
+        // Targeted query: filter by ref and/or name and/or operator (fast, returns few results)
+        let ref_normalized = query.route_ref.as_deref().map(|r| r.replace(' ', "").to_uppercase());
+        let name_contains = query.name_contains.as_deref().map(|s| &s[..s.len().min(MAX_SEARCH_LEN)]);
+        let operator = query.operator.as_deref().map(|s| &s[..s.len().min(MAX_SEARCH_LEN)]);
+        sqlx::query_as(
+            r#"
+            SELECT DISTINCT r.osm_id, r.osm_type, r.name, r.ref, r.route_type, r.operator, r.network, r.color
+            FROM routes r
+            WHERE ($1::text IS NULL OR r.route_type = $1)
+              AND ($2::text IS NULL OR UPPER(REPLACE(r.ref, ' ', '')) = $2)
+              AND ($3::text IS NULL OR r.name ILIKE '%' || $3 || '%')
+              AND ($4::text IS NULL OR r.operator ILIKE '%' || $4 || '%')
+              AND ($5::float8 IS NULL OR (
+                  EXISTS (
+                      SELECT 1 FROM route_stops rs
+                      JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+                      WHERE rs.route_id = r.osm_id
+                        AND sp.lat BETWEEN $5 - 0.3 AND $5 + 0.3
+                        AND sp.lon BETWEEN $6 - 0.4 AND $6 + 0.4
+                  ) OR EXISTS (
+                      SELECT 1 FROM route_stops rs
+                      JOIN stations s ON s.osm_id = rs.station_id
+                      WHERE rs.route_id = r.osm_id
+                        AND s.lat BETWEEN $5 - 0.3 AND $5 + 0.3
+                        AND s.lon BETWEEN $6 - 0.4 AND $6 + 0.4
+                  )
+              ))
+            ORDER BY r.ref, r.name
+            "#,
+        )
+        .bind(query.route_type.as_deref())
+        .bind(ref_normalized.as_deref())
+        .bind(name_contains)
+        .bind(operator)
+        .bind(query.near_lat)
+        .bind(query.near_lon)
+        .fetch_all(&pool)
+        .await
+    } else if let Some(route_type) = query.route_type.as_deref() {
         sqlx::query_as(
             r#"
             SELECT osm_id, osm_type, name, ref, route_type, operator, network, color
@@ -73,6 +125,82 @@ pub async fn list_routes(
         .fetch_all(&pool)
         .await
     }
+    .map_err(internal_error)?;
+
+    Ok(Json(RouteListResponse { routes }))
+}
+
+/// Request body for POST /api/routes/search
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RouteSearchRequest {
+    /// Filter by route type (e.g., "tram", "bus")
+    pub route_type: Option<String>,
+    /// Filter by route ref (e.g., "RE 9", "506"). Spaces are ignored for matching.
+    #[serde(rename = "ref")]
+    pub route_ref: Option<String>,
+    /// Search routes whose name contains this text (e.g., "München")
+    pub name_contains: Option<String>,
+    /// Filter by operator (substring match)
+    pub operator: Option<String>,
+    /// Filter to routes near this latitude (searches within ~30km)
+    pub near_lat: Option<f64>,
+    /// Filter to routes near this longitude (searches within ~30km)
+    pub near_lon: Option<f64>,
+}
+
+/// Search routes with filters (POST body)
+#[utoipa::path(
+    post,
+    path = "/api/routes/search",
+    request_body = RouteSearchRequest,
+    responses(
+        (status = 200, description = "Matching routes", body = RouteListResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "routes"
+)]
+pub async fn search_routes(
+    State(pool): State<PgPool>,
+    Json(body): Json<RouteSearchRequest>,
+) -> Result<Json<RouteListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    const MAX_SEARCH_LEN: usize = 200;
+    let ref_normalized = body.route_ref.as_deref().map(|r| r.replace(' ', "").to_uppercase());
+    let name_contains = body.name_contains.as_deref().map(|s| &s[..s.len().min(MAX_SEARCH_LEN)]);
+    let operator = body.operator.as_deref().map(|s| &s[..s.len().min(MAX_SEARCH_LEN)]);
+    let routes: Vec<Route> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT r.osm_id, r.osm_type, r.name, r.ref, r.route_type, r.operator, r.network, r.color
+        FROM routes r
+        WHERE ($1::text IS NULL OR r.route_type = $1)
+          AND ($2::text IS NULL OR UPPER(REPLACE(r.ref, ' ', '')) = $2)
+          AND ($3::text IS NULL OR r.name ILIKE '%' || $3 || '%')
+          AND ($4::text IS NULL OR r.operator ILIKE '%' || $4 || '%')
+          AND ($5::float8 IS NULL OR (
+              EXISTS (
+                  SELECT 1 FROM route_stops rs
+                  JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+                  WHERE rs.route_id = r.osm_id
+                    AND sp.lat BETWEEN $5 - 0.3 AND $5 + 0.3
+                    AND sp.lon BETWEEN $6 - 0.4 AND $6 + 0.4
+              ) OR EXISTS (
+                  SELECT 1 FROM route_stops rs
+                  JOIN stations s ON s.osm_id = rs.station_id
+                  WHERE rs.route_id = r.osm_id
+                    AND s.lat BETWEEN $5 - 0.3 AND $5 + 0.3
+                    AND s.lon BETWEEN $6 - 0.4 AND $6 + 0.4
+              )
+          ))
+        ORDER BY r.ref, r.name
+        "#,
+    )
+    .bind(body.route_type.as_deref())
+    .bind(ref_normalized.as_deref())
+    .bind(name_contains)
+    .bind(operator)
+    .bind(body.near_lat)
+    .bind(body.near_lon)
+    .fetch_all(&pool)
+    .await
     .map_err(internal_error)?;
 
     Ok(Json(RouteListResponse { routes }))
@@ -105,15 +233,26 @@ pub struct RouteColorsResponse {
 )]
 pub async fn get_route_colors(
     State(pool): State<PgPool>,
-) -> Result<Json<RouteColorsResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     // Return ALL distinct (route_type, ref, color) combinations.
-    // The frontend builds a type-scoped map and departures carry gtfs_route_type + color
-    // from the GTFS feed to select the right color per departure.
+    // Includes both OSM operator names AND GTFS agency names as "operator" field,
+    // so the frontend can build keys matching MOTIS agencyName (which comes from GTFS,
+    // not OSM — e.g. "Stadtwerke München" vs "Münchner Verkehrsgesellschaft").
     let entries: Vec<RouteColorEntry> = sqlx::query_as(
         r#"
-        SELECT DISTINCT ref, route_type, color, operator, network
-        FROM routes
+        -- OSM operator names (primary source)
+        SELECT DISTINCT ref, route_type, color, operator, network FROM routes
         WHERE ref IS NOT NULL AND color IS NOT NULL
+        UNION
+        -- GTFS agency names (via route mapping, if available)
+        SELECT DISTINCT r.ref, r.route_type, r.color, ga.agency_name AS operator, r.network
+        FROM routes r
+        JOIN osm_gtfs_route_mapping m ON m.osm_route_id = r.osm_id
+        JOIN gtfs_routes gr ON gr.route_id = m.gtfs_route_id
+        JOIN gtfs_agencies ga ON ga.agency_id = gr.agency_id
+        WHERE r.ref IS NOT NULL AND r.color IS NOT NULL
+          AND ga.agency_name IS NOT NULL
+          AND ga.agency_name != COALESCE(r.operator, '')
         ORDER BY ref, route_type
         "#,
     )
@@ -121,7 +260,11 @@ pub async fn get_route_colors(
     .await
     .map_err(internal_error)?;
 
-    Ok(Json(RouteColorsResponse { entries }))
+    // Cache for 1 hour — route colors change only on OSM import
+    Ok((
+        [(header::CACHE_CONTROL, "public, max-age=3600")],
+        Json(RouteColorsResponse { entries }),
+    ))
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -418,6 +561,7 @@ pub struct VisibleRoutesResponse {
     request_body = VisibleRoutesRequest,
     responses(
         (status = 200, description = "Routes with geometry in viewport", body = VisibleRoutesResponse),
+        (status = 400, description = "Invalid request parameters", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "routes"
@@ -428,9 +572,18 @@ pub async fn get_visible_routes(
 ) -> Result<Json<VisibleRoutesResponse>, (StatusCode, Json<ErrorResponse>)> {
     let [west, south, east, north] = request.bbox;
 
+    // Clamp zoom to valid MapLibre range
+    let zoom = request.zoom.clamp(0, 24);
+
+    // Reject oversized bounding boxes to prevent expensive full-table scans
+    let bbox_area = (east - west).abs() * (north - south).abs();
+    if bbox_area > 100.0 {
+        return Err(bad_request("Bounding box area too large (max 100 square degrees)"));
+    }
+
     // Simplify geometry based on zoom level to reduce response size.
     // Lower zoom = more simplification (in degrees, roughly).
-    let simplify_tolerance = match request.zoom {
+    let simplify_tolerance = match zoom {
         0..=6 => 0.01,    // ~1km
         7..=9 => 0.002,   // ~200m
         10..=12 => 0.0005, // ~50m
@@ -458,15 +611,16 @@ pub async fn get_visible_routes(
         FROM routes
         WHERE geom IS NOT NULL
           AND min_zoom <= $5
-          AND geom && ST_MakeEnvelope($1, $2, $3, $4, 4326)
           AND ST_Intersects(geom, ST_MakeEnvelope($1, $2, $3, $4, 4326))
+        ORDER BY min_zoom ASC
+        LIMIT 200
         "#,
     )
     .bind(west)
     .bind(south)
     .bind(east)
     .bind(north)
-    .bind(request.zoom)
+    .bind(zoom)
     .bind(simplify_tolerance)
     .fetch_all(&pool)
     .await

@@ -13,7 +13,7 @@ pub mod stations;
 pub mod vehicles;
 pub mod ws;
 
-pub use error::{ErrorResponse, internal_error};
+pub use error::{ErrorResponse, bad_request, internal_error};
 pub use schedule_cache::ScheduleCache;
 pub use state::AppState;
 

@@ -18,3 +18,13 @@ pub fn internal_error<E: std::fmt::Display>(err: E) -> (StatusCode, Json<ErrorRe
         }),
     )
 }
+
+/// Helper to return a 400 Bad Request with a custom message
+pub fn bad_request(message: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: message.to_string(),
+        }),
+    )
+}

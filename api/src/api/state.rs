@@ -15,7 +15,9 @@ pub struct WsConnectionTracker {
 }
 
 /// Maximum concurrent WebSocket connections per IP address.
-const MAX_WS_PER_IP: u32 = 10;
+/// Behind a reverse proxy all clients share one upstream IP,
+/// so this must be generous enough for multiple browser tabs.
+const MAX_WS_PER_IP: u32 = 50;
 
 impl WsConnectionTracker {
     /// Try to register a new connection. Returns `Ok(guard)` if under the limit,
