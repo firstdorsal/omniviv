@@ -1,0 +1,15 @@
+listen_addresses: '0.0.0.0:3000'
+
+postgres:
+  connection_string: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+  auto_publish: true  # Phase 1: keep SQL tiles alongside PMTiles
+
+# Pre-generated PMTiles from tilegen
+pmtiles:
+  paths: /tiles
+
+mbtiles:
+  paths: /mbtiles
+
+fonts: /fonts
+sprites: /sprites

@@ -45,6 +45,16 @@ services:
         image: iboates/osm2pgsql:2.2.0@sha256:dde9a64798f23b3397be5c8db6e66ab916a41df1c5705215275639a3deea015a
         dataPath: ./data/  # directory containing germany-latest.osm.pbf
         skipDownload: "false"  # set to "true" if PBF is already present
+    tilegen:
+        build:
+            enabled: true
+            context: ../../tilegen
+            dockerfile: Dockerfile
+        image: ghcr.io/firstdorsal/omniviv-tilegen:latest
+        tilesPath: ./data/tiles/
+        dataPath: ./data/  # shared with osmImport for PBF reuse
+        memLimit: 16g
+        cpus: 4
     motis:
         subdomain: omniviv-motis
         image: ghcr.io/motis-project/motis:latest@sha256:5ace015c6667bf02cc127fa94e2c944543dbe6e9ea56d8837d71d9c82530cf7f

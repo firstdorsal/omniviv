@@ -1,0 +1,42 @@
+[package]
+name = "omniviv-tilegen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Config
+serde = { version = "1", features = ["derive"] }
+serde_yaml_neo = "0.11"
+
+# Database (PostGIS tile function calls + state tracking)
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
+
+# Tile output
+pmtiles = { version = "0.21", default-features = false, features = ["write", "tilejson"] }
+
+# HTTP (PBF downloads with streaming + resume)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+humantime = "2"
+humantime-serde = "1"
+
+# Futures
+futures = "0.3"
+
+# Validation
+regex-lite = "0.1"

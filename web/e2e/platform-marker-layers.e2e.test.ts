@@ -17,7 +17,7 @@ import { test, expect, type Page } from "@playwright/test";
  *
  * Prerequisites:
  *   - vite dev server at localhost:5174
- *   - Martin tiles at omniviv-martin.localhost with transit_stations function
+ *   - Martin tiles at omniviv-martin.localhost serving overview + detail PMTiles
  *   - Database populated with Augsburg OSM data
  */
 
@@ -86,17 +86,16 @@ async function queryLayer(page: Page, layerId: string): Promise<{
 
 // ─── Martin tile source-layer tests ──────────────────────────────────────────
 
-test.describe("Martin tile contains steige source-layer", () => {
-    test("zoom 15 Königsplatz tile contains steige layer", async () => {
-        const res = await fetch(`${MARTIN_URL}/transit_stations/15/17375/11340`);
+test.describe("Martin detail tile contains steige source-layer", () => {
+    test("zoom 15 Königsplatz detail tile contains steige layer", async () => {
+        const res = await fetch(`${MARTIN_URL}/detail/15/17375/11340`);
         expect(res.ok).toBeTruthy();
         const buf = await res.arrayBuffer();
         const text = new TextDecoder("latin1").decode(buf);
 
-        expect(text.includes("steige"), "Tile must contain steige source-layer").toBe(true);
-        // The raw debug layers should still exist too
-        expect(text.includes("stops"), "Tile must still contain stops source-layer").toBe(true);
-        expect(text.includes("platforms"), "Tile must still contain platforms source-layer").toBe(true);
+        expect(text.includes("steige"), "Detail tile must contain steige source-layer").toBe(true);
+        expect(text.includes("stops"), "Detail tile must contain stops source-layer").toBe(true);
+        expect(text.includes("platforms"), "Detail tile must contain platforms source-layer").toBe(true);
     });
 });
 

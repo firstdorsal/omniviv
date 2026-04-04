@@ -15,6 +15,7 @@ services:
             POSTGRES_USER: $POSTGRES_USER
             POSTGRES_PASSWORD: $POSTGRES_PASSWORD
             POSTGRES_DB: {{ .services.postgres.database }}
+            PGDATA: /var/lib/postgresql/data
         volumes:
             {{- if .services.postgres.storage.volumeName }}
             - {{ .services.postgres.storage.volumeName }}:/var/lib/postgresql/data
@@ -160,6 +161,7 @@ services:
             POSTGRES_DB: {{ .services.postgres.database }}
         volumes:
             - "{{ .services.martin.dataPath }}mbtiles:/mbtiles:ro"
+            - "{{ .services.tilegen.tilesPath }}:/tiles:ro"
             - "{{ .services.martin.dataPath }}fonts:/fonts:ro"
             - "{{ .services.martin.dataPath }}sprites:/sprites:ro"
             - "{{ .services.martin.dataPath }}martin/config.yaml:/config/config.yaml:ro"
@@ -216,6 +218,33 @@ services:
             - ./config/scripts/import-transit-routes.sh:/scripts/import.sh:ro
         entrypoint: ["sh", "/scripts/import.sh"]
         mem_limit: 8g
+        networks:
+            - internal
+
+    tilegen:
+        {{- if eq .services.tilegen.build.enabled true }}
+        build:
+            context: "{{ .services.tilegen.build.context }}"
+            dockerfile: "{{ .services.tilegen.build.dockerfile }}"
+        {{- else }}
+        image: "{{ .services.tilegen.image }}"
+        {{- end }}
+        container_name: omniviv-tilegen
+        restart: unless-stopped
+        depends_on:
+            postgres:
+                condition: service_healthy
+            api:
+                condition: service_healthy
+        environment:
+            DATABASE_URL: "postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/{{ .services.postgres.database }}"
+        volumes:
+            - ./config/tilegen/tilegen.yaml:/app/tilegen.yaml:ro
+            - "{{ .services.tilegen.tilesPath }}:/tiles:rw"
+            - "{{ .services.tilegen.dataPath }}:/data:rw"
+        mem_limit: {{ .services.tilegen.memLimit }}
+        cpus: {{ .services.tilegen.cpus }}
+        stop_grace_period: 120s
         networks:
             - internal
 

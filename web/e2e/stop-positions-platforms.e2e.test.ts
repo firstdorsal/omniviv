@@ -13,7 +13,7 @@ import { test, expect, type Page } from "@playwright/test";
  *
  * Prerequisites:
  *   - vite dev server at localhost:5174
- *   - Martin tiles serving transit_stations with steige layer
+ *   - Martin tiles serving detail PMTiles with steige layer
  */
 
 async function openLayersPanel(page: Page) {
@@ -97,9 +97,9 @@ test.describe("Steige (platform markers) on map", () => {
         await expect(umrisseCheckbox).toBeDisabled();
     });
 
-    test("Martin transit_stations tile contains steige layer data", async ({ page }) => {
+    test("Martin detail tile contains steige layer data", async ({ page }) => {
         const result = await page.evaluate(async () => {
-            const res = await fetch("http://omniviv-martin.localhost/transit_stations/15/17375/11340");
+            const res = await fetch("http://omniviv-martin.localhost/detail/15/17375/11340");
             const body = await res.arrayBuffer();
             const text = new TextDecoder("latin1").decode(new Uint8Array(body));
             return { ok: res.ok, size: body.byteLength, hasSteige: text.includes("steige") };

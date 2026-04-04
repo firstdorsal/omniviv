@@ -32,7 +32,7 @@ export class MapLayerManager {
      */
     setupLayers(): void {
         // Guard against duplicate setup (e.g. style reload, hot module reload)
-        if (this.map.getSource("transit-stations")) return;
+        if (this.map.getSource("transit-overview")) return;
 
         // Set up on-demand handler for subclass names not in the Maki bundle
         this.setupPoiIconHandler();
@@ -52,16 +52,24 @@ export class MapLayerManager {
             },
         });
 
-        // Routes — vector tiles from Martin (PostGIS), platform ways excluded from geometry
-        this.map.addSource("transit-routes", {
+        // Transit overview tiles (stations + routes, z0-15)
+        this.map.addSource("transit-overview", {
             type: "vector",
-            tiles: [`${this.martinUrl}/transit_routes/{z}/{x}/{y}`],
-            maxzoom: 24,
+            tiles: [`${this.martinUrl}/overview/{z}/{x}/{y}`],
+            maxzoom: 15,
+        });
+
+        // Transit detail tiles (steige + outlines + debug layers, z15-17)
+        this.map.addSource("transit-detail", {
+            type: "vector",
+            tiles: [`${this.martinUrl}/detail/{z}/{x}/{y}`],
+            minzoom: 15,
+            maxzoom: 17,
         });
         this.map.addLayer({
             id: "routes-line",
             type: "line",
-            source: "transit-routes",
+            source: "transit-overview",
             "source-layer": "transit_routes",
             paint: {
                 "line-color": ["coalesce", ["get", "color"], "#888888"],
@@ -71,17 +79,10 @@ export class MapLayerManager {
             layout: { "line-cap": "round", "line-join": "round" },
         }, "3d-buildings");
 
-        // Stations + stops — vector tiles from Martin (PostGIS transit_stations function)
-        this.map.addSource("transit-stations", {
-            type: "vector",
-            tiles: [`${this.martinUrl}/transit_stations/{z}/{x}/{y}`],
-            maxzoom: 24,
-        });
-
         // Stop positions (from vector tiles, z15+) — hidden by default, toggled via "Haltepositionen"
         this.map.addLayer({
             id: "stops-circle", type: "circle",
-            source: "transit-stations", "source-layer": "stops",
+            source: "transit-detail", "source-layer": "stops",
             minzoom: 15,
             maxzoom: 24,
             paint: { "circle-radius": 5, "circle-color": "#3b82f6", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" },
@@ -89,7 +90,7 @@ export class MapLayerManager {
         });
         this.map.addLayer({
             id: "stops-label", type: "symbol",
-            source: "transit-stations", "source-layer": "stops",
+            source: "transit-detail", "source-layer": "stops",
             minzoom: 16,
             maxzoom: 24,
             layout: { "text-field": ["get", "display_name"], "text-font": ["Open Sans Regular"], "text-size": 10, "text-offset": [0, 0.9], "text-anchor": "top", visibility: "none" },
@@ -99,7 +100,7 @@ export class MapLayerManager {
         // Platforms from vector tiles (z15+) — orange circles, hidden by default, toggled via "Steige"
         this.map.addLayer({
             id: "platforms-vt-circle", type: "circle",
-            source: "transit-stations", "source-layer": "platforms",
+            source: "transit-detail", "source-layer": "platforms",
             minzoom: 15,
             maxzoom: 24,
             paint: { "circle-radius": 5, "circle-color": "#f97316", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" },
@@ -107,7 +108,7 @@ export class MapLayerManager {
         });
         this.map.addLayer({
             id: "platforms-vt-label", type: "symbol",
-            source: "transit-stations", "source-layer": "platforms",
+            source: "transit-detail", "source-layer": "platforms",
             minzoom: 16,
             maxzoom: 24,
             layout: {
@@ -157,7 +158,7 @@ export class MapLayerManager {
         // Added BEFORE labels so text remains on top. Hidden by default, toggled via "Haltepositionen".
         this.map.addLayer({
             id: "station-connections-vector-line", type: "line",
-            source: "transit-stations", "source-layer": "connections",
+            source: "transit-detail", "source-layer": "connections",
             minzoom: 15,
             maxzoom: 24,
             paint: {
@@ -172,14 +173,14 @@ export class MapLayerManager {
         // Stations — from vector tiles, filtered by min_zoom property
         this.map.addLayer({
             id: "stations-circle", type: "circle",
-            source: "transit-stations", "source-layer": "stations",
+            source: "transit-overview", "source-layer": "stations",
             maxzoom: 24,
             filter: ["<=", ["get", "min_zoom"], ["zoom"]],
             paint: { "circle-radius": 6, "circle-color": "#525252", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" },
         });
         this.map.addLayer({
             id: "stations-label", type: "symbol",
-            source: "transit-stations", "source-layer": "stations",
+            source: "transit-overview", "source-layer": "stations",
             minzoom: 8,
             maxzoom: 24,
             filter: ["<=", ["get", "min_zoom"], ["zoom"]],
@@ -191,7 +192,7 @@ export class MapLayerManager {
         // Toggled by the "Steige" sub-toggle in the Ebenen panel. Hidden by default.
         this.map.addLayer({
             id: "steige-circle", type: "circle",
-            source: "transit-stations", "source-layer": "steige",
+            source: "transit-detail", "source-layer": "steige",
             minzoom: 15,
             maxzoom: 24,
             paint: { "circle-radius": 5, "circle-color": "#525252", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" },
@@ -199,7 +200,7 @@ export class MapLayerManager {
         });
         this.map.addLayer({
             id: "steige-label", type: "symbol",
-            source: "transit-stations", "source-layer": "steige",
+            source: "transit-detail", "source-layer": "steige",
             minzoom: 15,
             maxzoom: 24,
             layout: {
@@ -218,7 +219,7 @@ export class MapLayerManager {
         // Toggled by the "Umrisse" sub-sub-toggle under Steige. Hidden by default.
         this.map.addLayer({
             id: "platform-outlines-line", type: "line",
-            source: "transit-stations", "source-layer": "platform_outlines",
+            source: "transit-detail", "source-layer": "platform_outlines",
             minzoom: 16,
             maxzoom: 24,
             paint: {
@@ -386,7 +387,7 @@ export class MapLayerManager {
             }
 
             // Additional stop position markers (blue)
-            if (showStopPositions) {
+            if (showDebugStops) {
                 for (const stopPosition of station.stop_positions) {
                     stopPositionFeatures.push({
                         type: "Feature",
@@ -397,7 +398,7 @@ export class MapLayerManager {
             }
 
             // Additional platform element markers (orange)
-            if (showPlatformElements) {
+            if (showDebugPlatforms) {
                 for (const platform of station.platforms) {
                     platformElementFeatures.push({
                         type: "Feature",

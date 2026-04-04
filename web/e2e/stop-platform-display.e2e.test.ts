@@ -10,7 +10,7 @@ import { test, expect, type Page } from "@playwright/test";
  *
  * Prerequisites:
  *   - vite dev server at localhost:5174
- *   - Martin tiles serving transit_stations
+ *   - Martin tiles serving overview + detail PMTiles
  *   - Database populated with Augsburg OSM data
  */
 
@@ -97,9 +97,21 @@ test.describe("Database has correct stop position and platform data", () => {
 // ─── Vector tile verification ───────────────────────────────────────────────
 
 test.describe("Martin tiles contain correct layers", () => {
-    test("tile at zoom 15 contains all required source-layers", async ({ page }) => {
+    test("overview tile at zoom 15 contains stations source-layer", async ({ page }) => {
         const result = await page.evaluate(async () => {
-            const res = await fetch("http://omniviv-martin.localhost/transit_stations/15/17375/11340");
+            const res = await fetch("http://omniviv-martin.localhost/overview/15/17375/11340");
+            const body = await res.arrayBuffer();
+            const text = new TextDecoder("ascii", { fatal: false }).decode(new Uint8Array(body));
+            return { ok: res.ok, size: body.byteLength, hasStations: text.includes("stations") };
+        });
+        expect(result.ok).toBe(true);
+        expect(result.size, "Overview tile should not be empty").toBeGreaterThan(100);
+        expect(result.hasStations, "Overview tile must contain stations source-layer").toBe(true);
+    });
+
+    test("detail tile at zoom 15 contains steige and stops source-layers", async ({ page }) => {
+        const result = await page.evaluate(async () => {
+            const res = await fetch("http://omniviv-martin.localhost/detail/15/17375/11340");
             const body = await res.arrayBuffer();
             const text = new TextDecoder("ascii", { fatal: false }).decode(new Uint8Array(body));
             return {
@@ -107,16 +119,14 @@ test.describe("Martin tiles contain correct layers", () => {
                 size: body.byteLength,
                 hasStops: text.includes("stops"),
                 hasPlatforms: text.includes("platforms"),
-                hasStations: text.includes("stations"),
                 hasSteige: text.includes("steige"),
             };
         });
         expect(result.ok).toBe(true);
-        expect(result.size, "Tile should not be empty").toBeGreaterThan(100);
-        expect(result.hasStops, "Tile must contain stops source-layer (debug)").toBe(true);
-        expect(result.hasPlatforms, "Tile must contain platforms source-layer (debug)").toBe(true);
-        expect(result.hasStations, "Tile must contain stations source-layer").toBe(true);
-        expect(result.hasSteige, "Tile must contain steige source-layer (user-facing)").toBe(true);
+        expect(result.size, "Detail tile should not be empty").toBeGreaterThan(100);
+        expect(result.hasStops, "Detail tile must contain stops source-layer").toBe(true);
+        expect(result.hasPlatforms, "Detail tile must contain platforms source-layer").toBe(true);
+        expect(result.hasSteige, "Detail tile must contain steige source-layer").toBe(true);
     });
 });
 
