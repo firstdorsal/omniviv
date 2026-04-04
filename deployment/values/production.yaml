@@ -10,7 +10,7 @@ lanIp: null
 
 services:
     postgres:
-        image: postgres:18-alpine
+        image: postgis/postgis:18-3.6-alpine
         database: omniviv
         storage:
             volumeName: omniviv-postgres-data
@@ -35,12 +35,16 @@ services:
         image: ghcr.io/firstdorsal/omniviv-frontend:latest
     martin:
         subdomain: omniviv-martin
-        image: ghcr.io/maplibre/martin
+        image: ghcr.io/maplibre/martin@sha256:b51c201d4b1a2128676fbe3c8f370dae74efa49b3f14f13a0b0248ffddfdea86
         dataPath: ./data/
         cacheSeconds: 86400
+    osmImport:
+        image: iboates/osm2pgsql:2.2.0@sha256:dde9a64798f23b3397be5c8db6e66ab916a41df1c5705215275639a3deea015a
+        dataPath: ./data/
+        skipDownload: "false"
     motis:
         subdomain: omniviv-motis
-        image: ghcr.io/motis-project/motis:latest
+        image: ghcr.io/motis-project/motis:latest@sha256:5ace015c6667bf02cc127fa94e2c944543dbe6e9ea56d8837d71d9c82530cf7f
         inputPath: ./data/motis/input/
         storage:
             volumeName: omniviv-motis-data

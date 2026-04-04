@@ -10,6 +10,7 @@ timetable:
   datasets:
     gtfs-germany:
       path: /input/gtfs-germany.zip
+      script: /input/gtfs-germany.lua
 street_routing: true
 geocoding: true
 reverse_geocoding: true

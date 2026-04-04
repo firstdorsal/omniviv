@@ -42,7 +42,7 @@ services:
         dataPath: ./data/
         cacheSeconds: 86400 # 1 day
     osmImport:
-        image: iboates/osm2pgsql:latest
+        image: iboates/osm2pgsql:2.2.0@sha256:dde9a64798f23b3397be5c8db6e66ab916a41df1c5705215275639a3deea015a
         dataPath: ./data/  # directory containing germany-latest.osm.pbf
         skipDownload: "false"  # set to "true" if PBF is already present
     motis:

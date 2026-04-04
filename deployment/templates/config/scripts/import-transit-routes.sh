@@ -29,6 +29,14 @@ else
     exit 1
 fi
 
+SENTINEL="/data/.osm_import_done"
+
+if [ -f "$SENTINEL" ]; then
+    echo "[INFO] Import already completed (sentinel exists: $SENTINEL). Skipping."
+    echo "[INFO] Remove $SENTINEL to force re-import."
+    exit 0
+fi
+
 echo "[INFO] Running osm2pgsql (this may take 30-90 minutes for Germany)..."
 osm2pgsql \
     --create \
@@ -41,4 +49,5 @@ osm2pgsql \
     --log-level=info \
     "$PBF_PATH"
 
+touch "$SENTINEL"
 echo "[OK] osm2pgsql import complete. Staging tables ready for API merge."

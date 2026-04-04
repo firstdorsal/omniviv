@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INPUT_DIR="${SCRIPT_DIR}/../data/motis/input"
@@ -42,13 +42,20 @@ curl -L -o "$GTFS_FILE" "https://download.gtfs.de/germany/free/latest.zip"
 echo -e "${GREEN}GTFS download complete${NC}"
 
 # Copy MOTIS config
-CONFIG_SRC="${SCRIPT_DIR}/../results/config/motis/config.yml"
+CONFIG_SRC="${SCRIPT_DIR}/../.results/config/motis/config.yml"
 if [ -f "$CONFIG_SRC" ]; then
     cp "$CONFIG_SRC" "$INPUT_DIR/config.yml"
     echo -e "${GREEN}MOTIS config copied${NC}"
 else
     echo -e "${YELLOW}No rendered config found at $CONFIG_SRC, using template directly${NC}"
     cp "${SCRIPT_DIR}/../templates/config/motis/config.yml" "$INPUT_DIR/config.yml"
+fi
+
+# Copy Lua script for route type reclassification (ICE/IC -> extended types)
+LUA_SRC="${SCRIPT_DIR}/gtfs-germany.lua"
+if [ -f "$LUA_SRC" ]; then
+    cp "$LUA_SRC" "$INPUT_DIR/gtfs-germany.lua"
+    echo -e "${GREEN}MOTIS Lua script copied${NC}"
 fi
 
 # Enrich GTFS feed with OSM route colors (requires running database)

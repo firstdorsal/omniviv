@@ -17,9 +17,9 @@ services:
             POSTGRES_DB: {{ .services.postgres.database }}
         volumes:
             {{- if .services.postgres.storage.volumeName }}
-            - {{ .services.postgres.storage.volumeName }}:/var/lib/postgresql/18/docker
+            - {{ .services.postgres.storage.volumeName }}:/var/lib/postgresql/data
             {{- else if .services.postgres.storage.absolutePath }}
-            - {{ .services.postgres.storage.absolutePath }}:/var/lib/postgresql/18/docker
+            - {{ .services.postgres.storage.absolutePath }}:/var/lib/postgresql/data
             {{- end }}
         healthcheck:
             test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d {{ .services.postgres.database }}"]
@@ -40,7 +40,7 @@ services:
         image: "{{ .services.api.image }}"
         {{- end }}
         container_name: omniviv-api
-        restart: unless-stopped
+        restart: on-failure:5
         depends_on:
             postgres:
                 condition: service_healthy
@@ -211,10 +211,11 @@ services:
             PBF_PATH: /data/germany-latest.osm.pbf
             SKIP_DOWNLOAD: "{{ .services.osmImport.skipDownload }}"
         volumes:
-            - "{{ .services.osmImport.dataPath }}:/data"
+            - "{{ .services.osmImport.dataPath }}:/data:rw"
             - ./config/scripts/osm2pgsql-transit.lua:/scripts/transit.lua:ro
             - ./config/scripts/import-transit-routes.sh:/scripts/import.sh:ro
         entrypoint: ["sh", "/scripts/import.sh"]
+        mem_limit: 8g
         networks:
             - internal
 

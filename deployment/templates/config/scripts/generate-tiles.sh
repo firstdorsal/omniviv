@@ -11,7 +11,7 @@
 #   MAX_ZOOM=14 ./generate-tiles.sh germany       # Custom zoom level
 #
 
-set -e
+set -euo pipefail
 
 # Configuration
 GERMANY_MIN_ZOOM="${MIN_ZOOM:-0}"
@@ -60,10 +60,9 @@ generate_germany() {
 
     # Create data directory
     mkdir -p data
-    cd data
 
     # Download OSM data if not exists
-    OSM_FILE="germany-latest.osm.pbf"
+    OSM_FILE="data/germany-latest.osm.pbf"
     if [ ! -f "$OSM_FILE" ]; then
         log_info "Downloading Germany OSM data from Geofabrik (~4GB)..."
         curl -L -o "$OSM_FILE" "$GERMANY_OSM_URL"
@@ -72,8 +71,6 @@ generate_germany() {
         log_info "Using existing OSM data: $OSM_FILE"
         log_info "Delete this file to download fresh data"
     fi
-
-    cd ..
 
     # Run Planetiler
     log_info "Running Planetiler for Germany..."
@@ -118,11 +115,10 @@ generate_world() {
 
     # Create data directory
     mkdir -p data
-    cd data
 
     # For world tiles at low zoom, we can use Natural Earth + low-zoom OSM
     # Planetiler downloads Natural Earth automatically with --download
-    OSM_FILE="planet-latest.osm.pbf"
+    OSM_FILE="data/planet-latest.osm.pbf"
 
     if [ ! -f "$OSM_FILE" ]; then
         log_info "Downloading Planet OSM data (~70GB)..."
@@ -132,8 +128,6 @@ generate_world() {
     else
         log_info "Using existing OSM data: $OSM_FILE"
     fi
-
-    cd ..
 
     # Run Planetiler for world
     log_info "Running Planetiler for world..."
