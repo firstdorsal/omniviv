@@ -203,7 +203,7 @@ The API uses GTFS (General Transit Feed Specification) for departure and vehicle
 
 - **Static GTFS**: A ZIP file containing stops, routes, trips, stop_times, calendars. Downloaded once and cached in `api/data/gtfs/`. Re-downloaded every 6 hours (configurable via `static_refresh_hours`). Shorter intervals ensure timely pickup of service changes like strikes; HTTP conditional requests avoid unnecessary data transfer.
 - **GTFS-RT**: A protobuf feed with real-time trip updates (delays, cancellations). Polled every 15 seconds (configurable via `realtime_interval_secs`).
-- **IFOPT mapping**: GTFS numeric stop IDs are mapped to IFOPT identifiers (from OSM) using spatial proximity matching.
+- **OSM-to-GTFS mapping**: OSM stop objects (platforms, stop positions) are mapped to GTFS stops using an OSM ID-based, route-aware algorithm. The results are stored in the `osm_gtfs_stop_mapping` table (primary mapping table, keyed by `osm_id` + `osm_type`). The matching algorithm works at the route level: for each OSM route relation, the corresponding GTFS route is identified by line number (`ref`), and then each OSM stop on that route is matched to the nearest GTFS stop serving the same GTFS route within a 500 m radius. This route-based matching avoids false positives from spatially close stops that belong to different lines. The legacy `ifopt_gtfs_mapping` table (proximity-based IFOPT matching) is retained during the transition period.
 
 ### Configuration (`api/config.yaml`)
 

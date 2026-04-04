@@ -121,6 +121,14 @@ export interface CandidateStop {
   stop_name?: string | null;
 }
 
+export interface CoordinateDeparturesRequest {
+  /** @format double */
+  lat: number;
+  /** @format double */
+  lon: number;
+  reference_time?: string | null;
+}
+
 /** A stop event (departure or arrival) */
 export interface Departure {
   /**
@@ -129,6 +137,8 @@ export interface Departure {
    * but NOT as active vehicles on the map.
    */
   cancelled?: boolean;
+  /** Route color from GTFS or OSM (hex, e.g. "#ee1d23") */
+  color?: string | null;
   /** @format int32 */
   delay_minutes?: number | null;
   /** For departures: destination; for arrivals: origin */
@@ -138,27 +148,23 @@ export interface Departure {
   estimated_time?: string | null;
   /** Type of stop event */
   event_type: EventType;
+  /**
+   * GTFS route_type: 0=tram, 1=subway, 2=rail, 3=bus, 4=ferry, etc.
+   * @format int32
+   */
+  gtfs_route_type?: number | null;
+  /** Whether this is the first stop of the trip */
+  is_first_stop: boolean;
+  /** Whether this is the last stop of the trip */
+  is_last_stop: boolean;
   line_number: string;
+  /** Operator/agency name (e.g. "DB Regio AG Bayern", "Go-Ahead") */
+  operator?: string | null;
   planned_time: string;
   platform?: string | null;
   stop_ifopt: string;
   /** Unique trip identifier (GTFS trip_id) - consistent across all stops for a journey */
   trip_id?: string | null;
-  /** GTFS route_type: 0=tram, 1=subway, 2=rail, 3=bus, 4=ferry, etc. */
-  gtfs_route_type?: number;
-  /** Route color from GTFS or OSM (hex, e.g. "#ee1d23") */
-  color?: string | null;
-  /** Operator/agency name (e.g. "DB Regio AG Bayern", "Go-Ahead") */
-  operator?: string | null;
-  /** Whether this is the first stop of the trip */
-  is_first_stop: boolean;
-  /** Whether this is the last stop of the trip */
-  is_last_stop: boolean;
-  }
-
-
-export interface DepartureListResponse {
-  departures: Departure[];
 }
 
 export interface ErrorResponse {
@@ -243,11 +249,6 @@ export interface IssueListResponse {
 export interface MappingEntry {
   /** Nearby GTFS candidate stops (only if include_candidates is true) */
   candidates: CandidateStop[];
-  /**
-   * Combined matching score (if auto-mapped)
-   * @format double
-   */
-  combined_score?: number | null;
   /** Current mapped GTFS stop ID (if mapped) */
   gtfs_stop_id?: string | null;
   /**
@@ -262,8 +263,8 @@ export interface MappingEntry {
   gtfs_stop_lon?: number | null;
   /** Current mapped GTFS stop name (if mapped) */
   gtfs_stop_name?: string | null;
-  /** IFOPT identifier */
-  ifopt: string;
+  /** IFOPT identifier (if available) */
+  ifopt?: string | null;
   /**
    * Latitude of the OSM stop
    * @format double
@@ -274,8 +275,22 @@ export interface MappingEntry {
    * @format double
    */
   lon: number;
+  /** Match method used (ifopt, geographic, manual) */
+  match_method?: string | null;
+  /**
+   * Matching score (if auto-mapped)
+   * @format double
+   */
+  match_score?: number | null;
   /** Name of the OSM stop (from platforms or stop_positions) */
   name?: string | null;
+  /**
+   * OSM ID of the stop
+   * @format int64
+   */
+  osm_id: number;
+  /** OSM type (platform or stop_position) */
+  osm_type: string;
   /** Current mapping status */
   status: MappingStatus;
 }
@@ -295,9 +310,9 @@ export interface MappingStatusRequest {
    * @min 0
    */
   offset?: number;
-  /** Case-insensitive search on IFOPT name or identifier */
+  /** Case-insensitive search on IFOPT, name, or OSM ID */
   search?: string | null;
-  /** Only return unmapped IFOPTs */
+  /** Only return unmapped OSM stops (those without a mapping in osm_gtfs_stop_mapping) */
   unmapped_only?: boolean;
 }
 
@@ -317,17 +332,22 @@ export interface MappingStatusResponse {
    */
   manual_count: number;
   /**
-   * Number of IFOPTs that have a mapping (manual or auto)
+   * Number of OSM stops that have a mapping (manual or auto) in osm_gtfs_stop_mapping
    * @min 0
    */
   mapped_count: number;
   /**
-   * Total number of OSM stops with IFOPT identifiers
+   * Total number of OSM stops with IFOPT identifiers (subset of total)
    * @min 0
    */
   total_ifopt_count: number;
   /**
-   * Number of IFOPTs without any mapping
+   * Total number of OSM stops (platforms + stop_positions)
+   * @min 0
+   */
+  total_osm_stop_count: number;
+  /**
+   * Number of OSM stops without any mapping
    * @min 0
    */
   unmapped_count: number;
@@ -348,6 +368,12 @@ export interface MatchCandidate {
   is_definitive: boolean;
   /** Human-readable shared route names (e.g. "Tram 1", "Bus 5") */
   shared_routes: string[];
+}
+
+export interface OsmIdDeparturesRequest {
+  /** @format int64 */
+  osm_id: number;
+  reference_time?: string | null;
 }
 
 /** An OSM data quality issue detected during sync */
@@ -401,8 +427,13 @@ export interface OsmIssue {
 }
 
 export interface RemoveMappingRequest {
-  /** The IFOPT identifier to remove the manual mapping for */
-  ifopt: string;
+  /** The IFOPT identifier to remove the manual mapping for (backwards compatibility) */
+  ifopt?: string | null;
+  /**
+   * The OSM ID to remove the manual mapping for (primary identifier)
+   * @format int64
+   */
+  osm_id?: number | null;
 }
 
 export interface RemoveMappingResponse {
@@ -414,8 +445,6 @@ export interface RemoveMappingResponse {
 }
 
 export interface Route {
-  /** @format int64 */
-  area_id?: number | null;
   color?: string | null;
   name?: string | null;
   network?: string | null;
@@ -425,6 +454,18 @@ export interface Route {
   osm_type: string;
   ref?: string | null;
   route_type: string;
+}
+
+export interface RouteColorEntry {
+  color?: string | null;
+  network?: string | null;
+  operator?: string | null;
+  ref?: string | null;
+  route_type: string;
+}
+
+export interface RouteColorsResponse {
+  entries: RouteColorEntry[];
 }
 
 export type RouteDetail = Route & {
@@ -457,8 +498,13 @@ export interface RouteStop {
 export interface SetMappingRequest {
   /** The GTFS stop ID to map to */
   gtfs_stop_id: string;
-  /** The IFOPT identifier of the OSM stop */
-  ifopt: string;
+  /** The IFOPT identifier of the OSM stop (for backwards compatibility) */
+  ifopt?: string | null;
+  /**
+   * The OSM ID of the stop (primary identifier for the new mapping system)
+   * @format int64
+   */
+  osm_id?: number | null;
 }
 
 export interface SetMappingResponse {
@@ -467,26 +513,35 @@ export interface SetMappingResponse {
 }
 
 export interface Station {
-  /** @format int64 */
-  area_id?: number | null;
   /** @format double */
   lat: number;
   /** @format double */
   lon: number;
-  /** Minimum zoom level at which this station should be shown */
-  min_zoom?: number;
+  /**
+   * Minimum zoom level at which this station should be shown (6=rail, 10=tram, 13=bus)
+   * @format int32
+   */
+  min_zoom: number;
   name?: string | null;
   /** @format int64 */
   osm_id: number;
   osm_type: string;
+  platform_ways: StationPlatformWay[];
   platforms: StationPlatform[];
-  platform_ways?: StationPlatformWay[];
   ref_ifopt?: string | null;
   stop_positions: StationStopPosition[];
+  /** Transport modes serving this station (e.g. ["tram", "bus"]) */
+  transport_modes?: string[];
 }
 
-/** Platform way info (physical platform outline centroid) */
-export interface StationPlatformWay {
+export interface StationListResponse {
+  stations: Station[];
+}
+
+/** Platform info nested in station response */
+export interface StationPlatform {
+  /** GTFS stop IDs matched to this platform via spatial matching */
+  gtfs_stop_ids: string[];
   /** @format double */
   lat: number;
   /** @format double */
@@ -498,14 +553,8 @@ export interface StationPlatformWay {
   ref_ifopt?: string | null;
 }
 
-export interface StationListResponse {
-  stations: Station[];
-}
-
-/** Platform info nested in station response */
-export interface StationPlatform {
-  /** GTFS stop IDs matched to this platform via spatial matching */
-  gtfs_stop_ids: string[];
+/** Platform way info (physical platform outline centroid) nested in station response */
+export interface StationPlatformWay {
   /** @format double */
   lat: number;
   /** @format double */
@@ -552,8 +601,15 @@ export interface StopDeparturesResponse {
 }
 
 export interface Vehicle {
+  /** Route color from GTFS (hex, e.g. "#ee1d23") */
+  color?: string | null;
   /** Final destination of this vehicle */
   destination: string;
+  /**
+   * GTFS route_type: 0=tram, 1=subway, 2=rail, 3=bus, 4=ferry, etc.
+   * @format int32
+   */
+  gtfs_route_type?: number | null;
   /** Line number (e.g., "1", "2", "3") */
   line_number: string;
   /**
@@ -563,6 +619,8 @@ export interface Vehicle {
    * transitions and vehicle reuse rendering.
    */
   next_trip_id?: string | null;
+  /** Operator/agency name (e.g. "DB Regio AG Bayern", "Go-Ahead") */
+  operator?: string | null;
   /** Origin of this vehicle's journey */
   origin?: string | null;
   /** All stops this vehicle will visit, in order */
@@ -572,7 +630,7 @@ export interface Vehicle {
 }
 
 export interface VehicleStop {
-  /** Arrival time at this stop (ISO 8601) */
+  /** Arrival time at this stop */
   arrival_time?: string | null;
   /** Estimated arrival time (real-time, if available) */
   arrival_time_estimated?: string | null;
@@ -581,7 +639,7 @@ export interface VehicleStop {
    * @format int32
    */
   delay_minutes?: number | null;
-  /** Departure time from this stop (ISO 8601) */
+  /** Departure time from this stop */
   departure_time?: string | null;
   /** Estimated departure time (real-time, if available) */
   departure_time_estimated?: string | null;
@@ -624,6 +682,32 @@ export interface VehiclesByRouteResponse {
   /** @format int64 */
   route_id: number;
   vehicles: Vehicle[];
+}
+
+export interface VisibleRoute {
+  color?: string | null;
+  /** @format int32 */
+  min_zoom: number;
+  name?: string | null;
+  /** @format int64 */
+  osm_id: number;
+  ref?: string | null;
+  route_type: string;
+  segments: number[][][];
+}
+
+export interface VisibleRoutesRequest {
+  /** Bounding box: [west, south, east, north] in WGS84 */
+  bbox: number[];
+  /**
+   * Current zoom level — only routes with min_zoom <= zoom are returned
+   * @format int32
+   */
+  zoom: number;
+}
+
+export interface VisibleRoutesResponse {
+  routes: VisibleRoute[];
 }
 
 export type QueryParamsType = Record<string | number, any>;
@@ -939,17 +1023,23 @@ export class Api<
       }),
 
     /**
-     * No description
-     *
-     * @tags departures
-     * @name ListDepartures
-     * @summary List all departures across all stops
-     * @request GET:/api/departures
-     */
-    listDepartures: (params: RequestParams = {}) =>
-      this.request<DepartureListResponse, ErrorResponse>({
-        path: `/api/departures`,
-        method: "GET",
+ * No description
+ *
+ * @tags departures
+ * @name GetDeparturesByCoordinates
+ * @summary Find the nearest GTFS stop by coordinates and return its departures.
+Used for stops without ref:IFOPT in OSM (e.g. München U-Bahn).
+ * @request POST:/api/departures/by-coordinates
+ */
+    getDeparturesByCoordinates: (
+      data: CoordinateDeparturesRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<GtfsStopDeparturesResponse, any>({
+        path: `/api/departures/by-coordinates`,
+        method: "POST",
+        body: data,
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -976,11 +1066,32 @@ export class Api<
       }),
 
     /**
-     * No description
+     * @description Primary path: query `osm_gtfs_stop_mapping` directly for the GTFS stop ID. This is the most efficient path and works for all mapped stops regardless of whether they have IFOPT tags. Fallback: if no mapping exists, look up coordinates from the OSM element and use coordinate-based GTFS stop lookup.
+     *
+     * @tags departures
+     * @name GetDeparturesByOsmId
+     * @summary Find departures for an OSM stop position/platform by its osm_id.
+     * @request POST:/api/departures/by-osm-id
+     */
+    getDeparturesByOsmId: (
+      data: OsmIdDeparturesRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<GtfsStopDeparturesResponse, any>({
+        path: `/api/departures/by-osm-id`,
+        method: "POST",
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Accepts both IFOPT strings (e.g. "de:09761:101:31:A3") and OSM-based identifiers (e.g. "osm:12345678") in the `stop_ifopt` field. For OSM IDs, queries `osm_gtfs_stop_mapping` by `osm_id`. For IFOPT strings, queries `osm_gtfs_stop_mapping` by `ref_ifopt`, falling back to the legacy `ifopt_gtfs_mapping` table.
      *
      * @tags departures
      * @name GetDeparturesByStop
-     * @summary Get departures for a specific stop by IFOPT ID
+     * @summary Get departures for a specific stop by IFOPT ID or OSM stop ID.
      * @request POST:/api/departures/by-stop
      */
     getDeparturesByStop: (
@@ -1088,11 +1199,11 @@ export class Api<
       }),
 
     /**
-     * @description Only removes manual (user-curated) mappings. The IFOPT will be re-matched automatically on the next auto-rebuild cycle.
+     * @description Only removes manual (user-curated) mappings. The stop will be re-matched automatically on the next auto-rebuild cycle. At least one of osm_id or ifopt must be provided. Removes from both osm_gtfs_stop_mapping and the legacy ifopt_gtfs_mapping table.
      *
      * @tags mapping
      * @name RemoveMapping
-     * @summary Remove a manual IFOPT-to-GTFS stop mapping
+     * @summary Remove a manual OSM-to-GTFS stop mapping
      * @request POST:/api/mapping/remove
      */
     removeMapping: (data: RemoveMappingRequest, params: RequestParams = {}) =>
@@ -1106,11 +1217,11 @@ export class Api<
       }),
 
     /**
-     * @description Creates or replaces a mapping for the given IFOPT with a user-curated GTFS stop assignment. Manual mappings are preserved across auto-rebuild cycles.
+     * @description Creates or replaces a mapping for the given OSM stop (by osm_id or IFOPT) with a user-curated GTFS stop assignment. Manual mappings are preserved across auto-rebuild cycles. At least one of osm_id or ifopt must be provided. Dual-writes to both osm_gtfs_stop_mapping and the legacy ifopt_gtfs_mapping table.
      *
      * @tags mapping
      * @name SetMapping
-     * @summary Set a manual IFOPT-to-GTFS stop mapping
+     * @summary Set a manual OSM-to-GTFS stop mapping
      * @request POST:/api/mapping/set
      */
     setMapping: (data: SetMappingRequest, params: RequestParams = {}) =>
@@ -1124,7 +1235,7 @@ export class Api<
       }),
 
     /**
-     * @description Returns a summary of IFOPT-to-GTFS mapping statistics and a paginated list of mapping entries. Each entry includes the OSM stop info, current mapping status, and optionally nearby GTFS candidate stops.
+     * @description Returns a summary of OSM-to-GTFS mapping statistics and a paginated list of mapping entries. Each entry includes the OSM stop info, current mapping status, and optionally nearby GTFS candidate stops. Queries from `osm_gtfs_stop_mapping` as the primary source.
      *
      * @tags mapping
      * @name MappingStatus
@@ -1146,16 +1257,11 @@ export class Api<
      *
      * @tags routes
      * @name ListRoutes
-     * @summary List all routes, optionally filtered by area or type
+     * @summary List all routes, optionally filtered by type
      * @request GET:/api/routes
      */
     listRoutes: (
       query?: {
-        /**
-         * Filter by area ID
-         * @format int64
-         */
-        area_id?: number | null;
         /** Filter by route type (e.g., "tram", "bus") */
         route_type?: string | null;
       },
@@ -1165,6 +1271,43 @@ export class Api<
         path: `/api/routes`,
         method: "GET",
         query: query,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags routes
+     * @name GetRouteColors
+     * @summary Get distinct route line colors and types (lightweight, for color lookups)
+     * @request GET:/api/routes/colors
+     */
+    getRouteColors: (params: RequestParams = {}) =>
+      this.request<RouteColorsResponse, any>({
+        path: `/api/routes/colors`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags routes
+     * @name GetVisibleRoutes
+     * @summary Get routes with geometry visible in the given viewport and zoom level
+     * @request POST:/api/routes/visible
+     */
+    getVisibleRoutes: (
+      data: VisibleRoutesRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<VisibleRoutesResponse, ErrorResponse>({
+        path: `/api/routes/visible`,
+        method: "POST",
+        body: data,
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -1206,17 +1349,12 @@ export class Api<
      *
      * @tags stations
      * @name ListStations
-     * @summary List all stations that have platforms linked to them, optionally filtered by area
+     * @summary List all stations that have platforms linked to them, optionally filtered by bounding box
      * @request GET:/api/stations
      */
     listStations: (
       query?: {
-        /**
-         * Filter by area ID
-         * @format int64
-         */
-        area_id?: number | null;
-        /** Bounding box: west,south,east,north */
+        /** Bounding box: west,south,east,north (comma-separated) */
         bbox?: string | null;
       },
       params: RequestParams = {},
@@ -1230,6 +1368,8 @@ export class Api<
       }),
 
     /**
+     * No description
+     *
      * @tags stations
      * @name GetStation
      * @summary Get a single station by its OSM ID
