@@ -11,7 +11,15 @@ import { test, expect } from "@playwright/test";
  */
 
 const API = "http://omniviv-api.localhost";
-const TIME = new Date().toISOString();
+// Pin to next weekday at 08:00 to avoid schedule gaps (nights, weekends, holidays)
+function getNextWeekdayMorning(): string {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+    d.setHours(8, 0, 0, 0);
+    return d.toISOString();
+}
+const TIME = getNextWeekdayMorning();
 
 // All 10 Königsplatz platforms
 const KOENIGSPLATZ = [
@@ -151,24 +159,24 @@ test.describe("München U-Bahn departures (via coordinates)", () => {
             expect(lineDeps.length, `${stop.name}: no ${stop.line} (type=${stop.routeType}) departures`).toBeGreaterThan(0);
         });
 
-        test(`${stop.name}: browser renders badge with OSM color ${stop.color}`, async ({ page }) => {
-            await page.goto("/");
-            await page.waitForTimeout(2000);
+        test(`${stop.name}: API returns correct color ${stop.color}`, async ({ request }) => {
+            const res = await request.post(`${API}/api/departures/by-coordinates`, {
+                data: { lat: stop.lat, lon: stop.lon, reference_time: TIME },
+            });
+            expect(res.ok(), `API error for ${stop.name}`).toBeTruthy();
 
-            const result = await page.evaluate(async (params) => {
-                const badge = document.createElement("div");
-                badge.style.backgroundColor = params.color;
-                document.body.appendChild(badge);
-                const computed = window.getComputedStyle(badge).backgroundColor;
-                badge.remove();
-                return { renderedBg: computed };
-            }, { color: stop.color });
+            const data = await res.json();
+            const lineDeps = (data.departures ?? []).filter(
+                (d: { line_number: string; gtfs_route_type?: number }) =>
+                    d.line_number === stop.line && d.gtfs_route_type === stop.routeType
+            );
+            expect(lineDeps.length, `${stop.name}: no ${stop.line} departures to check color`).toBeGreaterThan(0);
 
-            const hex = stop.color.replace("#", "");
-            const r = parseInt(hex.substring(0, 2), 16);
-            const g = parseInt(hex.substring(2, 4), 16);
-            const b = parseInt(hex.substring(4, 6), 16);
-            expect(result.renderedBg).toBe(`rgb(${r}, ${g}, ${b})`);
+            for (const departure of lineDeps) {
+                if (departure.color) {
+                    expect(departure.color.toLowerCase()).toBe(stop.color.toLowerCase());
+                }
+            }
         });
     }
 });

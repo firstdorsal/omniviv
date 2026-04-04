@@ -38,24 +38,34 @@ function getNextWeekday(): { dateStr: string; isoStr: string } {
 
 /** Fetch EFA departures for a single platform IFOPT */
 async function fetchEfaDepartures(ifopt: string, dateStr: string): Promise<{ line: string; dest: string }[]> {
-    const res = await fetch(`${EFA_URL}?mode=direct&name_dm=${encodeURIComponent(ifopt)}&type_dm=stop&depType=stopEvents&outputFormat=rapidJSON&limit=50&includedMeans=4&useRealtime=1&itdDate=${dateStr}&itdTime=0800`);
-    if (!res.ok) return [];
-    const data = await res.json();
-    return (data.stopEvents ?? []).map((ev: any) => ({
-        line: ev.transportation?.number ?? "?",
-        dest: ev.transportation?.destination?.name ?? "?",
-    }));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+        const res = await fetch(`${EFA_URL}?mode=direct&name_dm=${encodeURIComponent(ifopt)}&type_dm=stop&depType=stopEvents&outputFormat=rapidJSON&limit=50&includedMeans=4&useRealtime=1&itdDate=${dateStr}&itdTime=0800`, { signal: controller.signal });
+        if (!res.ok) return [];
+        const data = await res.json();
+        return (data.stopEvents ?? []).map((ev: any) => ({
+            line: ev.transportation?.number ?? "?",
+            dest: ev.transportation?.destination?.name ?? "?",
+        }));
+    } catch {
+        return [];
+    } finally {
+        clearTimeout(timeout);
+    }
 }
 
 test.describe("Königsplatz departures — EFA per-platform validation", () => {
     test("each platform shows the same tram lines as EFA", { timeout: 120000 }, async ({ request }) => {
         const { dateStr, isoStr } = getNextWeekday();
         const errors: string[] = [];
+        let platformsChecked = 0;
 
         for (const [name, ifopt] of Object.entries(PLATFORMS)) {
             const efaDeps = await fetchEfaDepartures(ifopt, dateStr);
             const efaLines = [...new Set(efaDeps.map(d => d.line))].sort();
             if (efaLines.length === 0) continue;
+            platformsChecked++;
 
             const res = await request.post(`${API}/api/departures/by-stop`, {
                 data: { stop_ifopt: ifopt, reference_time: isoStr },
@@ -74,6 +84,7 @@ test.describe("Königsplatz departures — EFA per-platform validation", () => {
             }
         }
 
+        expect(platformsChecked, "EFA returned no data for any platform — test is vacuous").toBeGreaterThan(0);
         expect(errors.length, `Line mismatches:\n${errors.join("\n")}`).toBe(0);
     });
 

@@ -16,6 +16,23 @@ import { test, expect, type Page } from "@playwright/test";
 const MOTIS_URL = "http://omniviv-motis.localhost";
 
 /**
+ * Mirror of the frontend's motisCategoryToIconName logic.
+ * Maps place_* categories to city/town/village based on zoom suffix.
+ */
+function motisCategoryToIconName(category: string | undefined): string | undefined {
+    if (!category) return undefined;
+    if (category.startsWith("place_capital")) return "city";
+    const placeMatch = category.match(/^place_(\d+)$/);
+    if (placeMatch) {
+        const zoom = parseInt(placeMatch[1]);
+        if (zoom <= 6) return "city";
+        if (zoom <= 8) return "town";
+        return "village";
+    }
+    return category.replace(/_\d+$/, "");
+}
+
+/**
  * Known locations with their expected MOTIS categories and icon paths.
  * Each entry is verified against live MOTIS geocode responses.
  */
@@ -48,6 +65,113 @@ const KNOWN_LOCATIONS = [
         expectedCategory: "hairdresser",
         expectedIcon: "/icons/maki/hairdresser.svg",
         description: "Hairdresser (Maki direct match)",
+    },
+    // -- Augsburg-specific locations across diverse categories -----------------
+    {
+        query: "Metzgerei Augsburg",
+        name: "Metzgerei Lutz",
+        expectedCategory: "butcher",
+        expectedIcon: "/icons/temaki/meat.svg",
+        description: "Metzgerei in Augsburg",
+    },
+    {
+        query: "Fatih Moschee",
+        name: "Fatih Moschee",
+        expectedCategory: "muslim",
+        expectedIcon: "/icons/maki/religious-muslim.svg",
+        description: "Moschee in Augsburg",
+    },
+    {
+        query: "Zion Kirche Augsburg",
+        name: "Zion Kirche",
+        expectedCategory: "christian",
+        expectedIcon: "/icons/maki/religious-christian.svg",
+        description: "Kirche in Augsburg",
+    },
+    {
+        query: "Rathaus Augsburg",
+        name: "Rathaus",
+        expectedCategory: "town_hall",
+        expectedIcon: "/icons/maki/town-hall.svg",
+        description: "Rathaus Augsburg",
+    },
+    {
+        query: "Anna Apotheke Augsburg",
+        name: "Anna Apotheke",
+        expectedCategory: "pharmacy",
+        expectedIcon: "/icons/maki/pharmacy.svg",
+        description: "Apotheke in Augsburg",
+    },
+    {
+        query: "Dr. Dieter Kraus Zahnarzt",
+        name: "Dr. Dieter Kraus - Zahnarzt",
+        expectedCategory: "dentist",
+        expectedIcon: "/icons/maki/dentist.svg",
+        description: "Zahnarzt in Augsburg",
+    },
+    {
+        query: "Tierarzt Walter Reis",
+        name: "Tierarzt Walter Reis",
+        expectedCategory: "veterinary",
+        expectedIcon: "/icons/maki/veterinary.svg",
+        description: "Tierarzt in Augsburg",
+    },
+    {
+        query: "Neue Goldschmiede Augsburg",
+        name: "Neue Goldschmiede",
+        expectedCategory: "jewellery",
+        expectedIcon: "/icons/maki/jewelry-store.svg",
+        description: "Juwelier in Augsburg",
+    },
+    {
+        query: "Thai massage Augsburg",
+        name: "Ploy Thai Massage",
+        expectedCategory: "massage",
+        expectedIcon: "/icons/temaki/beauty_salon.svg",
+        description: "Massage in Augsburg",
+    },
+    {
+        query: "Pizza Bob Augsburg",
+        name: "Pizza Bob",
+        expectedCategory: "fast_food",
+        expectedIcon: "/icons/maki/fast-food.svg",
+        description: "Schnellimbiss in Augsburg",
+    },
+    {
+        query: "Nefis Bäckerei Augsburg",
+        name: "Nefis Bäckerei",
+        expectedCategory: "bakery",
+        expectedIcon: "/icons/maki/bakery.svg",
+        description: "Bäckerei in Augsburg",
+    },
+    {
+        query: "Friseur Funk Augsburg",
+        name: "Friseur Funk",
+        expectedCategory: "hairdresser",
+        expectedIcon: "/icons/maki/hairdresser.svg",
+        description: "Friseur in Augsburg",
+    },
+    {
+        query: "swa Tankstelle Augsburg",
+        name: "swa Tankstelle",
+        expectedCategory: "fuel",
+        expectedIcon: "/icons/maki/fuel.svg",
+        description: "Tankstelle in Augsburg",
+    },
+    {
+        query: "Dönerladen Köksal Usta",
+        name: "Dönerladen Köksal Usta",
+        expectedCategory: "restaurant",
+        expectedIcon: "/icons/maki/restaurant.svg",
+        description: "Dönerladen in Augsburg",
+    },
+    // -- Place type tests (city/town/village from place_* zoom suffix) ---------
+    {
+        query: "Frankfurt",
+        name: "Frankfurt",
+        expectedCategory: "city",
+        expectedIcon: "/icons/maki/city.svg",
+        description: "Stadt Frankfurt am Main (place_6 → city)",
     },
 ];
 
@@ -176,8 +300,8 @@ test.describe("MOTIS geocode categories", () => {
             );
             expect(match, `No result named "${loc.name}" in MOTIS response`).toBeTruthy();
 
-            // Strip size suffix from category
-            const category = match.category?.replace(/_\d+$/, "");
+            // Map category the same way the frontend does (motisCategoryToIconName)
+            const category = motisCategoryToIconName(match.category);
             expect(
                 category,
                 `"${loc.name}" should have category "${loc.expectedCategory}"`,

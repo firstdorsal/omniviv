@@ -36,13 +36,16 @@ test.describe("Platform duplication check at Königsplatz", () => {
         const features = await page.evaluate(() => {
             const map = (window as any).map;
             
-            // Query all relevant layers
+            // Query all relevant layers — both vector tile (primary) and GeoJSON (legacy)
             const layers = [
-                "stops-circle", 
-                "platforms-circle", 
+                // Vector tile layers (primary, from Martin/PostGIS)
                 "stations-circle",
+                "stops-circle",
+                "platforms-vt-circle",
+                // Legacy GeoJSON layers (for mapping UI)
+                "platforms-circle",
                 "stop-positions-marker",
-                "platform-elements-marker"
+                "platform-elements-marker",
             ];
             return map.queryRenderedFeatures({ layers: layers.filter(l => map.getLayer(l)) })
                 .map((f: any) => ({
@@ -54,6 +57,7 @@ test.describe("Platform duplication check at Königsplatz", () => {
         });
 
         console.log(`Found ${features.length} platform features in view.`);
+        expect(features.length, "No features found — map layers may not have loaded").toBeGreaterThan(0);
         if (features.length > 0) {
             console.log("Feature samples:", JSON.stringify(features.slice(0, 10), null, 2));
         }
