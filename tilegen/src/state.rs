@@ -25,22 +25,6 @@ pub async fn needs_regeneration(
     }
 }
 
-/// Record the start of a layer generation.
-pub async fn record_generation_start(
-    pool: &PgPool,
-    layer_name: &str,
-) -> Result<(), TilegenError> {
-    sqlx::query(
-        "INSERT INTO tile_generation_state (layer_name, status, last_generated_at)
-         VALUES ($1, 'generating', NOW())
-         ON CONFLICT (layer_name) DO UPDATE SET status = 'generating'"
-    )
-    .bind(layer_name)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 /// Record successful completion of a layer generation.
 pub async fn record_generation_success(
     pool: &PgPool,

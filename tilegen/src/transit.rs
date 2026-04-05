@@ -1,158 +1,136 @@
-use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use pmtiles::{Compression, PmTilesWriter, TileCoord, TileType};
-use sqlx::PgPool;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
-use crate::config::TransitGroupConfig;
+use crate::config::TransitLayerConfig;
 use crate::error::TilegenError;
-use crate::state;
 
-/// Generate a composite PMTiles file for a transit layer group.
+/// Generate transit tiles for a single layer using martin-cp.
 ///
-/// For each tile coordinate in the configured zoom/bbox range, calls every
-/// layer's PostGIS function via sqlx, concatenates the MVT bytes, and streams
-/// tiles directly to the PMTiles writer (no in-memory buffering of all tiles).
-///
-/// MVT concatenation: each PostGIS tile function returns a complete MVT with
-/// its own named source-layer. Multiple MVT byte sequences can be concatenated
-/// because the protobuf wire format is additive — repeated fields from separate
-/// messages merge correctly when decoded together.
-pub async fn generate_transit_group(
-    pool: &PgPool,
-    group_name: &str,
-    group_config: &TransitGroupConfig,
+/// martin-cp connects to PostGIS, calls the configured SQL function,
+/// and writes the result as an MBTiles file with uncompressed (identity)
+/// encoding so Martin can serve raw MVT to MapLibre.
+/// Result of a successful transit layer generation.
+pub struct TransitLayerResult {
+    /// Path to the generated MBTiles file
+    pub path: PathBuf,
+    /// Generation duration in milliseconds
+    pub duration_ms: i64,
+    /// File size in bytes
+    pub file_size_bytes: i64,
+}
+
+pub async fn generate_transit_layer(
+    layer: &TransitLayerConfig,
+    database_url: &str,
     output_dir: &Path,
-) -> Result<PathBuf, TilegenError> {
+) -> Result<TransitLayerResult, TilegenError> {
     let start = Instant::now();
-    let output_file = output_dir.join(format!("{group_name}.pmtiles"));
-    let tmp_file = output_dir.join(format!("{group_name}.tmp.pmtiles"));
+    let output_file = output_dir.join(format!("{}.mbtiles", layer.name));
+    let tmp_file = output_dir.join(format!("{}.tmp.mbtiles", layer.name));
 
-    tracing::info!(
-        group = group_name,
-        zoom = %format!("{}-{}", group_config.min_zoom, group_config.max_zoom),
-        layers = group_config.layers.len(),
-        "Generating transit tiles"
-    );
-
-    state::record_generation_start(pool, group_name).await?;
-
-    let [west, south, east, north] = group_config.bbox;
-    let mut tile_count: i64 = 0;
-
-    // Stream tiles directly to PMTiles writer — no in-memory buffering
-    let file = std::fs::File::create(&tmp_file)?;
-    let writer = BufWriter::new(file);
-    let mut pm_writer = PmTilesWriter::new(TileType::Mvt)
-        .tile_compression(Compression::Gzip)
-        .min_zoom(group_config.min_zoom)
-        .max_zoom(group_config.max_zoom)
-        .bounds(west, south, east, north)
-        .create(writer)
-        .map_err(|e| TilegenError::PmtilesWrite(format!("Failed to create PMTiles writer: {e}")))?;
-
-    for zoom in group_config.min_zoom..=group_config.max_zoom {
-        let (x_min, x_max, y_min, y_max) = bbox_to_tile_range(west, south, east, north, zoom);
-
-        tracing::debug!(
-            group = group_name,
-            zoom,
-            tiles = (x_max - x_min + 1) * (y_max - y_min + 1),
-            "Processing zoom level"
-        );
-
-        for x in x_min..=x_max {
-            for y in y_min..=y_max {
-                let mut combined_mvt = Vec::new();
-
-                for layer in &group_config.layers {
-                    // Function names are validated as PostgreSQL identifiers (^[a-z_][a-z0-9_]*$)
-                    // in config.rs, making this format!() safe from SQL injection.
-                    let mvt_bytes: Option<Vec<u8>> = sqlx::query_scalar(&format!(
-                        "SELECT {}($1, $2, $3)",
-                        layer.function
-                    ))
-                    .bind(zoom as i32)
-                    .bind(x as i32)
-                    .bind(y as i32)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|e| TilegenError::TileGeneration {
-                        layer: format!("{group_name}/{}", layer.name),
-                        message: format!("SQL function {} failed at z={zoom} x={x} y={y}: {e}", layer.function),
-                    })?
-                    .flatten();
-
-                    if let Some(bytes) = mvt_bytes {
-                        if !bytes.is_empty() {
-                            combined_mvt.extend_from_slice(&bytes);
-                        }
-                    }
-                }
-
-                if !combined_mvt.is_empty() {
-                    let coord = TileCoord::new(zoom, x, y)
-                        .map_err(|e| TilegenError::PmtilesWrite(format!("Invalid tile coord z={zoom} x={x} y={y}: {e}")))?;
-                    pm_writer.add_tile(coord, &combined_mvt)
-                        .map_err(|e| TilegenError::PmtilesWrite(format!("Failed to write tile z={zoom} x={x} y={y}: {e}")))?;
-                    tile_count += 1;
-                }
-            }
+    // Remove stale tmp file if exists
+    if let Err(e) = std::fs::remove_file(&tmp_file) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(path = %tmp_file.display(), "Failed to remove stale tmp file: {e}");
         }
-
-        tracing::info!(
-            group = group_name,
-            zoom,
-            tiles_so_far = tile_count,
-            "Zoom level complete"
-        );
     }
 
-    pm_writer.finalize()
-        .map_err(|e| TilegenError::PmtilesWrite(format!("Failed to finalize PMTiles: {e}")))?;
+    let [west, south, east, north] = layer.bbox;
+    let bbox = format!("{west},{south},{east},{north}");
+
+    tracing::info!(
+        layer = %layer.name,
+        function = %layer.function,
+        zoom = %format!("{}-{}", layer.min_zoom, layer.max_zoom),
+        bbox = %bbox,
+        "Generating transit tiles via martin-cp"
+    );
+
+    let mut cmd = tokio::process::Command::new("martin-cp");
+    cmd.arg("--output-file").arg(&tmp_file);
+    cmd.arg("--source").arg(&layer.function);
+    cmd.arg("--min-zoom").arg(layer.min_zoom.to_string());
+    cmd.arg("--max-zoom").arg(layer.max_zoom.to_string());
+    cmd.arg("--bbox").arg(&bbox);
+    // Store tiles uncompressed so Martin serves raw MVT that MapLibre can parse directly.
+    // Martin doesn't add Content-Encoding headers for MBTiles-stored compressed tiles.
+    cmd.arg("--encoding").arg("identity");
+    // Pass database URL via environment variable (not CLI arg) to avoid
+    // exposing credentials in /proc/*/cmdline.
+    cmd.env("DATABASE_URL", database_url);
+
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| TilegenError::TileGeneration {
+        layer: layer.name.clone(),
+        message: format!("Failed to spawn martin-cp: {e}"),
+    })?;
+
+    // Stream stderr to tracing
+    let stderr_handle = if let Some(stderr) = child.stderr.take() {
+        let reader = BufReader::new(stderr);
+        let mut lines = reader.lines();
+        let layer_name = layer.name.clone();
+        Some(tokio::spawn(async move {
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(target: "martin-cp", layer = %layer_name, "{}", line);
+            }
+        }))
+    } else {
+        None
+    };
+
+    let status = child.wait().await.map_err(|e| TilegenError::TileGeneration {
+        layer: layer.name.clone(),
+        message: format!("Failed to wait for martin-cp: {e}"),
+    })?;
+
+    if let Some(handle) = stderr_handle {
+        if let Err(e) = handle.await {
+            tracing::warn!(layer = %layer.name, "stderr reader task failed: {e}");
+        }
+    }
+
+    if !status.success() {
+        if let Err(e) = std::fs::remove_file(&tmp_file) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(path = %tmp_file.display(), "Failed to clean up tmp file: {e}");
+            }
+        }
+        return Err(TilegenError::TileGeneration {
+            layer: layer.name.clone(),
+            message: format!("martin-cp exited with code {:?}", status.code()),
+        });
+    }
+
+    if !tmp_file.exists() {
+        return Err(TilegenError::TileGeneration {
+            layer: layer.name.clone(),
+            message: "Output file not found after martin-cp run".to_string(),
+        });
+    }
 
     // Atomic rename
     std::fs::rename(&tmp_file, &output_file)?;
 
     let file_size = std::fs::metadata(&output_file)
-        .map(|m| m.len() as i64)
+        .map(|m| m.len())
         .unwrap_or(0);
     let duration = start.elapsed();
 
-    state::record_generation_success(
-        pool,
-        group_name,
-        duration.as_millis() as i64,
-        tile_count,
-        file_size,
-    )
-    .await?;
-
     tracing::info!(
-        group = group_name,
-        tiles = tile_count,
-        size_mb = file_size / 1_048_576,
+        layer = %layer.name,
+        size_kb = file_size / 1024,
         duration_secs = duration.as_secs(),
         "Transit tiles generated"
     );
 
-    Ok(output_file)
-}
-
-/// Convert a WGS84 bounding box to tile coordinate ranges at a given zoom level.
-fn bbox_to_tile_range(west: f64, south: f64, east: f64, north: f64, zoom: u8) -> (u32, u32, u32, u32) {
-    let n = 2u32.pow(zoom as u32);
-
-    let x_min = ((west + 180.0) / 360.0 * n as f64).floor() as u32;
-    let x_max = ((east + 180.0) / 360.0 * n as f64).floor().min((n - 1) as f64) as u32;
-
-    let y_min = ((1.0 - (north.to_radians().tan() + 1.0 / north.to_radians().cos()).ln() / std::f64::consts::PI) / 2.0 * n as f64)
-        .floor()
-        .max(0.0) as u32;
-    let y_max = ((1.0 - (south.to_radians().tan() + 1.0 / south.to_radians().cos()).ln() / std::f64::consts::PI) / 2.0 * n as f64)
-        .floor()
-        .min((n - 1) as f64) as u32;
-
-    (x_min, x_max, y_min, y_max)
+    Ok(TransitLayerResult {
+        path: output_file,
+        duration_ms: duration.as_millis() as i64,
+        file_size_bytes: file_size as i64,
+    })
 }

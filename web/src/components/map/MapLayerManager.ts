@@ -32,7 +32,7 @@ export class MapLayerManager {
      */
     setupLayers(): void {
         // Guard against duplicate setup (e.g. style reload, hot module reload)
-        if (this.map.getSource("transit-overview")) return;
+        if (this.map.getSource("transit-stations")) return;
 
         // Set up on-demand handler for subclass names not in the Maki bundle
         this.setupPoiIconHandler();
@@ -52,24 +52,23 @@ export class MapLayerManager {
             },
         });
 
-        // Transit overview tiles (stations + routes, z0-15)
-        this.map.addSource("transit-overview", {
+        // Routes — pre-generated MBTiles served by Martin
+        this.map.addSource("transit-routes", {
             type: "vector",
-            tiles: [`${this.martinUrl}/overview/{z}/{x}/{y}`],
-            maxzoom: 15,
+            tiles: [`${this.martinUrl}/transit_routes/{z}/{x}/{y}`],
+            maxzoom: 15,  // MBTiles generated up to z15; MapLibre overzooms at z16+
         });
 
-        // Transit detail tiles (steige + outlines + debug layers, z15-17)
-        this.map.addSource("transit-detail", {
+        // Stations + steige + platforms + debug layers — pre-generated composite MBTiles
+        this.map.addSource("transit-stations", {
             type: "vector",
-            tiles: [`${this.martinUrl}/detail/{z}/{x}/{y}`],
-            minzoom: 15,
-            maxzoom: 17,
+            tiles: [`${this.martinUrl}/transit_stations/{z}/{x}/{y}`],
+            maxzoom: 15,
         });
         this.map.addLayer({
             id: "routes-line",
             type: "line",
-            source: "transit-overview",
+            source: "transit-routes",
             "source-layer": "transit_routes",
             paint: {
                 "line-color": ["coalesce", ["get", "color"], "#888888"],
@@ -78,49 +77,6 @@ export class MapLayerManager {
             },
             layout: { "line-cap": "round", "line-join": "round" },
         }, "3d-buildings");
-
-        // Stop positions (from vector tiles, z15+) — hidden by default, toggled via "Haltepositionen"
-        this.map.addLayer({
-            id: "stops-circle", type: "circle",
-            source: "transit-detail", "source-layer": "stops",
-            minzoom: 15,
-            maxzoom: 24,
-            paint: { "circle-radius": 5, "circle-color": "#3b82f6", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" },
-            layout: { visibility: "none" },
-        });
-        this.map.addLayer({
-            id: "stops-label", type: "symbol",
-            source: "transit-detail", "source-layer": "stops",
-            minzoom: 16,
-            maxzoom: 24,
-            layout: { "text-field": ["get", "display_name"], "text-font": ["Open Sans Regular"], "text-size": 10, "text-offset": [0, 0.9], "text-anchor": "top", visibility: "none" },
-            paint: { "text-color": "#333", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
-        });
-
-        // Platforms from vector tiles (z15+) — orange circles, hidden by default, toggled via "Steige"
-        this.map.addLayer({
-            id: "platforms-vt-circle", type: "circle",
-            source: "transit-detail", "source-layer": "platforms",
-            minzoom: 15,
-            maxzoom: 24,
-            paint: { "circle-radius": 5, "circle-color": "#f97316", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" },
-            layout: { visibility: "none" },
-        });
-        this.map.addLayer({
-            id: "platforms-vt-label", type: "symbol",
-            source: "transit-detail", "source-layer": "platforms",
-            minzoom: 16,
-            maxzoom: 24,
-            layout: {
-                "text-field": ["get", "display_name"],
-                "text-font": ["Open Sans Regular"],
-                "text-size": 10,
-                "text-offset": [0, 0.9],
-                "text-anchor": "top",
-                visibility: "none",
-            },
-            paint: { "text-color": "#c2410c", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
-        });
 
         // Legacy GeoJSON sources kept for mapping visualization and click handlers
         this.map.addSource("platform-connections", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
@@ -155,10 +111,10 @@ export class MapLayerManager {
         });
 
         // Station connections (lines from stops to stations, from vector tiles, z15+)
-        // Added BEFORE labels so text remains on top. Hidden by default, toggled via "Haltepositionen".
+        // Added BEFORE stations so connection lines render underneath station dots.
         this.map.addLayer({
             id: "station-connections-vector-line", type: "line",
-            source: "transit-detail", "source-layer": "connections",
+            source: "transit-stations", "source-layer": "connections",
             minzoom: 15,
             maxzoom: 24,
             paint: {
@@ -168,19 +124,19 @@ export class MapLayerManager {
                 "line-dasharray": [2, 2]
             },
             layout: { visibility: "none" },
-        }, "stops-circle");
+        });
 
         // Stations — from vector tiles, filtered by min_zoom property
         this.map.addLayer({
             id: "stations-circle", type: "circle",
-            source: "transit-overview", "source-layer": "stations",
+            source: "transit-stations", "source-layer": "stations",
             maxzoom: 24,
             filter: ["<=", ["get", "min_zoom"], ["zoom"]],
             paint: { "circle-radius": 6, "circle-color": "#525252", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" },
         });
         this.map.addLayer({
             id: "stations-label", type: "symbol",
-            source: "transit-overview", "source-layer": "stations",
+            source: "transit-stations", "source-layer": "stations",
             minzoom: 8,
             maxzoom: 24,
             filter: ["<=", ["get", "min_zoom"], ["zoom"]],
@@ -192,7 +148,7 @@ export class MapLayerManager {
         // Toggled by the "Steige" sub-toggle in the Ebenen panel. Hidden by default.
         this.map.addLayer({
             id: "steige-circle", type: "circle",
-            source: "transit-detail", "source-layer": "steige",
+            source: "transit-stations", "source-layer": "steige",
             minzoom: 15,
             maxzoom: 24,
             paint: { "circle-radius": 5, "circle-color": "#525252", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" },
@@ -200,7 +156,7 @@ export class MapLayerManager {
         });
         this.map.addLayer({
             id: "steige-label", type: "symbol",
-            source: "transit-detail", "source-layer": "steige",
+            source: "transit-stations", "source-layer": "steige",
             minzoom: 15,
             maxzoom: 24,
             layout: {
@@ -219,7 +175,7 @@ export class MapLayerManager {
         // Toggled by the "Umrisse" sub-sub-toggle under Steige. Hidden by default.
         this.map.addLayer({
             id: "platform-outlines-line", type: "line",
-            source: "transit-detail", "source-layer": "platform_outlines",
+            source: "transit-stations", "source-layer": "platform_outlines",
             minzoom: 16,
             maxzoom: 24,
             paint: {
@@ -228,6 +184,66 @@ export class MapLayerManager {
                 "line-opacity": 0.8,
             },
             layout: { visibility: "none", "line-cap": "round", "line-join": "round" },
+        });
+
+        // Debug: blue stop positions (raw OSM stop_positions, z15+)
+        // Added ABOVE user-facing layers so debug markers overlay everything.
+        this.map.addLayer({
+            id: "stops-circle", type: "circle",
+            source: "transit-stations", "source-layer": "stops",
+            minzoom: 15,
+            maxzoom: 24,
+            paint: { "circle-radius": 5, "circle-color": "#3b82f6", "circle-stroke-width": 1, "circle-stroke-color": "#ffffff" },
+            layout: { visibility: "none" },
+        });
+        this.map.addLayer({
+            id: "stops-label", type: "symbol",
+            source: "transit-stations", "source-layer": "stops",
+            minzoom: 16,
+            maxzoom: 24,
+            layout: { "text-field": ["get", "display_name"], "text-font": ["Open Sans Regular"], "text-size": 10, "text-offset": [0, 0.9], "text-anchor": "top", visibility: "none" },
+            paint: { "text-color": "#333", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
+        });
+
+        // Debug: orange platform outlines (line geometries from platform_ways, z16+)
+        // Outlines render underneath debug centroids but above user-facing layers.
+        this.map.addLayer({
+            id: "debug-platform-outlines-line", type: "line",
+            source: "transit-stations", "source-layer": "platform_outlines",
+            minzoom: 16,
+            maxzoom: 24,
+            paint: {
+                "line-color": "#f97316",
+                "line-width": 3,
+                "line-opacity": 0.8,
+            },
+            layout: { visibility: "none", "line-cap": "round", "line-join": "round" },
+        });
+
+        // Debug: orange platform centroids (platform_ways + platform nodes, z15+)
+        // Circles render on top of outlines and all user-facing layers.
+        this.map.addLayer({
+            id: "platforms-vt-circle", type: "circle",
+            source: "transit-stations", "source-layer": "platforms",
+            minzoom: 15,
+            maxzoom: 24,
+            paint: { "circle-radius": 5, "circle-color": "#f97316", "circle-stroke-width": 1.5, "circle-stroke-color": "#ffffff" },
+            layout: { visibility: "none" },
+        });
+        this.map.addLayer({
+            id: "platforms-vt-label", type: "symbol",
+            source: "transit-stations", "source-layer": "platforms",
+            minzoom: 16,
+            maxzoom: 24,
+            layout: {
+                "text-field": ["get", "display_name"],
+                "text-font": ["Open Sans Regular"],
+                "text-size": 10,
+                "text-offset": [0, 0.9],
+                "text-anchor": "top",
+                visibility: "none",
+            },
+            paint: { "text-color": "#c2410c", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
         });
 
         // Debug: route segments visualization (ahead=green, behind=red) - added before 3D models so it renders underneath
@@ -272,6 +288,13 @@ export class MapLayerManager {
         this.map.moveLayer("mapping-lines-line");
         this.map.moveLayer("mapping-gtfs-circle");
         this.map.moveLayer("mapping-gtfs-label");
+
+        // Move debug layers to render on top of everything (above vehicles)
+        this.map.moveLayer("stops-circle");
+        this.map.moveLayer("stops-label");
+        this.map.moveLayer("debug-platform-outlines-line");
+        this.map.moveLayer("platforms-vt-circle");
+        this.map.moveLayer("platforms-vt-label");
     }
 
     /**
@@ -314,8 +337,8 @@ export class MapLayerManager {
                 this.map.setLayoutProperty(layerId, "visibility", showDebugStops ? "visible" : "none");
             }
         }
-        // Debug: raw OSM platform markers (orange dots, controlled from debug panel)
-        for (const layerId of ["platforms-vt-circle", "platforms-vt-label"]) {
+        // Debug: raw OSM platform markers + outlines (orange, controlled from debug panel)
+        for (const layerId of ["platforms-vt-circle", "platforms-vt-label", "debug-platform-outlines-line"]) {
             if (this.map.getLayer(layerId)) {
                 this.map.setLayoutProperty(layerId, "visibility", showDebugPlatforms ? "visible" : "none");
             }
@@ -625,7 +648,7 @@ export class MapLayerManager {
                         this.map.addImage(id, imageData, { pixelRatio: dpr });
                     }
                 })
-                .catch(() => { /* render failed */ });
+                .catch(() => { console.warn(`Failed to render POI icon: ${id}`); });
         });
     }
 
@@ -665,7 +688,7 @@ export class MapLayerManager {
                     if (!this.map.hasImage(id)) {
                         this.map.addImage(id, imageData, { pixelRatio: dpr });
                     }
-                } catch { /* render failed */ }
+                } catch { console.warn(`Failed to render bundled icon: ${id}`); }
             })
         ).then(() => {});
     }

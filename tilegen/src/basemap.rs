@@ -222,7 +222,9 @@ pub async fn run_planetiler(
 
     // Wait for stderr reader to finish before reporting errors
     if let Some(handle) = stderr_handle {
-        let _ = handle.await;
+        if let Err(e) = handle.await {
+            tracing::warn!(region = %region_name, "stderr reader task failed: {e}");
+        }
     }
 
     if !status.success() {

@@ -65,6 +65,9 @@ ENV PATH="/opt/java/bin:$PATH"
 ARG PLANETILER_VERSION=0.9.0
 ADD https://github.com/onthegomap/planetiler/releases/download/v${PLANETILER_VERSION}/planetiler.jar /opt/planetiler.jar
 
+# martin-cp for bulk transit tile generation
+COPY --from=ghcr.io/maplibre/martin@sha256:b51c201d4b1a2128676fbe3c8f370dae74efa49b3f14f13a0b0248ffddfdea86 /usr/local/bin/martin-cp /usr/local/bin/martin-cp
+
 # tilegen binary (statically linked via musl)
 COPY --from=builder /${BINARY_NAME} /usr/local/bin/tilegen
 

@@ -4,7 +4,7 @@ import { test, expect } from "@playwright/test";
  * E2E tests: Verify that station dots on the map are filtered by zoom level.
  *
  * Station visibility is controlled by the `min_zoom` property in Martin vector
- * tiles (pre-generated PMTiles via tilegen), filtered client-side by MapLibre
+ * tiles (pre-generated MBTiles from transit_stations), filtered client-side by MapLibre
  * GL via `["<=", ["get", "min_zoom"], ["zoom"]]`.
  *
  * Zoom thresholds:
@@ -73,7 +73,7 @@ test.describe("Martin tile min_zoom values", () => {
 
     test("zoom 9 Munich tile does not contain S-Bahn stations", async () => {
         // z=9, x=271, y=177 covers Munich
-        const res = await fetch(`${MARTIN_URL}/overview/9/271/177`);
+        const res = await fetch(`${MARTIN_URL}/tile_stations/9/271/177`);
         expect(res.ok).toBeTruthy();
         const buf = await res.arrayBuffer();
         const text = new TextDecoder("latin1").decode(buf);
@@ -89,7 +89,7 @@ test.describe("Martin tile min_zoom values", () => {
     });
 
     test("zoom 9 Munich tile contains Hauptbahnhof", async () => {
-        const res = await fetch(`${MARTIN_URL}/overview/9/271/177`);
+        const res = await fetch(`${MARTIN_URL}/tile_stations/9/271/177`);
         expect(res.ok).toBeTruthy();
         const buf = await res.arrayBuffer();
         const text = new TextDecoder("latin1").decode(buf);
@@ -102,7 +102,7 @@ test.describe("Martin tile min_zoom values", () => {
 
     test("zoom 12 Munich tile contains S-Bahn stations", async () => {
         // z=12, x=2179, y=1421 covers central Munich (48.14, 11.58)
-        const res = await fetch(`${MARTIN_URL}/overview/12/2179/1421`);
+        const res = await fetch(`${MARTIN_URL}/tile_stations/12/2179/1421`);
         expect(res.ok).toBeTruthy();
         const buf = await res.arrayBuffer();
         const text = new TextDecoder("latin1").decode(buf);

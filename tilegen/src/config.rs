@@ -1,5 +1,7 @@
-use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+use serde::Deserialize;
 
 use crate::error::TilegenError;
 
@@ -24,7 +26,7 @@ pub fn read_env_or_file(name: &str) -> Result<String, TilegenError> {
 /// Database URL is NOT in this struct — it comes from the environment via `read_env_or_file`.
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    /// Output directory for generated PMTiles files
+    /// Output directory for generated tile files (MBTiles for transit, PMTiles for basemap)
     pub output_dir: PathBuf,
 
     /// Working directory for PBF downloads and temp files
@@ -40,7 +42,7 @@ pub struct Config {
     /// World overview configuration
     pub world: WorldConfig,
 
-    /// Transit tile groups (generated natively from PostGIS)
+    /// Transit tile layers (generated from PostGIS via martin-cp)
     pub transit: TransitConfig,
 }
 
@@ -80,23 +82,30 @@ pub struct WorldConfig {
     pub regen_interval: std::time::Duration,
 }
 
-/// Transit tile configuration with grouped layers.
+/// Transit tile layers. Each layer maps to one individual PostGIS tile function
+/// and produces one MBTiles file via martin-cp. This is much faster than using
+/// composite functions because each function only computes the data it needs.
 #[derive(Debug, Deserialize)]
 pub struct TransitConfig {
-    /// Overview group: stations + routes (z0-15)
-    pub overview: TransitGroupConfig,
-    /// Detail group: steige + outlines + debug (z15-17)
-    pub detail: TransitGroupConfig,
+    /// Individual transit layers to generate
+    pub layers: Vec<TransitLayerConfig>,
 }
 
-/// A group of transit layers combined into a single PMTiles file.
+/// A single transit layer generated from one PostGIS tile function via martin-cp.
 #[derive(Debug, Deserialize)]
-pub struct TransitGroupConfig {
+pub struct TransitLayerConfig {
+    /// Layer name — used as the MBTiles filename and Martin source name.
+    /// Must match the frontend's tile URL (e.g. "tile_stations" → /tile_stations/{z}/{x}/{y}).
+    pub name: String,
+
+    /// PostGIS function name (must match a `(z int, x int, y int) -> bytea` function)
+    pub function: String,
+
     /// Regeneration interval
     #[serde(with = "humantime_serde")]
     pub regen_interval: std::time::Duration,
 
-    /// Bounding box for tile generation
+    /// Bounding box for tile generation [west, south, east, north]
     pub bbox: [f64; 4],
 
     /// Minimum zoom level
@@ -105,18 +114,9 @@ pub struct TransitGroupConfig {
     /// Maximum zoom level
     pub max_zoom: u8,
 
-    /// Layers to include in this group
-    pub layers: Vec<TransitLayerConfig>,
-}
-
-/// A single transit layer within a group.
-#[derive(Debug, Deserialize)]
-pub struct TransitLayerConfig {
-    /// MVT source-layer name (must match frontend source-layer references)
-    pub name: String,
-
-    /// PostGIS function name to call for tile generation
-    pub function: String,
+    /// Whether this layer is enabled for generation
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -137,8 +137,13 @@ impl Config {
 
     /// Validate config values.
     fn validate(&self) -> Result<(), TilegenError> {
-        let safe_name = regex_lite::Regex::new(r"^[a-z0-9_-]+$").unwrap();
-        let valid_identifier = regex_lite::Regex::new(r"^[a-z_][a-z0-9_]*$").unwrap();
+        static SAFE_NAME: LazyLock<regex_lite::Regex> =
+            LazyLock::new(|| regex_lite::Regex::new(r"^[a-z0-9_-]+$").expect("valid regex"));
+        static VALID_IDENTIFIER: LazyLock<regex_lite::Regex> =
+            LazyLock::new(|| regex_lite::Regex::new(r"^[a-z_][a-z0-9_]*$").expect("valid regex"));
+
+        let safe_name = &*SAFE_NAME;
+        let valid_identifier = &*VALID_IDENTIFIER;
 
         for region in &self.regions {
             // Validate region name for safe filesystem use (prevents path traversal)
@@ -168,26 +173,29 @@ impl Config {
             }
         }
 
-        // Validate transit groups
-        for (group_name, group) in [("overview", &self.transit.overview), ("detail", &self.transit.detail)] {
-            if group.bbox[0] >= group.bbox[2] || group.bbox[1] >= group.bbox[3] {
+        // Validate transit layers
+        for layer in &self.transit.layers {
+            if !safe_name.is_match(&layer.name) {
                 return Err(TilegenError::ConfigValidation(format!(
-                    "Transit group '{group_name}' bbox is invalid"
+                    "Transit layer name '{}' contains invalid characters", layer.name
                 )));
             }
-            if group.min_zoom > group.max_zoom {
+            if layer.bbox[0] >= layer.bbox[2] || layer.bbox[1] >= layer.bbox[3] {
                 return Err(TilegenError::ConfigValidation(format!(
-                    "Transit group '{group_name}' min_zoom ({}) > max_zoom ({})",
-                    group.min_zoom, group.max_zoom
+                    "Transit layer '{}' bbox is invalid", layer.name
                 )));
             }
-            for layer in &group.layers {
-                if !valid_identifier.is_match(&layer.function) {
-                    return Err(TilegenError::ConfigValidation(format!(
-                        "Transit layer function '{}' is not a valid PostgreSQL identifier",
-                        layer.function
-                    )));
-                }
+            if layer.min_zoom > layer.max_zoom {
+                return Err(TilegenError::ConfigValidation(format!(
+                    "Transit layer '{}' min_zoom ({}) > max_zoom ({})",
+                    layer.name, layer.min_zoom, layer.max_zoom
+                )));
+            }
+            if !valid_identifier.is_match(&layer.function) {
+                return Err(TilegenError::ConfigValidation(format!(
+                    "Transit function '{}' is not a valid PostgreSQL identifier",
+                    layer.function
+                )));
             }
         }
 

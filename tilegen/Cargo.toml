@@ -14,13 +14,10 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml_neo = "0.11"
 
-# Database (PostGIS tile function calls + state tracking)
+# Database (state tracking only — tile generation uses martin-cp subprocess)
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
 
-# Tile output
-pmtiles = { version = "0.21", default-features = false, features = ["write", "tilejson"] }
-
-# HTTP (PBF downloads with streaming + resume)
+# HTTP (PBF downloads with streaming)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 
 # Logging

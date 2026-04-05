@@ -1,8 +1,16 @@
 fn main() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("Time went backwards");
-    let secs = now.as_secs();
+    // Use SOURCE_DATE_EPOCH for reproducible builds if set (standard convention),
+    // otherwise fall back to current time for local development.
+    let secs: u64 = std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_secs()
+        });
+
     let days = secs / 86400;
     let rem = secs % 86400;
     let hours = rem / 3600;
@@ -33,4 +41,5 @@ fn main() {
 
     println!("cargo:rustc-env=BUILD_TIMESTAMP={timestamp}");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 }

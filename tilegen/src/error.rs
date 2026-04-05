@@ -30,9 +30,6 @@ pub enum TilegenError {
     #[error("PBF download failed for {url}: {message}")]
     PbfDownload { url: String, message: String },
 
-    #[error("PMTiles write error: {0}")]
-    PmtilesWrite(String),
-
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

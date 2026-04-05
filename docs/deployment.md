@@ -38,10 +38,13 @@ deployment/
 │   ├── generated-secrets.env     # Auto-generated secrets template
 │   └── config/
 │       ├── api/config.yaml       # API configuration template
-│       └── frontend/config.json  # Frontend configuration template
+│       ├── frontend/config.json  # Frontend configuration template
+│       ├── martin/config.yaml    # Martin tile server configuration
+│       └── tilegen/tilegen.yaml  # Tilegen tile builder configuration
 ├── provided-secrets.env          # User-provided secrets (not committed)
 ├── data/
-│   ├── mbtiles/                  # Map tile data
+│   ├── mbtiles/                  # Basemap tile data
+│   ├── martin/config.yaml        # Martin runtime config (auto_publish: false)
 │   └── fonts/                    # Map fonts
 └── results/                      # Rendered output (generated)
 ```

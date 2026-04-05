@@ -121,7 +121,7 @@ async fn main() -> Result<(), TilegenError> {
             break;
         }
 
-        if let Err(e) = run_generation_cycle(&config, &pool, &planetiler_jar, &basemap_dir, &transit_dir, &shutdown).await {
+        if let Err(e) = run_generation_cycle(&config, &pool, &database_url, &planetiler_jar, &basemap_dir, &transit_dir, &shutdown).await {
             tracing::error!("Generation cycle failed: {e}");
         }
 
@@ -140,36 +140,30 @@ async fn main() -> Result<(), TilegenError> {
 async fn run_generation_cycle(
     config: &Config,
     pool: &sqlx::PgPool,
+    database_url: &str,
     planetiler_jar: &str,
     basemap_dir: &std::path::Path,
     transit_dir: &std::path::Path,
     shutdown: &Arc<AtomicBool>,
 ) -> Result<(), TilegenError> {
-    // Check if database has transit data before generating transit tiles
+
     if !state::database_has_transit_data(pool).await? {
         tracing::warn!("Database has no transit data (stations table empty). Skipping transit tile generation.");
     } else {
-        // Transit overview (stations + routes)
-        if !shutdown.load(Ordering::SeqCst) {
-            if state::needs_regeneration(pool, "overview", config.transit.overview.regen_interval).await? {
-                match transit::generate_transit_group(pool, "overview", &config.transit.overview, transit_dir).await {
-                    Ok(path) => tracing::info!(path = %path.display(), "Overview tiles ready"),
-                    Err(e) => {
-                        tracing::error!("Overview generation failed: {e}");
-                        state::record_generation_failure(pool, "overview", &e.to_string()).await?;
-                    }
-                }
-            }
-        }
+        // Generate each transit layer individually
+        for layer in &config.transit.layers {
+            if shutdown.load(Ordering::SeqCst) { break; }
+            if !layer.enabled { continue; }
 
-        // Transit detail (steige + outlines + debug)
-        if !shutdown.load(Ordering::SeqCst) {
-            if state::needs_regeneration(pool, "detail", config.transit.detail.regen_interval).await? {
-                match transit::generate_transit_group(pool, "detail", &config.transit.detail, transit_dir).await {
-                    Ok(path) => tracing::info!(path = %path.display(), "Detail tiles ready"),
+            if state::needs_regeneration(pool, &layer.name, layer.regen_interval).await? {
+                match transit::generate_transit_layer(layer, database_url, transit_dir).await {
+                    Ok(result) => {
+                        state::record_generation_success(pool, &layer.name, result.duration_ms, 0, result.file_size_bytes).await?;
+                        tracing::info!(layer = %layer.name, path = %result.path.display(), "Transit layer ready");
+                    }
                     Err(e) => {
-                        tracing::error!("Detail generation failed: {e}");
-                        state::record_generation_failure(pool, "detail", &e.to_string()).await?;
+                        tracing::error!(layer = %layer.name, "Transit layer generation failed: {e}");
+                        state::record_generation_failure(pool, &layer.name, &e.to_string()).await?;
                     }
                 }
             }
@@ -222,11 +216,12 @@ fn cleanup_tmp_files(dir: &std::path::Path) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map(|e| e == "tmp" || e == "pmtiles").unwrap_or(false)
-                && path.to_str().map(|s| s.contains(".tmp")).unwrap_or(false)
+            if path.to_str().map(|s| s.contains(".tmp.")).unwrap_or(false)
             {
                 tracing::warn!(path = %path.display(), "Removing stale temporary file");
-                let _ = std::fs::remove_file(&path);
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!(path = %path.display(), "Failed to remove stale tmp file: {e}");
+                }
             }
         }
     }

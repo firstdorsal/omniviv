@@ -13,7 +13,7 @@ import { test, expect, type Page } from "@playwright/test";
  *
  * Prerequisites:
  *   - vite dev server at localhost:5174
- *   - Martin tiles serving detail PMTiles with steige layer
+ *   - Martin tiles serving transit_stations tiles with steige layer
  */
 
 async function openLayersPanel(page: Page) {
@@ -97,17 +97,14 @@ test.describe("Steige (platform markers) on map", () => {
         await expect(umrisseCheckbox).toBeDisabled();
     });
 
-    test("Martin detail tile contains steige layer data", async ({ page }) => {
+    test("Martin tile_steige returns data at Königsplatz", async ({ page }) => {
         const result = await page.evaluate(async () => {
-            const res = await fetch("http://omniviv-martin.localhost/detail/15/17375/11340");
-            const body = await res.arrayBuffer();
-            const text = new TextDecoder("latin1").decode(new Uint8Array(body));
-            return { ok: res.ok, size: body.byteLength, hasSteige: text.includes("steige") };
+            const res = await fetch("http://omniviv-martin.localhost/tile_steige/15/17375/11340");
+            return { ok: res.ok, size: (await res.arrayBuffer()).byteLength };
         });
 
-        expect(result.ok, "Martin tile should load successfully").toBe(true);
-        expect(result.size, "Tile should contain data").toBeGreaterThan(100);
-        expect(result.hasSteige, "Tile must contain steige source-layer").toBe(true);
+        expect(result.ok, "tile_steige should load successfully").toBe(true);
+        expect(result.size, "tile_steige should contain data at Königsplatz").toBeGreaterThan(100);
     });
 });
 

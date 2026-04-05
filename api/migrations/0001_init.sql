@@ -422,23 +422,25 @@ BEGIN
             ) sub
             ORDER BY station_id, display_name, connection_geom
         ) AS tile WHERE geom IS NOT NULL;
-        -- 4. Platforms (physical platform nodes, z15+)
+        -- 4. Platforms (debug: platform_ways centroids + platform point nodes, z15+)
         SELECT COALESCE(ST_AsMVT(tile, 'platforms', 4096, 'geom', 'id'), ''::bytea) INTO platforms_mvt FROM (
+            -- Platform ways centroids (physical platform areas)
+            SELECT
+                pw.osm_id as id, pw.osm_id, pw.name, pw.ref as platform_ref, pw.ref_ifopt, pw.station_id,
+                COALESCE(pw.ref, UPPER(split_part(pw.ref_ifopt, ':', array_length(string_to_array(pw.ref_ifopt, ':'), 1))), (pw.osm_id % 1000)::text) as display_name,
+                ST_X(pw.geom) as lon, ST_Y(pw.geom) as lat,
+                ST_AsMVTGeom(ST_Transform(pw.geom, 3857), b3857, 4096, 4096, false) AS geom
+            FROM platform_ways pw
+            WHERE pw.station_id IS NOT NULL AND pw.geom && ST_Expand(b4326, 0.01)
+            UNION ALL
+            -- Platform point nodes (for stops without platform_ways)
             SELECT
                 p.osm_id as id, p.osm_id, p.name, p.ref as platform_ref, p.ref_ifopt, p.station_id,
-                COALESCE(
-                    p.ref,
-                    UPPER(split_part(p.ref_ifopt, ':', array_length(string_to_array(p.ref_ifopt, ':'), 1))),
-                    p.name,
-                    (p.osm_id % 1000)::text
-                ) as display_name,
+                COALESCE(p.ref, UPPER(split_part(p.ref_ifopt, ':', array_length(string_to_array(p.ref_ifopt, ':'), 1))), (p.osm_id % 1000)::text) as display_name,
                 ST_X(p.geom) as lon, ST_Y(p.geom) as lat,
                 ST_AsMVTGeom(ST_Transform(p.geom, 3857), b3857, 4096, 4096, false) AS geom
             FROM platforms p
-            WHERE p.station_id IS NOT NULL
-              AND (p.geom && ST_Expand(b4326, 0.01) OR EXISTS (
-                  SELECT 1 FROM stations s WHERE s.osm_id = p.station_id AND s.geom && ST_Expand(b4326, 0.01)
-              ))
+            WHERE p.station_id IS NOT NULL AND p.geom && ST_Expand(b4326, 0.01)
         ) AS tile WHERE geom IS NOT NULL;
         -- 5. Steige (user-facing platform markers with 3-tier position priority)
         -- Priority: platform_ways centroids (physical passenger area) > platforms (point nodes)

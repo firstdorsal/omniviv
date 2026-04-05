@@ -1,52 +1,26 @@
-# Tilegen configuration — pre-generates PMTiles for Martin to serve.
-# DATABASE_URL is read from the environment (supports _FILE suffix convention).
-
 output_dir: /tiles
 work_dir: /data
 check_interval: "5m"
 
-# Basemap regions (Planetiler from OSM PBF)
-regions:
-  - name: germany
-    pbf_url: "https://download.geofabrik.de/europe/germany-latest.osm.pbf"
-    bbox: [5.8663, 47.2701, 15.0419, 55.0581]
-    min_zoom: 0
-    max_zoom: 15
-    regen_interval: "7d"
-    enabled: true
+regions: []
 
-# World overview (Natural Earth data only, no PBF download)
 world:
-  enabled: true
+  enabled: false
   max_zoom: 7
   regen_interval: "7d"
 
-# Transit tile groups (generated from PostGIS via sqlx)
 transit:
-  overview:
-    regen_interval: "1d"
-    bbox: [5.8663, 47.2701, 15.0419, 55.0581]
-    min_zoom: 0
-    max_zoom: 15
-    layers:
-      - name: stations
-        function: tile_stations
-      - name: transit_routes
-        function: tile_routes
-
-  detail:
-    regen_interval: "1d"
-    bbox: [5.8663, 47.2701, 15.0419, 55.0581]
-    min_zoom: 15
-    max_zoom: 17
-    layers:
-      - name: steige
-        function: tile_steige
-      - name: platform_outlines
-        function: tile_platform_outlines
-      - name: stops
-        function: tile_debug_stops
-      - name: platforms
-        function: tile_debug_platforms
-      - name: connections
-        function: tile_debug_connections
+  layers:
+    - name: transit_stations
+      function: transit_stations
+      regen_interval: "1d"
+      bbox: [10.85, 48.33, 10.93, 48.39]
+      min_zoom: 0
+      max_zoom: 15
+      
+    - name: transit_routes
+      function: transit_routes
+      regen_interval: "1d"
+      bbox: [10.85, 48.33, 10.93, 48.39]
+      min_zoom: 0
+      max_zoom: 15

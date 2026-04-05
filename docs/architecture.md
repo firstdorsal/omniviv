@@ -2,19 +2,19 @@
 
 ## Overview
 
-Omniviv is a real-time public transport visualization platform consisting of three main services:
+Omniviv is a real-time public transport visualization platform consisting of four main services:
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │    Frontend     │────▶│       API       │────▶│     Martin      │
 │    (React)      │◀────│     (Rust)      │     │  (Tile Server)  │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
-        │                       │
-        │    WebSocket          │
-        │◀──────────────────────│
-                                │
-                         ┌──────┴──────┐
-                         │ PostgreSQL  │
+        │                       │                        ▲
+        │    WebSocket          │                        │ MBTiles
+        │◀──────────────────────│               ┌────────┴────────┐
+                                │               │     Tilegen     │
+                         ┌──────┴──────┐        │  (Tile Builder) │
+                         │ PostgreSQL  │◀───────└─────────────────┘
                          │  Database   │
                          └─────────────┘
                                 │
@@ -95,9 +95,19 @@ api/src/
 ### Martin (Tile Server)
 
 - **Image**: `ghcr.io/maplibre/martin`
-- Serves vector tiles (MBTiles format) for the map
-- Serves fonts for map labels
+- Serves pre-generated vector tiles (MBTiles) for the map — `auto_publish: false` (no SQL functions exposed)
+- Serves fonts for map labels and sprites for POI icons
+- Auto-discovers MBTiles files from `/mbtiles` (basemap) and `/tiles/transit` (transit layers)
 - Configured with caching headers via Traefik
+
+### Tilegen (Tile Builder)
+
+- **Image**: `ghcr.io/firstdorsal/omniviv-tilegen`
+- Pre-generates transit vector tiles from PostGIS using `martin-cp`
+- Pre-generates basemap tiles from OSM PBF using Planetiler
+- Configured via `tilegen.yaml` with per-layer bbox, zoom range, and regen interval
+- Tracks generation state in PostgreSQL (`tile_generation_state` table)
+- Runs on a configurable interval (`check_interval`), regenerating layers whose interval has elapsed
 
 ## Data Flow
 
