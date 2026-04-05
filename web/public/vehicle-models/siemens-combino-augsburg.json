@@ -1,0 +1,41 @@
+{
+  "kind": "simple",
+  "id": "siemens-combino-augsburg",
+  "name": "Combino NF8 (Augsburg)",
+  "manufacturer": "Siemens",
+  "vehicleType": "tram",
+  "width": 2.3,
+  "totalLength": 41.96,
+  "articulationGap": 0.3,
+  "lods": {
+    "box": {
+      "segments": [
+        { "length": 7.2, "type": "cab", "height": 3.51, "hasBogies": true },
+        { "length": 6.8, "type": "passenger", "height": 3.51, "hasBogies": false },
+        { "length": 2.4, "type": "articulation", "height": 3.3, "hasBogies": true },
+        { "length": 6.8, "type": "passenger", "height": 3.51, "hasBogies": false },
+        { "length": 2.4, "type": "articulation", "height": 3.3, "hasBogies": true },
+        { "length": 6.8, "type": "passenger", "height": 3.51, "hasBogies": false },
+        { "length": 7.2, "type": "cab", "height": 3.51, "hasBogies": true }
+      ]
+    }
+  },
+
+  "metadata": {
+    "wikidataId": "Q392615",
+    "maxSpeedKmh": 70,
+    "inServiceSince": 2000,
+    "unitsBuilt": 41,
+    "designation": "NF8",
+    "tractionType": "electric",
+    "powerSupply": "750V DC",
+    "powerKw": 600,
+    "gaugeMm": 1000,
+    "massTonnes": 46,
+    "seatingCapacity": 101,
+    "lowFloor": true,
+    "floorHeightMm": 300,
+    "operators": ["Stadtwerke Augsburg"],
+    "countries": ["DE"]
+  }
+}

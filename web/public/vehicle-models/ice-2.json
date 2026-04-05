@@ -1,0 +1,88 @@
+{
+  "kind": "consist",
+  "id": "ice-2",
+  "name": "ICE 2 (BR 402)",
+  "manufacturer": "Siemens / Bombardier",
+  "vehicleType": "rail",
+  "width": 3.02,
+
+  "cars": {
+    "power-car": {
+      "length": 20.56,
+      "height": 3.84,
+      "type": "power_car",
+      "powered": true,
+      "width": 3.07
+    },
+    "first-class": {
+      "length": 26.4,
+      "height": 3.84,
+      "type": "first_class",
+      "powered": false
+    },
+    "second-class": {
+      "length": 26.4,
+      "height": 3.84,
+      "type": "second_class",
+      "powered": false
+    },
+    "service": {
+      "length": 26.4,
+      "height": 3.84,
+      "type": "service",
+      "powered": false
+    },
+    "driving-trailer": {
+      "length": 26.4,
+      "height": 3.84,
+      "type": "driving_trailer",
+      "powered": false
+    }
+  },
+
+  "consists": {
+    "half-set": {
+      "cars": [
+        "power-car",
+        "first-class", "first-class",
+        "service",
+        "second-class", "second-class", "second-class",
+        "driving-trailer"
+      ],
+      "couplingGap": 0.6
+    },
+    "double": {
+      "cars": [
+        "power-car",
+        "first-class", "first-class",
+        "service",
+        "second-class", "second-class", "second-class",
+        "driving-trailer",
+        "driving-trailer",
+        "second-class", "second-class", "second-class",
+        "service",
+        "first-class", "first-class",
+        "power-car"
+      ],
+      "couplingGap": 0.6
+    }
+  },
+
+  "defaultConsist": "half-set",
+
+  "metadata": {
+    "wikidataId": "Q694679",
+    "maxSpeedKmh": 280,
+    "inServiceSince": 1996,
+    "unitsBuilt": 44,
+    "designation": "BR 402",
+    "tractionType": "electric",
+    "powerSupply": "15kV 16.7Hz AC",
+    "powerKw": 4800,
+    "gaugeMm": 1435,
+    "massTonnes": 417,
+    "seatingCapacity": 381,
+    "operators": ["Deutsche Bahn"],
+    "countries": ["DE"]
+  }
+}

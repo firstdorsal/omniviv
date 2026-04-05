@@ -5,13 +5,20 @@
 import type { RouteVehicles } from "../../App";
 import type { MapLayerManager } from "../map/MapLayerManager";
 import { createVehicleIcon } from "./VehicleIconFactory";
-import { calculateSegmentDistances, getAugsburgVehicleModel } from "./vehicleModels";
+import type { SegmentDistances, VehicleModelLoader } from "./VehicleModelLoader";
+import {
+    ANIMATION_INTERVAL,
+    FALLBACK_VEHICLE_MODEL,
+    METERS_PER_DEGREE_AT_EQUATOR,
+    MIN_SEGMENT_RENDER_LENGTH,
+    calculateSegmentDistances,
+    type VehicleModel,
+} from "./vehicleModels";
 import {
     calculateVehiclePosition,
     createSmoothedPosition,
     findPositionOnRoute,
     getDebugSegmentFeatures,
-    getPositionAtDistance,
     getPositionsBehindOnRoute,
     linearizeRoute,
     updateSmoothedPosition,
@@ -21,7 +28,7 @@ import {
 } from "./vehicleUtils";
 import { featureManager, type VehicleRenderContext, type RenderPosition } from "./features";
 
-const ANIMATION_INTERVAL = 50;
+export { ANIMATION_INTERVAL };
 
 export interface DebugOptions {
     show3DModels: boolean;
@@ -33,16 +40,19 @@ export class VehicleRenderer {
     private layerManager: MapLayerManager;
     private routeColors: globalThis.Map<string, string>;
     private routeGeometries: globalThis.Map<number, number[][][]>;
+    private routeTypes: globalThis.Map<number, string>;
     private linearizedRoutes = new globalThis.Map<number, LinearizedRoute>();
     private smoothedPositions = new globalThis.Map<string, SmoothedVehiclePosition>();
     private vehicleIcons = new Set<string>();
     private animationId: number | null = null;
     private lastAnimationTime = 0;
 
-    // Current vehicles data - updated via setVehicles() so animation loop uses latest data
-    private currentVehicles: RouteVehicles[] = [];
+    private modelLoader: VehicleModelLoader;
 
-    // Current simulated time - updated via setSimulatedTime()
+    /** Fallback segment distances used before the loader is ready. */
+    private fallbackSegmentDistances = calculateSegmentDistances(FALLBACK_VEHICLE_MODEL);
+
+    private currentVehicles: RouteVehicles[] = [];
     private simulatedTime: Date = new Date();
 
     private onTrackedVehicleLost?: () => void;
@@ -52,17 +62,18 @@ export class VehicleRenderer {
     constructor(
         layerManager: MapLayerManager,
         routeColors: globalThis.Map<string, string>,
-        routeGeometries: globalThis.Map<number, number[][][]>
+        routeGeometries: globalThis.Map<number, number[][][]>,
+        routeTypes: globalThis.Map<number, string>,
+        modelLoader: VehicleModelLoader,
     ) {
         this.layerManager = layerManager;
         this.routeColors = routeColors;
         this.routeGeometries = routeGeometries;
+        this.routeTypes = routeTypes;
+        this.modelLoader = modelLoader;
         this.buildLinearizedRoutes();
     }
 
-    /**
-     * Build linearized routes from route geometries
-     */
     private buildLinearizedRoutes(): void {
         this.linearizedRoutes.clear();
         for (const [routeId, geometry] of this.routeGeometries) {
@@ -73,66 +84,41 @@ export class VehicleRenderer {
         }
     }
 
-    /**
-     * Update route data references
-     */
     updateRouteData(
         routeColors: globalThis.Map<string, string>,
-        routeGeometries: globalThis.Map<number, number[][][]>
+        routeGeometries: globalThis.Map<number, number[][][]>,
+        routeTypes: globalThis.Map<number, string>,
     ): void {
         this.routeColors = routeColors;
         this.routeGeometries = routeGeometries;
+        this.routeTypes = routeTypes;
         this.buildLinearizedRoutes();
     }
 
-    /**
-     * Set callback for when tracked vehicle is lost
-     */
     setOnTrackedVehicleLost(callback: () => void): void {
         this.onTrackedVehicleLost = callback;
     }
 
-    /**
-     * Set the currently tracked trip ID
-     */
     setTrackedTripId(tripId: string | null): void {
         this.trackedTripId = tripId;
     }
 
-    /**
-     * Set debug visualization options
-     */
     setDebugOptions(options: DebugOptions): void {
         this.debugOptions = options;
     }
 
-    /**
-     * Get a specific smoothed position
-     */
     getSmoothedPosition(tripId: string): SmoothedVehiclePosition | undefined {
         return this.smoothedPositions.get(tripId);
     }
 
-    /**
-     * Update the vehicles data used by the animation loop
-     * This should be called whenever vehicles prop changes
-     */
     setVehicles(vehicles: RouteVehicles[]): void {
         this.currentVehicles = vehicles;
     }
 
-    /**
-     * Update the simulated time used for vehicle position calculations
-     * This should be called whenever the simulated time changes
-     */
     setSimulatedTime(time: Date): void {
         this.simulatedTime = time;
     }
 
-    /**
-     * Start the vehicle animation loop
-     * Uses this.currentVehicles which should be updated via setVehicles()
-     */
     startAnimation(): void {
         if (this.animationId) return;
 
@@ -151,9 +137,6 @@ export class VehicleRenderer {
         this.animationId = requestAnimationFrame(animate);
     }
 
-    /**
-     * Stop the vehicle animation loop
-     */
     stopAnimation(): void {
         if (this.animationId) {
             cancelAnimationFrame(this.animationId);
@@ -162,9 +145,6 @@ export class VehicleRenderer {
         this.lastAnimationTime = 0;
     }
 
-    /**
-     * Clear all vehicle data
-     */
     clear(): void {
         this.stopAnimation();
         this.layerManager.clearVehicleData();
@@ -172,11 +152,28 @@ export class VehicleRenderer {
         this.smoothedPositions.clear();
     }
 
-    /**
-     * Update vehicle positions, markers, and 3D models in a single pass
-     */
+    /** Resolve the VehicleModel for a given route based on its route type. */
+    private resolveModel(routeId: number): VehicleModel {
+        if (this.modelLoader.ready) {
+            const routeType = this.routeTypes.get(routeId);
+            if (routeType) {
+                return this.modelLoader.getDefaultModel(routeType);
+            }
+        }
+        return FALLBACK_VEHICLE_MODEL;
+    }
+
+    private resolveSegmentDistances(model: VehicleModel): SegmentDistances {
+        if (this.modelLoader.ready) {
+            return this.modelLoader.getSegmentDistances(model);
+        }
+        if (model.id === FALLBACK_VEHICLE_MODEL.id) {
+            return this.fallbackSegmentDistances;
+        }
+        return calculateSegmentDistances(model);
+    }
+
     updatePositions(vehicles: RouteVehicles[], deltaMs: number): void {
-        // Use simulated time for position calculations
         const now = this.simulatedTime;
         const vehiclesByTripId = new globalThis.Map<string, { vehicle: RouteVehicles["vehicles"][0]; routeId: number; stopCount: number }>();
 
@@ -212,11 +209,7 @@ export class VehicleRenderer {
         const debugFeatures: GeoJSON.Feature[] = [];
         const activeTripIds = new Set<string>();
 
-        const vehicleModel = getAugsburgVehicleModel();
-        const segmentDistances = calculateSegmentDistances(vehicleModel);
-
         for (const { position: targetPosition, routeId, routeColor } of allPositions) {
-            // Skip waiting vehicles unless another vehicle is completing at same location
             if (targetPosition.status === "waiting") {
                 const vehicle = vehiclesByTripId.get(targetPosition.tripId)?.vehicle;
                 const firstStop = vehicle?.stops[0];
@@ -226,7 +219,6 @@ export class VehicleRenderer {
 
             activeTripIds.add(targetPosition.tripId);
 
-            // Update smoothed position
             let smoothedPosition = this.smoothedPositions.get(targetPosition.tripId);
             if (smoothedPosition) {
                 smoothedPosition = updateSmoothedPosition(smoothedPosition, targetPosition, deltaMs);
@@ -244,7 +236,6 @@ export class VehicleRenderer {
             const smoothedPosition = this.smoothedPositions.get(targetPosition.tripId);
             if (!smoothedPosition) continue;
 
-            // Get linear position from rendered position
             const linearizedRoute = this.linearizedRoutes.get(routeId);
             if (!linearizedRoute) continue;
 
@@ -262,33 +253,28 @@ export class VehicleRenderer {
             });
         }
 
-        // Process render positions through feature pipeline
         const renderPositions = this.processRenderPositions(vehicleContexts);
 
-        // Now generate features using processed render positions
         for (const { position: targetPosition, routeId, routeColor } of allPositions) {
             if (!activeTripIds.has(targetPosition.tripId)) continue;
 
             const smoothedPosition = this.smoothedPositions.get(targetPosition.tripId);
             if (!smoothedPosition) continue;
 
-            // Get processed render position (or fall back to smoothed)
             const renderPos = renderPositions.get(targetPosition.tripId) ?? {
                 lon: smoothedPosition.renderedLon,
                 lat: smoothedPosition.renderedLat,
                 bearing: smoothedPosition.renderedBearing,
             };
 
-            // Create vehicle marker icon
-            const lineNum = smoothedPosition.lineNumber ?? "?";
-            const iconId = `vehicle-${routeColor.replace("#", "")}-${lineNum}`;
+            const lineNumber = smoothedPosition.lineNumber ?? "?";
+            const iconId = `vehicle-${routeColor.replace("#", "")}-${lineNumber}`;
 
             if (!this.vehicleIcons.has(iconId)) {
-                this.layerManager.addImage(iconId, createVehicleIcon(routeColor, lineNum));
+                this.layerManager.addImage(iconId, createVehicleIcon(routeColor, lineNumber));
                 this.vehicleIcons.add(iconId);
             }
 
-            // Add marker feature
             markerFeatures.push({
                 type: "Feature",
                 properties: {
@@ -306,15 +292,15 @@ export class VehicleRenderer {
                 geometry: { type: "Point", coordinates: [renderPos.lon, renderPos.lat] },
             });
 
-            // Generate 3D model features and debug visualization
+            const vehicleModel = this.resolveModel(routeId);
+            const segmentDistances = this.resolveSegmentDistances(vehicleModel);
+
             const linearizedRoute = this.linearizedRoutes.get(routeId);
             const isTracked = targetPosition.tripId === this.trackedTripId;
 
-            // Determine if we should show debug for this vehicle
             const showDebugForThis = this.debugOptions.showDebugSegments &&
                 (!this.debugOptions.showDebugOnlyTracked || isTracked);
 
-            // Generate 3D models and/or debug visualization
             if (this.debugOptions.show3DModels || showDebugForThis) {
                 const { modelFeatures: segmentFeatures, debugFeatures: segDebugFeatures } = this.generateModelFeatures(
                     smoothedPosition,
@@ -325,57 +311,46 @@ export class VehicleRenderer {
                     segmentDistances,
                     showDebugForThis
                 );
-                // Only add 3D model features if enabled
                 if (this.debugOptions.show3DModels) {
                     modelFeatures.push(...segmentFeatures);
                 }
-                // Only add debug features if requested for this vehicle
                 if (showDebugForThis) {
                     debugFeatures.push(...segDebugFeatures);
                 }
             }
         }
 
-        // Cleanup old positions
         for (const tripId of this.smoothedPositions.keys()) {
             if (!activeTripIds.has(tripId)) {
                 this.smoothedPositions.delete(tripId);
             }
         }
 
-        // Check if tracked vehicle still exists
         if (this.trackedTripId && !this.smoothedPositions.has(this.trackedTripId)) {
             this.onTrackedVehicleLost?.();
         }
 
-        // Update all layers together
         this.layerManager.updateVehicles(markerFeatures);
         this.layerManager.updateVehicleModels(modelFeatures);
         this.layerManager.updateDebugSegments(debugFeatures);
     }
 
-    /**
-     * Generate 3D model features for a vehicle using linearized route
-     * The 3D model position is derived from the render position (after collision avoidance)
-     */
     private generateModelFeatures(
         smoothedPosition: SmoothedVehiclePosition,
         renderPos: { lon: number; lat: number; bearing: number },
         linearizedRoute: LinearizedRoute | undefined,
         routeColor: string,
-        vehicleModel: ReturnType<typeof getAugsburgVehicleModel>,
-        segmentDistances: ReturnType<typeof calculateSegmentDistances>,
+        vehicleModel: VehicleModel,
+        segmentDistances: SegmentDistances,
         showDebug = false
     ): { modelFeatures: GeoJSON.Feature[]; debugFeatures: GeoJSON.Feature[] } {
         const modelFeatures: GeoJSON.Feature[] = [];
         const debugFeatures: GeoJSON.Feature[] = [];
 
-        // If no linearized route, don't render 3D model
         if (!linearizedRoute) {
             return { modelFeatures: [], debugFeatures: [] };
         }
 
-        // Project the render position onto the route to get linear position
         const routePosition = findPositionOnRoute(
             linearizedRoute,
             renderPos.lon,
@@ -383,25 +358,23 @@ export class VehicleRenderer {
         );
         const linearPosition = routePosition.linearPosition;
 
-        // Get all distances behind the vehicle for 3D model segments
         const allDistances: number[] = [];
         for (const segInfo of segmentDistances) {
             allDistances.push(segInfo.frontDistance, segInfo.rearDistance);
         }
 
-        // Get positions along the route behind the vehicle
         const positions = getPositionsBehindOnRoute(linearizedRoute, linearPosition, allDistances);
 
-        // Generate 3D model polygons
         for (let i = 0; i < segmentDistances.length; i++) {
             const segInfo = segmentDistances[i];
             const frontPos = positions[i * 2];
             const rearPos = positions[i * 2 + 1];
 
+            const segWidth = segInfo.segment.width ?? vehicleModel.width;
             const polygon = this.createSegmentPolygon(
                 frontPos.lon, frontPos.lat,
                 rearPos.lon, rearPos.lat,
-                vehicleModel.width
+                segWidth
             );
 
             if (polygon.length > 0) {
@@ -418,9 +391,7 @@ export class VehicleRenderer {
             }
         }
 
-        // Generate debug segment visualization if this is the tracked vehicle
         if (showDebug) {
-            // Use segment index from the route projection (same source as 3D model)
             const segDebug = getDebugSegmentFeatures(linearizedRoute, routePosition.segmentIndex, 5, 5);
             debugFeatures.push(...segDebug);
         }
@@ -428,9 +399,6 @@ export class VehicleRenderer {
         return { modelFeatures, debugFeatures };
     }
 
-    /**
-     * Create a polygon for a tram segment
-     */
     private createSegmentPolygon(
         frontLon: number,
         frontLat: number,
@@ -438,12 +406,12 @@ export class VehicleRenderer {
         rearLat: number,
         width: number
     ): number[][] {
-        const metersPerDegreeLat = 111320;
-        const metersPerDegreeLon = 111320 * Math.cos((frontLat * Math.PI) / 180);
+        const metersPerDegreeLat = METERS_PER_DEGREE_AT_EQUATOR;
+        const metersPerDegreeLon = METERS_PER_DEGREE_AT_EQUATOR * Math.cos((frontLat * Math.PI) / 180);
         const dx = (frontLon - rearLon) * metersPerDegreeLon;
         const dy = (frontLat - rearLat) * metersPerDegreeLat;
         const length = Math.sqrt(dx * dx + dy * dy);
-        if (length < 0.1) return [];
+        if (length < MIN_SEGMENT_RENDER_LENGTH) return [];
 
         const dirX = dx / length;
         const dirY = dy / length;
@@ -461,16 +429,11 @@ export class VehicleRenderer {
         return corners;
     }
 
-    /**
-     * Process render positions through feature pipeline
-     * Returns a map of tripId -> {lon, lat, bearing} for rendering
-     */
     private processRenderPositions(vehicleContexts: VehicleRenderContext[]): globalThis.Map<string, RenderPosition> {
         const renderPositions = new globalThis.Map<string, RenderPosition>();
 
         if (vehicleContexts.length === 0) return renderPositions;
 
-        // Initialize render positions from smoothed positions
         for (const vehicle of vehicleContexts) {
             renderPositions.set(vehicle.tripId, {
                 lon: vehicle.smoothedPosition.renderedLon,
@@ -479,15 +442,11 @@ export class VehicleRenderer {
             });
         }
 
-        // Process through all enabled features
         featureManager.processRenderPositions(vehicleContexts, renderPositions, this.linearizedRoutes);
 
         return renderPositions;
     }
 
-    /**
-     * Cleanup resources
-     */
     dispose(): void {
         this.stopAnimation();
         this.vehicleIcons.clear();

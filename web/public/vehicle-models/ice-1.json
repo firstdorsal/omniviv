@@ -1,0 +1,86 @@
+{
+  "kind": "consist",
+  "id": "ice-1",
+  "name": "ICE 1 (BR 401)",
+  "manufacturer": "Siemens / ABB / AEG",
+  "vehicleType": "rail",
+  "width": 3.02,
+
+  "cars": {
+    "power-car": {
+      "length": 20.56,
+      "height": 3.84,
+      "type": "power_car",
+      "powered": true
+    },
+    "first-class": {
+      "length": 26.4,
+      "height": 3.84,
+      "type": "first_class",
+      "powered": false
+    },
+    "second-class": {
+      "length": 26.4,
+      "height": 3.84,
+      "type": "second_class",
+      "powered": false
+    },
+    "service": {
+      "length": 26.4,
+      "height": 3.84,
+      "type": "service",
+      "powered": false
+    },
+    "dining": {
+      "length": 26.4,
+      "height": 4.295,
+      "type": "dining",
+      "powered": false
+    }
+  },
+
+  "consists": {
+    "full-12mw": {
+      "cars": [
+        "power-car",
+        "second-class", "second-class", "second-class", "second-class",
+        "second-class", "second-class", "second-class",
+        "service",
+        "dining",
+        "first-class", "first-class", "first-class",
+        "power-car"
+      ],
+      "couplingGap": 0.6
+    },
+    "short-9mw": {
+      "cars": [
+        "power-car",
+        "second-class", "second-class", "second-class", "second-class",
+        "second-class",
+        "service",
+        "dining",
+        "first-class", "first-class",
+        "power-car"
+      ],
+      "couplingGap": 0.6
+    }
+  },
+
+  "defaultConsist": "full-12mw",
+
+  "metadata": {
+    "wikidataId": "Q702311",
+    "maxSpeedKmh": 280,
+    "inServiceSince": 1991,
+    "unitsBuilt": 59,
+    "designation": "BR 401",
+    "tractionType": "electric",
+    "powerSupply": "15kV 16.7Hz AC",
+    "powerKw": 9600,
+    "gaugeMm": 1435,
+    "massTonnes": 782,
+    "seatingCapacity": 703,
+    "operators": ["Deutsche Bahn"],
+    "countries": ["DE"]
+  }
+}

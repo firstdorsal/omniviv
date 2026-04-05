@@ -1,0 +1,108 @@
+{
+  "kind": "consist",
+  "id": "ice-3",
+  "name": "ICE 3 (BR 403)",
+  "manufacturer": "Siemens / Bombardier",
+  "vehicleType": "rail",
+  "width": 2.95,
+
+  "cars": {
+    "end-car-first": {
+      "length": 25.835,
+      "height": 3.89,
+      "type": "end_car",
+      "powered": true
+    },
+    "end-car-second": {
+      "length": 25.835,
+      "height": 3.89,
+      "type": "end_car",
+      "powered": true
+    },
+    "transformer-first": {
+      "length": 24.775,
+      "height": 3.89,
+      "type": "first_class",
+      "powered": false
+    },
+    "inverter-second": {
+      "length": 24.775,
+      "height": 3.89,
+      "type": "second_class",
+      "powered": true
+    },
+    "bistro": {
+      "length": 24.775,
+      "height": 3.89,
+      "type": "bistro",
+      "powered": false
+    },
+    "middle-second": {
+      "length": 24.775,
+      "height": 3.89,
+      "type": "second_class",
+      "powered": false
+    },
+    "transformer-second": {
+      "length": 24.775,
+      "height": 3.89,
+      "type": "second_class",
+      "powered": false
+    }
+  },
+
+  "consists": {
+    "single": {
+      "cars": [
+        "end-car-first",
+        "transformer-first",
+        "inverter-second",
+        "bistro",
+        "middle-second",
+        "inverter-second",
+        "transformer-second",
+        "end-car-second"
+      ],
+      "couplingGap": 0.5
+    },
+    "double": {
+      "cars": [
+        "end-car-first",
+        "transformer-first",
+        "inverter-second",
+        "bistro",
+        "middle-second",
+        "inverter-second",
+        "transformer-second",
+        "end-car-second",
+        "end-car-first",
+        "transformer-first",
+        "inverter-second",
+        "bistro",
+        "middle-second",
+        "inverter-second",
+        "transformer-second",
+        "end-car-second"
+      ],
+      "couplingGap": 0.5
+    }
+  },
+
+  "defaultConsist": "single",
+
+  "metadata": {
+    "wikidataId": "Q1151795",
+    "maxSpeedKmh": 330,
+    "inServiceSince": 2000,
+    "unitsBuilt": 50,
+    "designation": "BR 403",
+    "tractionType": "electric",
+    "powerSupply": "15kV 16.7Hz AC",
+    "powerKw": 8000,
+    "gaugeMm": 1435,
+    "massTonnes": 435,
+    "seatingCapacity": 457,
+    "operators": ["Deutsche Bahn"],
+    "countries": ["DE"]
+  }
+}

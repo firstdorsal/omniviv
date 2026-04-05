@@ -9,7 +9,8 @@ import { getConfig } from "../../config";
 import { PlatformPopup } from "../PlatformPopup";
 import { StationPopup } from "../StationPopup";
 import { Button } from "../ui/button";
-import { VehicleRenderer } from "../vehicles/VehicleRenderer";
+import { VehicleModelLoader } from "../vehicles/VehicleModelLoader";
+import { VehicleRenderer, ANIMATION_INTERVAL } from "../vehicles/VehicleRenderer";
 import type { DebugOptions } from "../vehicles/VehicleRenderer";
 import { VehicleTracker, type TrackingInfo } from "../vehicles/VehicleTracker";
 import { MapLayerManager } from "./MapLayerManager";
@@ -42,7 +43,7 @@ async function loadMapStyle(): Promise<maplibregl.StyleSpecification> {
 
     return style;
 }
-const ANIMATION_INTERVAL = 50;
+// ANIMATION_INTERVAL is exported from vehicleModels.ts via VehicleRenderer
 
 type PickMode = "start" | "end" | null;
 
@@ -123,6 +124,10 @@ export default class Map extends React.Component<MapProps, MapState> {
     // Data caches
     private routeColors = new globalThis.Map<string, string>();
     private routeGeometries = new globalThis.Map<number, number[][][]>();
+    /** Maps route osm_id → route_type (e.g. "tram", "bus") for vehicle model selection */
+    private routeTypes = new globalThis.Map<number, string>();
+    private modelLoader = new VehicleModelLoader("augsburg");
+    private modelLoaderInitAborted = false;
 
     constructor(props: MapProps) {
         super(props);
@@ -238,6 +243,7 @@ export default class Map extends React.Component<MapProps, MapState> {
     }
 
     private cleanup() {
+        this.modelLoaderInitAborted = true;
         this.vehicleRenderer?.dispose();
         this.vehicleTracker?.dispose();
 
@@ -254,6 +260,7 @@ export default class Map extends React.Component<MapProps, MapState> {
     private updateRouteData() {
         const colorMap = new globalThis.Map<string, string>();
         const geometryMap = new globalThis.Map<number, number[][][]>();
+        const typeMap = new globalThis.Map<number, string>();
 
         for (const route of this.props.routes) {
             if (route.ref && route.color) {
@@ -262,12 +269,16 @@ export default class Map extends React.Component<MapProps, MapState> {
             if (route.geometry?.segments) {
                 geometryMap.set(route.osm_id, route.geometry.segments);
             }
+            if (route.route_type) {
+                typeMap.set(route.osm_id, route.route_type);
+            }
         }
 
         this.routeColors = colorMap;
         this.routeGeometries = geometryMap;
+        this.routeTypes = typeMap;
 
-        this.vehicleRenderer?.updateRouteData(colorMap, geometryMap);
+        this.vehicleRenderer?.updateRouteData(colorMap, geometryMap, typeMap);
     }
 
     private updateAllMapData() {
@@ -421,9 +432,18 @@ export default class Map extends React.Component<MapProps, MapState> {
             this.layerManager = new MapLayerManager(this.map);
             this.layerManager.setupLayers();
 
-            this.vehicleRenderer = new VehicleRenderer(this.layerManager, this.routeColors, this.routeGeometries);
+            this.vehicleRenderer = new VehicleRenderer(this.layerManager, this.routeColors, this.routeGeometries, this.routeTypes, this.modelLoader);
             this.vehicleRenderer.setOnTrackedVehicleLost(() => {
                 this.setState({ trackedTripId: null });
+            });
+
+            // Initialize on-demand vehicle model loader (non-blocking).
+            // The loader is already passed to the renderer; once init() resolves,
+            // the renderer's resolveModel() will start returning real models via loader.ready.
+            this.modelLoader.init().catch((error) => {
+                if (!this.modelLoaderInitAborted) {
+                    console.warn("[Map] Vehicle model loader init failed, using fallback models:", error);
+                }
             });
 
             this.vehicleTracker = new VehicleTracker(this.map, {

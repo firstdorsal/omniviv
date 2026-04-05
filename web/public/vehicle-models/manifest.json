@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "models": {
+    "siemens-combino-augsburg": {
+      "vehicleType": "tram",
+      "lods": ["box"]
+    },
+    "man-lions-city-12": {
+      "vehicleType": "bus",
+      "lods": ["box"]
+    },
+    "man-lions-city-18": {
+      "vehicleType": "bus",
+      "lods": ["box"]
+    },
+    "ice-1": {
+      "vehicleType": "rail",
+      "lods": ["box"]
+    },
+    "ice-2": {
+      "vehicleType": "rail",
+      "lods": ["box"]
+    },
+    "ice-3": {
+      "vehicleType": "rail",
+      "lods": ["box"]
+    },
+    "ice-4": {
+      "vehicleType": "rail",
+      "lods": ["box"]
+    }
+  },
+  "defaults": {
+    "augsburg": {
+      "tram": "siemens-combino-augsburg",
+      "bus": "man-lions-city-12",
+      "rail": "ice-3"
+    }
+  }
+}
