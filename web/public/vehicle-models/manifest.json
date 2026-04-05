@@ -28,6 +28,30 @@
     "ice-4": {
       "vehicleType": "rail",
       "lods": ["box"]
+    },
+    "siemens-mireo": {
+      "vehicleType": "rail",
+      "lods": ["box"]
+    },
+    "bombardier-talent-2": {
+      "vehicleType": "rail",
+      "lods": ["box"]
+    },
+    "alstom-coradia-continental": {
+      "vehicleType": "rail",
+      "lods": ["box"]
+    },
+    "alstom-lint-41": {
+      "vehicleType": "rail",
+      "lods": ["box"]
+    },
+    "alstom-lint-54": {
+      "vehicleType": "rail",
+      "lods": ["box"]
+    },
+    "db-br-425": {
+      "vehicleType": "rail",
+      "lods": ["box"]
     }
   },
   "defaults": {
