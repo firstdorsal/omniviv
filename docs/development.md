@@ -122,16 +122,14 @@ pnpm test:watch  # Watch mode
 
 ## API Client Generation
 
-After modifying API endpoints:
-1. Ensure the API is running
-2. Run the generation script:
+After modifying API endpoints, regenerate the TypeScript client:
 
 ```bash
 cd api
-./generate-api.sh
+bash generate-api.sh
 ```
 
-This updates the TypeScript client in the frontend based on the OpenAPI spec.
+This builds a standalone binary that generates the OpenAPI spec at build time (no running server or database required), then produces the TypeScript client from it.
 
 ## Database
 
@@ -248,7 +246,7 @@ RUST_LOG=omniviv_api::sync=debug cargo run
 ## Common Issues
 
 ### API client out of sync
-Run `./generate-api.sh` in the api directory after changing endpoints.
+Run `bash generate-api.sh` in the api directory after changing endpoints.
 
 ### Database connection issues
 Ensure PostgreSQL is running and the `DATABASE_URL` environment variable is set correctly. Check that the PostgreSQL container is healthy with `docker compose ps`.

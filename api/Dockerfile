@@ -24,9 +24,9 @@ RUN apt-get update && apt-get install -y upx
 # Build dependencies (cached layer)
 COPY --from=planner /build/recipe.json recipe.json
 RUN if [ "${PROFILE}" = "release" ]; then \
-        cargo chef cook --release --recipe-path recipe.json; \
+        cargo chef cook --release --bin ${BINARY_NAME} --recipe-path recipe.json; \
     else \
-        cargo chef cook --recipe-path recipe.json; \
+        cargo chef cook --bin ${BINARY_NAME} --recipe-path recipe.json; \
     fi
 
 # Build application

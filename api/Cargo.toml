@@ -3,9 +3,17 @@ name = "omniviv-api"
 version = "0.2.0"
 edition = "2021"
 
+[[bin]]
+name = "omniviv-api"
+path = "src/main.rs"
+
+[[bin]]
+name = "generate-openapi"
+path = "src/bin/generate_openapi.rs"
+
 [features]
 default = []
-dev-tools = ["dep:axum-sql-viewer", "dep:tracing-web-console"]
+dev-tools = ["dep:axum-sql-viewer", "dep:tracing-web-console", "dep:utoipa-swagger-ui"]
 
 [dependencies]
 # Web framework
@@ -22,7 +30,9 @@ tower-http = { version = "0.6", features = [
 # API documentation
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
 utoipa-axum = "0.2"
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"], optional = true }
+# alpha: only version supporting utoipa 5.x — upgrade when 0.3.0 stable is released
+utoipauto = "0.3.0-alpha.2"
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }

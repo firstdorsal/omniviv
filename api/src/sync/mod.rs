@@ -5,8 +5,8 @@
 //! - Real-time departure/arrival data from GTFS-RT feed
 //! - OSM data quality issue detection
 
-mod issues;
-mod types;
+pub mod issues; // pub for utoipauto auto-discovery
+pub mod types; // pub for utoipauto auto-discovery
 
 // Re-export types for API compatibility
 pub use issues::{

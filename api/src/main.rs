@@ -6,103 +6,18 @@ use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLay
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[cfg(feature = "dev-tools")]
 use tracing_web_console::TracingLayer;
-#[cfg(feature = "dev-tools")]
-use utoipa::OpenApi;
-#[cfg(feature = "dev-tools")]
-use utoipa_swagger_ui::SwaggerUi;
 
 use omniviv_api::{
     api,
     config::{Config, read_env_or_file},
     sync::SyncManager,
 };
-
 #[cfg(feature = "dev-tools")]
-#[derive(OpenApi)]
-#[openapi(
-    info(title = "Omniviv API", version = env!("CARGO_PKG_VERSION")),
-    paths(
-        api::areas::list::list_areas,
-        api::areas::list::get_area,
-        api::areas::list::get_area_stats,
-        api::routes::list::list_routes,
-        api::routes::list::get_route,
-        api::routes::list::get_route_geometry,
-        api::routes::list::get_route_colors,
-        api::routes::list::get_visible_routes,
-        api::stations::list::get_station,
-        api::departures::get_departures_by_stop,
-        api::departures::get_departures_by_gtfs_stop,
-        api::departures::get_departures_by_coordinates,
-        api::departures::get_departures_by_osm_id,
-        api::vehicles::get_vehicles_by_route,
-        api::issues::list_issues,
-        api::health::health_check,
-        api::gtfs_stops::list_gtfs_stops,
-        api::mapping::set_mapping,
-        api::mapping::remove_mapping,
-        api::mapping::mapping_status,
-    ),
-    components(schemas(
-        api::areas::list::Area,
-        api::areas::list::AreaStats,
-        api::areas::list::AreaListResponse,
-        api::ErrorResponse,
-        api::routes::list::Route,
-        api::routes::list::RouteListResponse,
-        api::routes::list::RouteDetail,
-        api::routes::list::RouteStop,
-        api::routes::list::RouteGeometry,
-        api::routes::list::RouteColorsResponse,
-        api::routes::list::RouteColorEntry,
-        api::routes::list::VisibleRoutesRequest,
-        api::stations::list::Station,
-        api::stations::list::StationPlatform,
-        api::stations::list::StationStopPosition,
-        api::stations::list::StationListResponse,
-        api::departures::StopDeparturesRequest,
-        api::departures::StopDeparturesResponse,
-        api::departures::GtfsStopDeparturesRequest,
-        api::departures::GtfsStopDeparturesResponse,
-        api::departures::CoordinateDeparturesRequest,
-        api::departures::OsmIdDeparturesRequest,
-        api::vehicles::VehiclesByRouteRequest,
-        api::vehicles::VehiclesByRouteResponse,
-        api::vehicles::Vehicle,
-        api::vehicles::VehicleStop,
-        api::issues::IssueListResponse,
-        api::health::HealthResponse,
-        api::gtfs_stops::GtfsStopResponse,
-        api::gtfs_stops::GtfsStopsListResponse,
-        api::mapping::SetMappingRequest,
-        api::mapping::SetMappingResponse,
-        api::mapping::RemoveMappingRequest,
-        api::mapping::RemoveMappingResponse,
-        api::mapping::MappingStatusRequest,
-        api::mapping::MappingStatusResponse,
-        api::mapping::MappingEntry,
-        api::mapping::MappingStatus,
-        api::mapping::MappingFilter,
-        api::mapping::CandidateStop,
-        omniviv_api::sync::Departure,
-        omniviv_api::sync::EventType,
-        omniviv_api::sync::OsmIssue,
-        omniviv_api::sync::OsmIssueType,
-        omniviv_api::sync::IssueCategory,
-        omniviv_api::sync::MatchCandidate,
-    )),
-    tags(
-        (name = "areas", description = "Area management endpoints"),
-        (name = "routes", description = "Route endpoints"),
-        (name = "stations", description = "Station and platform endpoints"),
-        (name = "departures", description = "Real-time departure information"),
-        (name = "vehicles", description = "Live vehicle tracking"),
-        (name = "issues", description = "OSM data quality issues"),
-        (name = "health", description = "Service health check"),
-        (name = "mapping", description = "IFOPT-to-GTFS stop mapping management")
-    )
-)]
-struct ApiDoc;
+use omniviv_api::ApiDoc;
+#[cfg(feature = "dev-tools")]
+use utoipa::OpenApi;
+#[cfg(feature = "dev-tools")]
+use utoipa_swagger_ui::SwaggerUi;
 
 #[tokio::main]
 async fn main() {
@@ -185,7 +100,7 @@ async fn main() {
         .expect("Failed to connect to PostgreSQL database");
     tracing::info!("Connected to PostgreSQL");
 
-    // Run migrations (skip if SKIP_MIGRATIONS=1, used for OpenAPI spec generation)
+    // Run migrations (skip if SKIP_MIGRATIONS=1)
     if std::env::var("SKIP_MIGRATIONS").unwrap_or_default() != "1" {
         let migrator = sqlx::migrate!("./migrations");
         tracing::info!(migrations = migrator.migrations.len(), "Found migrations");

@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -eo pipefail
 
 # Colors for output
 RED='\033[0;31m'
@@ -10,52 +10,23 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WEB_DIR="$SCRIPT_DIR/../web"
 OUTPUT_FILE="$WEB_DIR/src/api.ts"
-OPENAPI_FILE="/tmp/openapi.json"
-SERVER_PORT=3000
-SERVER_PID=""
+OPENAPI_FILE="$(mktemp /tmp/openapi.XXXXXX.json)"
 
 cleanup() {
-    if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-        echo -e "${YELLOW}Stopping server (PID: $SERVER_PID)...${NC}"
-        kill "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
-    fi
     rm -f "$OPENAPI_FILE"
 }
 
 trap cleanup EXIT
 
-echo -e "${GREEN}Building server with dev-tools...${NC}"
+echo -e "${GREEN}Building generate-openapi binary...${NC}"
 cd "$SCRIPT_DIR"
-cargo build --release --features dev-tools 2>&1 | tail -5
+cargo build --release --bin generate-openapi 2>&1 | tail -5
 
-echo -e "${GREEN}Starting server temporarily...${NC}"
-./target/release/omniviv-api &
-SERVER_PID=$!
-
-# Wait for server to be ready
-echo -e "${YELLOW}Waiting for server to start...${NC}"
-MAX_ATTEMPTS=30
-ATTEMPT=0
-while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-    if curl -s "http://localhost:$SERVER_PORT/api-docs/openapi.json" > /dev/null 2>&1; then
-        echo -e "${GREEN}Server is ready!${NC}"
-        break
-    fi
-    ATTEMPT=$((ATTEMPT + 1))
-    sleep 1
-done
-
-if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-    echo -e "${RED}Server failed to start within ${MAX_ATTEMPTS} seconds${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}Fetching OpenAPI specification...${NC}"
-curl -s "http://localhost:$SERVER_PORT/api-docs/openapi.json" | jq . > "$OPENAPI_FILE"
+echo -e "${GREEN}Generating OpenAPI specification...${NC}"
+./target/release/generate-openapi > "$OPENAPI_FILE"
 
 if [ ! -s "$OPENAPI_FILE" ]; then
-    echo -e "${RED}Failed to fetch OpenAPI specification${NC}"
+    echo -e "${RED}Failed to generate OpenAPI specification${NC}"
     exit 1
 fi
 

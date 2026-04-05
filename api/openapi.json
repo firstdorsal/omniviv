@@ -608,6 +608,68 @@
                 "null"
               ]
             }
+          },
+          {
+            "name": "ref",
+            "in": "query",
+            "description": "Filter by route ref (e.g., \"RE 9\", \"506\"). Spaces are ignored for matching.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "name_contains",
+            "in": "query",
+            "description": "Search routes whose name contains this text (e.g., \"München\")",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "operator",
+            "in": "query",
+            "description": "Filter by operator (substring match, e.g., \"Augsburger\" matches \"Augsburger Verkehrsgesellschaft\")",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "near_lat",
+            "in": "query",
+            "description": "Filter to routes near this latitude (used with `near_lon`, searches within ~30km)",
+            "required": false,
+            "schema": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            }
+          },
+          {
+            "name": "near_lon",
+            "in": "query",
+            "description": "Filter to routes near this longitude (used with `near_lat`, searches within ~30km)",
+            "required": false,
+            "schema": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            }
           }
         ],
         "responses": {
@@ -655,6 +717,47 @@
         }
       }
     },
+    "/api/routes/search": {
+      "post": {
+        "tags": [
+          "routes"
+        ],
+        "summary": "Search routes with filters (POST body)",
+        "operationId": "search_routes",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RouteSearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Matching routes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteListResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/routes/visible": {
       "post": {
         "tags": [
@@ -679,6 +782,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/VisibleRoutesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -785,51 +898,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/stations": {
-      "get": {
-        "tags": [
-          "stations"
-        ],
-        "summary": "List all stations that have platforms linked to them, optionally filtered by bounding box",
-        "operationId": "list_stations",
-        "parameters": [
-          {
-            "name": "bbox",
-            "in": "query",
-            "description": "Bounding box: west,south,east,north (comma-separated)",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "List of stations with their platforms and stop positions",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/StationListResponse"
                 }
               }
             }
@@ -2031,6 +2099,56 @@
           }
         }
       },
+      "RouteSearchRequest": {
+        "type": "object",
+        "description": "Request body for POST /api/routes/search",
+        "properties": {
+          "name_contains": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Search routes whose name contains this text (e.g., \"München\")"
+          },
+          "near_lat": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Filter to routes near this latitude (searches within ~30km)"
+          },
+          "near_lon": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Filter to routes near this longitude (searches within ~30km)"
+          },
+          "operator": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by operator (substring match)"
+          },
+          "ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by route ref (e.g., \"RE 9\", \"506\"). Spaces are ignored for matching."
+          },
+          "route_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filter by route type (e.g., \"tram\", \"bus\")"
+          }
+        }
+      },
       "RouteStop": {
         "type": "object",
         "required": [
@@ -2142,7 +2260,7 @@
           "min_zoom": {
             "type": "integer",
             "format": "int32",
-            "description": "Minimum zoom level at which this station should be shown (6=rail, 10=tram, 13=bus)"
+            "description": "Minimum zoom level at which this station should be shown"
           },
           "name": {
             "type": [
@@ -2180,20 +2298,13 @@
             "items": {
               "$ref": "#/components/schemas/StationStopPosition"
             }
-          }
-        }
-      },
-      "StationListResponse": {
-        "type": "object",
-        "required": [
-          "stations"
-        ],
-        "properties": {
-          "stations": {
+          },
+          "transport_modes": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Station"
-            }
+              "type": "string"
+            },
+            "description": "Transport modes serving this station (e.g. [\"tram\", \"bus\"])"
           }
         }
       },
@@ -2407,9 +2518,24 @@
           "stops"
         ],
         "properties": {
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Route color from GTFS (hex, e.g. \"#ee1d23\")"
+          },
           "destination": {
             "type": "string",
             "description": "Final destination of this vehicle"
+          },
+          "gtfs_route_type": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "GTFS route_type: 0=tram, 1=subway, 2=rail, 3=bus, 4=ferry, etc."
           },
           "line_number": {
             "type": "string",
@@ -2421,6 +2547,13 @@
               "null"
             ],
             "description": "The trip_id of the next trip this physical vehicle will operate.\nSet when the vehicle loops back (e.g., tram reaching end of line\nand starting the return trip). Used for seamless follow-mode\ntransitions and vehicle reuse rendering."
+          },
+          "operator": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator/agency name (e.g. \"DB Regio AG Bayern\", \"Go-Ahead\")"
           },
           "origin": {
             "type": [
@@ -2679,6 +2812,10 @@
     {
       "name": "health",
       "description": "Service health check"
+    },
+    {
+      "name": "gtfs-stops",
+      "description": "GTFS stop data queries"
     },
     {
       "name": "mapping",

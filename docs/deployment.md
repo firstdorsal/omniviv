@@ -186,7 +186,6 @@ Fonts for map labels go in `deployment/data/fonts/`.
 
 -   API health: `GET /api/health` returns service health status
 -   API root: `GET /` returns "Omniviv API"
--   Swagger UI: `GET /swagger-ui/`
 
 ## Volumes
 

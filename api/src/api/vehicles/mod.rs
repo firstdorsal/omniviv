@@ -1,5 +1,5 @@
 pub mod builder;
-mod list;
+pub mod list; // pub for utoipauto auto-discovery
 
 pub use list::*;
 

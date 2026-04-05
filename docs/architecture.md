@@ -47,7 +47,7 @@ Key features:
 - **Framework**: Axum 0.8 (Rust async web framework)
 - **Runtime**: Tokio
 - **Database**: PostgreSQL via SQLx
-- **Documentation**: OpenAPI via utoipa with Swagger UI at `/swagger-ui/` (requires `dev-tools` feature)
+- **Documentation**: OpenAPI via utoipa + utoipauto (auto-discovery), Swagger UI at `/swagger-ui/` (requires `dev-tools` feature)
 
 #### Modules
 
@@ -89,6 +89,9 @@ api/src/
 │   ├── types.rs        # Shared types (Departure, etc.)
 │   └── issues.rs       # Issue detection
 ├── config.rs           # Configuration management
+├── openapi.rs          # OpenAPI spec definition (utoipauto auto-discovery)
+├── bin/
+│   └── generate_openapi.rs  # Build-time OpenAPI JSON generator
 └── main.rs             # Application entry point
 ```
 

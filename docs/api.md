@@ -11,9 +11,16 @@ The Omniviv API provides real-time public transport data including stations, dep
 
 ## Interactive Documentation
 
-Swagger UI is available at `/swagger-ui/` when the API is running.
+Swagger UI is available at `/swagger-ui/` when running with `--features dev-tools`.
 
-OpenAPI spec: `/api-docs/openapi.json`
+The OpenAPI spec can be generated at build time (no running server required):
+```bash
+cd api
+bash generate-api.sh
+```
+This saves the spec to `api/openapi.json` and generates the TypeScript client.
+
+When running with dev-tools, the spec is also served at `/api-docs/openapi.json`.
 
 ## Endpoints
 
