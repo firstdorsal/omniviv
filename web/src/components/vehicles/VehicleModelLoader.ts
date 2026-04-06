@@ -8,7 +8,7 @@
  * Two JSON formats are supported (discriminated by `kind`):
  *
  *   1. **`kind: "simple"`** (trams, buses, scooters, …):
- *      `lods.box.segments` contains a flat array of segments.
+ *      `lods.lowPoly.segments` contains a flat array of segments.
  *      `totalLength` must be provided manually.
  *
  *   2. **`kind: "consist"`** (trains with variable car counts):
@@ -53,7 +53,7 @@ interface SimpleModelDefinition {
     totalLength: number;
     articulationGap: number;
     lods: {
-        box: {
+        lowPoly: {
             segments: VehicleSegment[];
         };
     };
@@ -77,7 +77,7 @@ type VehicleModelDefinition = SimpleModelDefinition | ConsistModelDefinition;
 
 interface ManifestEntry {
     vehicleType: string;
-    /** Available LOD levels — currently only "box" is implemented. */
+    /** Available LOD levels — currently only "lowPoly" is implemented. */
     lods: string[];
 }
 
@@ -346,8 +346,8 @@ export class VehicleModelLoader {
     }
 
     private parseSimpleModel(data: SimpleModelDefinition): VehicleModel {
-        if (!data.lods?.box?.segments || !Array.isArray(data.lods.box.segments)) {
-            throw new Error(`Simple model "${data.id}" missing "lods.box.segments" array`);
+        if (!data.lods?.lowPoly?.segments || !Array.isArray(data.lods.lowPoly.segments)) {
+            throw new Error(`Simple model "${data.id}" missing "lods.lowPoly.segments" array`);
         }
         return {
             id: data.id,
@@ -357,7 +357,7 @@ export class VehicleModelLoader {
             width: data.width,
             totalLength: data.totalLength,
             articulationGap: data.articulationGap,
-            segments: data.lods.box.segments,
+            segments: data.lods.lowPoly.segments,
             metadata: data.metadata,
         };
     }

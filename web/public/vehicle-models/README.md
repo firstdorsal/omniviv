@@ -27,7 +27,7 @@ Use when the vehicle is a fixed set of segments. You must calculate `totalLength
   "totalLength": 12.185,
   "articulationGap": 0,
   "lods": {
-    "box": {
+    "lowPoly": {
       "segments": [
         { "length": 12.185, "type": "cab", "height": 3.3, "hasBogies": true }
       ]
@@ -84,7 +84,7 @@ Use when the vehicle has named car types and multiple possible configurations.
 |-------|------|-------------|
 | `totalLength` | number | Total length in meters (must be manually correct) |
 | `articulationGap` | number | Gap between segments in meters |
-| `lods.box.segments` | array | Ordered segments from front to back |
+| `lods.lowPoly.segments` | array | Ordered segments from front to back |
 
 ### Consist-only fields
 | Field | Type | Description |
@@ -129,7 +129,7 @@ Per-consist metadata overrides are merged on top of model-level metadata.
 {
   "version": 1,
   "models": {
-    "model-id": { "vehicleType": "rail", "lods": ["box"] }
+    "model-id": { "vehicleType": "rail", "lods": ["lowPoly"] }
   },
   "defaults": {
     "augsburg": { "tram": "siemens-combino-augsburg", "bus": "man-lions-city-12" }
@@ -137,4 +137,4 @@ Per-consist metadata overrides are merged on top of model-level metadata.
 }
 ```
 
-The `lods` array lists available LOD levels. Currently only `"box"` (fill-extrusion polygons) is implemented.
+The `lods` array lists available LOD levels. Currently only `"lowPoly"` (fill-extrusion polygons) is implemented.

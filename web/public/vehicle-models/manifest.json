@@ -3,55 +3,55 @@
   "models": {
     "siemens-combino-augsburg": {
       "vehicleType": "tram",
-      "lods": ["box"]
+      "lods": ["lowPoly"]
     },
     "man-lions-city-12": {
       "vehicleType": "bus",
-      "lods": ["box"]
+      "lods": ["lowPoly"]
     },
     "man-lions-city-18": {
       "vehicleType": "bus",
-      "lods": ["box"]
+      "lods": ["lowPoly"]
     },
     "ice-1": {
       "vehicleType": "rail",
-      "lods": ["box"]
+      "lods": ["lowPoly"]
     },
     "ice-2": {
       "vehicleType": "rail",
-      "lods": ["box"]
+      "lods": ["lowPoly"]
     },
     "ice-3": {
       "vehicleType": "rail",
-      "lods": ["box"]
+      "lods": ["lowPoly"]
     },
     "ice-4": {
       "vehicleType": "rail",
-      "lods": ["box"]
+      "lods": ["lowPoly"]
     },
     "siemens-mireo": {
       "vehicleType": "rail",
-      "lods": ["box"]
+      "lods": ["lowPoly"]
     },
     "bombardier-talent-2": {
       "vehicleType": "rail",
-      "lods": ["box"]
+      "lods": ["lowPoly"]
     },
     "alstom-coradia-continental": {
       "vehicleType": "rail",
-      "lods": ["box"]
+      "lods": ["lowPoly"]
     },
     "alstom-lint-41": {
       "vehicleType": "rail",
-      "lods": ["box"]
+      "lods": ["lowPoly"]
     },
     "alstom-lint-54": {
       "vehicleType": "rail",
-      "lods": ["box"]
+      "lods": ["lowPoly"]
     },
     "db-br-425": {
       "vehicleType": "rail",
-      "lods": ["box"]
+      "lods": ["lowPoly"]
     }
   },
   "defaults": {

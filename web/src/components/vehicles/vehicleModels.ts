@@ -377,7 +377,7 @@ export function calculateSegmentDistances(model: VehicleModel): Array<{
 
 /**
  * Get all unique distances along the vehicle that need track positions.
- * Utility for future LOD rendering; not used in the current box renderer.
+ * Utility for future LOD rendering; not used in the current low-poly renderer.
  */
 export function getAllTrackDistances(model: VehicleModel): number[] {
     const distances = new Set<number>();

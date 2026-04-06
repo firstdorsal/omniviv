@@ -8,7 +8,7 @@
   "totalLength": 12.185,
   "articulationGap": 0,
   "lods": {
-    "box": {
+    "lowPoly": {
       "segments": [
         { "length": 12.185, "type": "cab", "height": 3.3, "hasBogies": true }
       ]

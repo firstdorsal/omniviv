@@ -7,9 +7,9 @@ import { FALLBACK_VEHICLE_MODEL, DEFAULT_INTER_UNIT_GAP } from "./vehicleModels"
 const MOCK_MANIFEST = {
     version: 1,
     models: {
-        "test-tram": { vehicleType: "tram", lods: ["box"] },
-        "test-bus": { vehicleType: "bus", lods: ["box"] },
-        "test-train": { vehicleType: "rail", lods: ["box"] },
+        "test-tram": { vehicleType: "tram", lods: ["lowPoly"] },
+        "test-bus": { vehicleType: "bus", lods: ["lowPoly"] },
+        "test-train": { vehicleType: "rail", lods: ["lowPoly"] },
     },
     defaults: {
         augsburg: { tram: "test-tram", bus: "test-bus", rail: "test-train" },
@@ -26,7 +26,7 @@ const MOCK_TRAM = {
     totalLength: 42,
     articulationGap: 0.3,
     lods: {
-        box: {
+        lowPoly: {
             segments: [
                 { length: 7.2, type: "cab", height: 3.4, hasBogies: true },
                 { length: 6.8, type: "passenger", height: 3.4, hasBogies: false },
@@ -45,7 +45,7 @@ const MOCK_BUS = {
     totalLength: 12,
     articulationGap: 0,
     lods: {
-        box: {
+        lowPoly: {
             segments: [{ length: 12, type: "cab", height: 3.3, hasBogies: true }],
         },
     },
@@ -188,7 +188,7 @@ describe("VehicleModelLoader", () => {
     it("getManifestEntry returns metadata", async () => {
         const loader = createLoader();
         await loader.init();
-        expect(loader.getManifestEntry("test-tram")).toEqual({ vehicleType: "tram", lods: ["box"] });
+        expect(loader.getManifestEntry("test-tram")).toEqual({ vehicleType: "tram", lods: ["lowPoly"] });
     });
 });
 
@@ -218,7 +218,7 @@ describe("VehicleModelLoader — error handling", () => {
         const badModel = { id: "bad", name: "Bad", manufacturer: "X", vehicleType: "bus", width: 2 };
         vi.stubGlobal("fetch", vi.fn((url: string) => {
             const body = url.endsWith("manifest.json")
-                ? { version: 1, models: { bad: { vehicleType: "bus", lods: ["box"] } }, defaults: { augsburg: { bus: "bad" } } }
+                ? { version: 1, models: { bad: { vehicleType: "bus", lods: ["lowPoly"] } }, defaults: { augsburg: { bus: "bad" } } }
                 : badModel;
             return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
         }));
@@ -237,7 +237,7 @@ describe("VehicleModelLoader — error handling", () => {
         };
         vi.stubGlobal("fetch", vi.fn((url: string) => {
             const body = url.endsWith("manifest.json")
-                ? { version: 1, models: { "bad-train": { vehicleType: "rail", lods: ["box"] } }, defaults: { augsburg: { rail: "bad-train" } } }
+                ? { version: 1, models: { "bad-train": { vehicleType: "rail", lods: ["lowPoly"] } }, defaults: { augsburg: { rail: "bad-train" } } }
                 : badTrain;
             return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
         }));
@@ -256,7 +256,7 @@ describe("VehicleModelLoader — error handling", () => {
         };
         vi.stubGlobal("fetch", vi.fn((url: string) => {
             const body = url.endsWith("manifest.json")
-                ? { version: 1, models: { "bad-train2": { vehicleType: "rail", lods: ["box"] } }, defaults: { augsburg: { rail: "bad-train2" } } }
+                ? { version: 1, models: { "bad-train2": { vehicleType: "rail", lods: ["lowPoly"] } }, defaults: { augsburg: { rail: "bad-train2" } } }
                 : badTrain;
             return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
         }));
@@ -354,7 +354,7 @@ describe("VehicleModelLoader — consist resolution", () => {
         };
         vi.stubGlobal("fetch", vi.fn((url: string) => {
             const body = url.endsWith("manifest.json")
-                ? { version: 1, models: { "bogie-test": { vehicleType: "rail", lods: ["box"] } }, defaults: { augsburg: { rail: "bogie-test" } } }
+                ? { version: 1, models: { "bogie-test": { vehicleType: "rail", lods: ["lowPoly"] } }, defaults: { augsburg: { rail: "bogie-test" } } }
                 : trainWithBogieOverride;
             return Promise.resolve({ ok: true, json: () => Promise.resolve(body) } as Response);
         }));
@@ -504,7 +504,7 @@ describe("VehicleModelLoader — ICE JSON validation", () => {
 
         const mockManifest = {
             version: 1,
-            models: { [data.id]: { vehicleType: data.vehicleType, lods: ["box"] } },
+            models: { [data.id]: { vehicleType: data.vehicleType, lods: ["lowPoly"] } },
             defaults: { augsburg: { [data.vehicleType]: data.id } },
         };
         vi.stubGlobal("fetch", vi.fn((url: string) => {
