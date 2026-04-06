@@ -35,9 +35,15 @@ interface DepartureMonitorProps {
     headerExtra?: ReactNode;
     /** Debug mode (for popup context where React context is unavailable) */
     debugMode?: boolean;
+    /**
+     * When true, constrains the monitor to a popup-friendly size
+     * (capped width and height) and makes the departures list scroll
+     * vertically while the header stays sticky.
+     */
+    popupMode?: boolean;
 }
 
-export function DepartureMonitor({ osmId, title, stationName, refIfopt, routeColors, routeTypes, referenceTime, isPinned, onPin, onUnpin, onClose, onLocate, headerExtra, debugMode }: DepartureMonitorProps) {
+export function DepartureMonitor({ osmId, title, stationName, refIfopt, routeColors, routeTypes, referenceTime, isPinned, onPin, onUnpin, onClose, onLocate, headerExtra, debugMode, popupMode }: DepartureMonitorProps) {
     const [events, setEvents] = useState<Departure[]>([]);
     const [gtfsStopId, setGtfsStopId] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
@@ -149,7 +155,7 @@ export function DepartureMonitor({ osmId, title, stationName, refIfopt, routeCol
     );
 
     return (
-        <div className="flex flex-col">
+        <div className={`flex flex-col${popupMode ? " max-h-[70vh] w-[24rem] max-w-[calc(100vw-2rem)]" : ""}`}>
             <div className="px-4 py-3">
                 <DepartureMonitorHeader
                     title={title}
@@ -163,7 +169,7 @@ export function DepartureMonitor({ osmId, title, stationName, refIfopt, routeCol
                     actions={actions}
                 />
             </div>
-            <div className="border-t border-border px-4 py-2">
+            <div className={`border-t border-border px-4 py-2${popupMode ? " min-h-0 flex-1 overflow-y-auto" : ""}`}>
                 {loading ? (
                     <div className="text-xs text-muted-foreground">Laden...</div>
                 ) : (

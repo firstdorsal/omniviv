@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { EventType, type Departure } from "../api";
 import { LineBadge } from "./LineBadge";
 import { LiveTime } from "./LiveTime";
+import { ScrollArea, ScrollBar } from "./ui/scroll-area";
 
 /** Convert GTFS route_type integer to LineBadge mode string */
 function gtfsRouteTypeToMode(type: number | null): string | undefined {
@@ -175,7 +176,7 @@ function RelativeTime({ time, isLive, delayMinutes, referenceTime }: {
     );
 }
 
-export function DepartureTable({ events, routeColors, routeTypes, referenceTime, maxTrips = 8 }: DepartureTableProps) {
+export function DepartureTable({ events, routeColors, routeTypes, referenceTime, maxTrips = 100 }: DepartureTableProps) {
     const [visibleColumns, setVisibleColumns] = useState<TimeColumn[]>(["relative"]);
     const [hiddenLines, setHiddenLines] = useState<Set<string>>(new Set());
 
@@ -256,27 +257,30 @@ export function DepartureTable({ events, routeColors, routeTypes, referenceTime,
 
     return (
         <div className="flex flex-col gap-2">
-            {/* Line filter */}
+            {/* Line filter — single row, scrolls horizontally when overflowing */}
             {availableLines.length > 1 && (
-                <div className="flex flex-wrap items-center gap-1">
-                    {availableLines.map((line) => {
-                        const isHidden = hiddenLines.has(line);
-                        return (
-                            <button
-                                key={line}
-                                className={`cursor-pointer select-none transition-all inline-flex ${isHidden ? "opacity-30 line-through" : ""}`}
-                                onClick={() => toggleLine(line)}
-                            >
-                                <LineBadge
-                                    line={line}
-                                    color={lineInfo.get(line)?.color ?? routeColors.get(`${lineInfo.get(line)?.mode}:${line}`) ?? routeColors.get(line)}
-                                    mode={lineInfo.get(line)?.mode ?? routeTypes?.get(line)}
-                                    operator={lineInfo.get(line)?.operator}
-                                />
-                            </button>
-                        );
-                    })}
-                </div>
+                <ScrollArea className="w-full">
+                    <div className="flex items-center gap-1 pb-3">
+                        {availableLines.map((line) => {
+                            const isHidden = hiddenLines.has(line);
+                            return (
+                                <button
+                                    key={line}
+                                    className={`inline-flex shrink-0 cursor-pointer select-none transition-all ${isHidden ? "opacity-30 line-through" : ""}`}
+                                    onClick={() => toggleLine(line)}
+                                >
+                                    <LineBadge
+                                        line={line}
+                                        color={lineInfo.get(line)?.color ?? routeColors.get(`${lineInfo.get(line)?.mode}:${line}`) ?? routeColors.get(line)}
+                                        mode={lineInfo.get(line)?.mode ?? routeTypes?.get(line)}
+                                        operator={lineInfo.get(line)?.operator}
+                                    />
+                                </button>
+                            );
+                        })}
+                    </div>
+                    <ScrollBar orientation="horizontal" />
+                </ScrollArea>
             )}
 
             {/* Time column toggles — multi-select */}

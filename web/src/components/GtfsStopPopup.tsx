@@ -66,7 +66,7 @@ export function GtfsStopPopup({ stopId, stopName, ifopt, isAssigned, routeColors
 
     return (
         <div className="bg-popover text-popover-foreground rounded-lg">
-            <div className="flex flex-col">
+            <div className="flex max-h-[70vh] w-[24rem] max-w-[calc(100vw-2rem)] flex-col">
                 <div className="px-4 py-3">
                     <DepartureMonitorHeader
                         title={stopName}
@@ -91,7 +91,7 @@ export function GtfsStopPopup({ stopId, stopName, ifopt, isAssigned, routeColors
                         </>}
                     />
                 </div>
-                <div className="border-t border-border px-4 py-2">
+                <div className="border-t border-border min-h-0 flex-1 overflow-y-auto px-4 py-2">
                     {loading ? (
                         <div className="text-xs text-muted-foreground">Laden...</div>
                     ) : (

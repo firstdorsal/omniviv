@@ -32,6 +32,7 @@ export function PlatformPopup({ platform, stationName, routeColors, routeTypes, 
             onUnpin={onUnpin ? () => onUnpin(String(platform.osm_id)) : undefined}
             onClose={onClose}
             debugMode={debugMode}
+            popupMode
         />
     );
 }
