@@ -140,8 +140,15 @@ export class MapLayerManager {
             minzoom: 8,
             maxzoom: 24,
             filter: ["<=", ["get", "min_zoom"], ["zoom"]],
-            layout: { "text-field": ["get", "name"], "text-font": ["Open Sans Regular"], "text-size": 12, "text-offset": [0, 1.5], "text-anchor": "top" },
-            paint: { "text-color": "#065f46", "text-halo-color": "#ffffff", "text-halo-width": 2 },
+            layout: {
+                "text-field": ["get", "name"],
+                "text-font": ["Open Sans Regular"],
+                "text-size": 12,
+                "text-offset": [0, 1.5],
+                "text-anchor": "top",
+                "text-padding": 4,
+            },
+            paint: { "text-color": "#000000", "text-halo-color": "#ffffff", "text-halo-width": 2 },
         });
 
         // User-facing steige markers (precalculated platforms + stop_position fallback, z15+)
@@ -165,7 +172,10 @@ export class MapLayerManager {
                 "text-size": 11,
                 "text-offset": [0, 0.9],
                 "text-anchor": "top",
-                "text-allow-overlap": true,
+                // Default `text-allow-overlap: false` lets MapLibre automatically
+                // hide labels that would collide. `text-padding` adds breathing
+                // room around each label so dense platform clusters declutter.
+                "text-padding": 4,
                 visibility: "none",
             },
             paint: { "text-color": "#1e293b", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
