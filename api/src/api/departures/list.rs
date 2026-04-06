@@ -106,14 +106,23 @@ async fn filter_by_direction(
 ) -> Vec<Departure> {
     // Load OSM route refs + direction keywords for this platform.
     // Each row: (route_ref, route_type, route_name)
+    //
+    // Query is split into two index-friendly UNION branches instead of a
+    // single LEFT JOIN ... WHERE OR. The OR-of-different-tables predicate
+    // forces a parallel hash join over the entire route_stops/platforms/
+    // stop_positions tables (~300ms). Splitting into two index lookups by
+    // ref_ifopt drops this to <10ms.
     let rows: Vec<(String, String, Option<String>)> = if let Some(osm_id) = parse_osm_stop_id(stop_id) {
         match sqlx::query_as(
             r#"
             SELECT DISTINCT r.ref, r.route_type, r.name
-            FROM route_stops rs
-            JOIN routes r ON r.osm_id = rs.route_id
+            FROM (
+                SELECT route_id FROM route_stops WHERE platform_id = $1
+                UNION
+                SELECT route_id FROM route_stops WHERE stop_position_id = $1
+            ) rids
+            JOIN routes r ON r.osm_id = rids.route_id
             WHERE r.ref IS NOT NULL
-              AND (rs.platform_id = $1 OR rs.stop_position_id = $1)
             "#,
         )
         .bind(osm_id)
@@ -127,12 +136,17 @@ async fn filter_by_direction(
         match sqlx::query_as(
             r#"
             SELECT DISTINCT r.ref, r.route_type, r.name
-            FROM route_stops rs
-            JOIN routes r ON r.osm_id = rs.route_id
-            LEFT JOIN platforms p ON p.osm_id = rs.platform_id
-            LEFT JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+            FROM (
+                SELECT rs.route_id FROM route_stops rs
+                JOIN platforms p ON p.osm_id = rs.platform_id
+                WHERE p.ref_ifopt = $1
+                UNION
+                SELECT rs.route_id FROM route_stops rs
+                JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+                WHERE sp.ref_ifopt = $1
+            ) rids
+            JOIN routes r ON r.osm_id = rids.route_id
             WHERE r.ref IS NOT NULL
-              AND (p.ref_ifopt = $1 OR sp.ref_ifopt = $1)
             "#,
         )
         .bind(stop_id)
@@ -233,15 +247,23 @@ async fn fill_osm_route_colors(departures: &mut [Departure], stop_id: &str, pool
         color: String,
     }
 
+    // See `filter_by_direction` for the reasoning behind the UNION split:
+    // a single OR-of-different-tables predicate forces a parallel seq scan
+    // over the route_stops/platforms/stop_positions tables, which is ~300ms.
+    // Splitting into two index lookups by ref_ifopt (or by direct osm_id)
+    // drops this to <10ms.
     let color_rows: Vec<ColorRow> = if let Some(osm_id) = parse_osm_stop_id(stop_id) {
         // OSM ID-based: look up routes by the platform/stop_position osm_id directly
         sqlx::query_as(
             r#"
             SELECT DISTINCT r.ref AS line_ref, r.route_type, r.color
-            FROM routes r
-            JOIN route_stops rs ON rs.route_id = r.osm_id
+            FROM (
+                SELECT route_id FROM route_stops WHERE platform_id = $1
+                UNION
+                SELECT route_id FROM route_stops WHERE stop_position_id = $1
+            ) rids
+            JOIN routes r ON r.osm_id = rids.route_id
             WHERE r.color IS NOT NULL
-              AND (rs.platform_id = $1 OR rs.stop_position_id = $1)
             "#,
         )
         .bind(osm_id)
@@ -253,12 +275,17 @@ async fn fill_osm_route_colors(departures: &mut [Departure], stop_id: &str, pool
         sqlx::query_as(
             r#"
             SELECT DISTINCT r.ref AS line_ref, r.route_type, r.color
-            FROM routes r
-            JOIN route_stops rs ON rs.route_id = r.osm_id
-            LEFT JOIN platforms p ON p.osm_id = rs.platform_id
-            LEFT JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+            FROM (
+                SELECT rs.route_id FROM route_stops rs
+                JOIN platforms p ON p.osm_id = rs.platform_id
+                WHERE p.ref_ifopt = $1
+                UNION
+                SELECT rs.route_id FROM route_stops rs
+                JOIN stop_positions sp ON sp.osm_id = rs.stop_position_id
+                WHERE sp.ref_ifopt = $1
+            ) rids
+            JOIN routes r ON r.osm_id = rids.route_id
             WHERE r.color IS NOT NULL
-              AND (p.ref_ifopt = $1 OR sp.ref_ifopt = $1)
             "#,
         )
         .bind(stop_id)
@@ -503,11 +530,13 @@ pub async fn get_departures_by_stop(
 
     // Supplement with schedule-based departures using GTFS stop IDs directly.
     // This ensures all mapped GTFS stops are included (not just the first one).
+    // Goes through the schedule cache so repeat requests for the same stop
+    // skip the DB roundtrips entirely.
     let gtfs_stop_set: HashSet<String> = all_gtfs_ids.iter().cloned().collect();
-    let schedule_result = crate::providers::timetables::gtfs::static_data::db::build_schedule_from_db_by_gtfs_stop(
-        &state.pool,
-        &gtfs_stop_set,
-    ).await;
+    let schedule_result = state
+        .schedule_cache
+        .get_or_build_by_gtfs_stop(&state.pool, &gtfs_stop_set)
+        .await;
     match schedule_result {
         Ok(schedule) => {
             let time_horizon = Duration::minutes(STOP_BOARD_HORIZON_MINUTES);
