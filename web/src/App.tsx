@@ -10,6 +10,7 @@ import { LineBadge } from "./components/LineBadge";
 import { NavigationPanel, type Location, type PickMode, type RouteItinerary } from "./components/NavigationPanel";
 import { TimeControlPanel } from "./components/TimeControlPanel";
 import { VehicleMonitorPanel } from "./components/VehicleMonitorPanel";
+import { LineFilterPanel } from "./components/LineFilterPanel";
 import { VehicleTrackingPanel } from "./components/VehicleTrackingPanel";
 import TransitMap from "./components/map/Map";
 import { Button } from "./components/ui/button";
@@ -94,6 +95,33 @@ export type { RouteVehicles } from "./hooks/useVehicleUpdates";
 /** All transit route types from OSM (used for route type filtering in the Linien toggle). */
 const ALL_ROUTE_TYPES = ["tram", "bus", "train", "light_rail", "subway", "ferry"] as const;
 
+/**
+ * Per-line override state.
+ *
+ * - "shown": force this line visible at `opacity` regardless of the type filter.
+ * - "hidden": force this line hidden regardless of the type filter.
+ * - "auto": tracked in the override list but follows the type filter (no force).
+ *
+ * Lines without an entry in `lineOverrides` are not tracked at all and follow the type filter.
+ */
+export type LineOverrideState = "shown" | "hidden" | "auto";
+export interface LineOverride {
+    osm_id: number;
+    state: LineOverrideState;
+    /** Opacity (0–1). Only applies when state is "shown". Default 0.8. */
+    opacity: number;
+    /** Route ref (e.g. "1", "RE 9") used for the LineBadge */
+    ref: string | null;
+    /** Route name (long form) shown as subtitle */
+    name: string | null;
+    /** Route type used for the LineBadge icon */
+    route_type: string;
+    /** Route color for the LineBadge background */
+    color: string | null;
+    /** Operator name for operator logo lookup */
+    operator: string | null;
+}
+
 interface PersistedOptions {
     showStations: boolean;
     showSteige: boolean;
@@ -102,6 +130,8 @@ interface PersistedOptions {
     showDebugPlatforms: boolean;
     showRoutes: boolean;
     visibleRouteTypes: string[];
+    /** Explicit per-line overrides keyed by OSM relation ID. */
+    lineOverrides: LineOverride[];
     showVehicles: boolean;
     showPois: boolean;
     debugOptions: DebugOptions;
@@ -117,6 +147,7 @@ const DEFAULT_OPTIONS: PersistedOptions = {
     showDebugPlatforms: false,
     showRoutes: true,
     visibleRouteTypes: [...ALL_ROUTE_TYPES],
+    lineOverrides: [],
     showVehicles: true,
     showPois: false,
     debugOptions: {
@@ -273,6 +304,7 @@ export default function App() {
         showDebugPlatforms,
         showRoutes,
         visibleRouteTypes,
+        lineOverrides,
         showVehicles,
         showPois,
         debugOptions,
@@ -1192,6 +1224,17 @@ export default function App() {
                                             </label>
                                         </div>
                                     </div>
+
+                                    <div className="mt-4 border-t pt-4">
+                                        <LineFilterPanel
+                                            overrides={lineOverrides}
+                                            onOverridesChange={(next) => updateOption("lineOverrides", next)}
+                                            visibleRouteTypes={visibleRouteTypes}
+                                            onVisibleRouteTypesChange={(next) => updateOption("visibleRouteTypes", next)}
+                                            routesEnabled={showRoutes}
+                                            onRoutesEnabledChange={(next) => updateOption("showRoutes", next)}
+                                        />
+                                    </div>
                                 </div>
 
                                 <div className="mt-6 border-t pt-4">
@@ -1275,6 +1318,7 @@ export default function App() {
                     showDebugPlatforms={showDebugPlatforms}
                     showRoutes={showRoutes}
                     visibleRouteTypes={visibleRouteTypes}
+                    lineOverrides={lineOverrides}
                     showVehicles={showVehicles}
                     showPois={showPois}
                     debugOptions={debugOptions}

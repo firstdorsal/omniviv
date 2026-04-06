@@ -2103,6 +2103,28 @@
         "type": "object",
         "description": "Request body for POST /api/routes/search",
         "properties": {
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "City filter — substring match against name, operator, and network\n(e.g., \"augsburg\" matches AVV/Augsburger Verkehrsgesellschaft routes)."
+          },
+          "deduplicate": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "When true, deduplicate variants of the same line by (ref, route_type, operator).\nOne representative route per group is returned. Default: true."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Maximum number of results to return (default 100, max 500)"
+          },
           "name_contains": {
             "type": [
               "string",
@@ -2132,6 +2154,13 @@
               "null"
             ],
             "description": "Filter by operator (substring match)"
+          },
+          "query": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free-text query that matches against route ref OR name (case-insensitive substring).\nWhen set, all routes where ref starts with the query OR name contains it are returned."
           },
           "ref": {
             "type": [

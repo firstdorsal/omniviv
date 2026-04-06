@@ -441,20 +441,59 @@ export class MapLayerManager {
     }
 
     /**
-     * Toggle route layer visibility and filter by transport type.
-     * When visibleTypes is provided, only features with matching route_type are shown.
+     * Toggle route layer visibility, filter by transport type, and apply per-line overrides.
+     *
+     * Visibility logic:
+     *   visible = ((type matches OR force-shown) AND NOT force-hidden)
+     *
+     * Opacity is applied via a `case` expression, with each force-shown override
+     * contributing its own opacity value. All other features use the default 0.8.
      */
-    setRoutesVisible(show: boolean, visibleTypes?: string[]): void {
+    setRoutesVisible(
+        show: boolean,
+        visibleTypes?: string[],
+        lineOverrides?: { osm_id: number; state: "shown" | "hidden" | "auto"; opacity: number }[],
+    ): void {
         if (!this.map.getLayer("routes-line")) return;
         this.map.setLayoutProperty("routes-line", "visibility", show ? "visible" : "none");
-        if (visibleTypes && visibleTypes.length > 0) {
-            this.map.setFilter("routes-line", ["in", ["get", "route_type"], ["literal", visibleTypes]]);
-        } else if (visibleTypes && visibleTypes.length === 0) {
-            // No types selected — hide everything via impossible filter
-            this.map.setFilter("routes-line", ["==", ["get", "route_type"], "__none__"]);
+
+        const shownOverrides = (lineOverrides ?? []).filter((o) => o.state === "shown");
+        const hiddenIds = (lineOverrides ?? []).filter((o) => o.state === "hidden").map((o) => o.osm_id);
+        const shownIds = shownOverrides.map((o) => o.osm_id);
+
+        // Build the visibility filter:
+        //   ["all", typeOrShown, NOT hidden]
+        const typeFilter: any = visibleTypes && visibleTypes.length > 0
+            ? ["in", ["get", "route_type"], ["literal", visibleTypes]]
+            : visibleTypes && visibleTypes.length === 0
+                ? ["==", ["get", "route_type"], "__none__"]
+                : null;
+
+        const filters: any[] = ["all"];
+        if (typeFilter) {
+            if (shownIds.length > 0) {
+                // type matches OR force-shown
+                filters.push(["any", typeFilter, ["in", ["get", "osm_id"], ["literal", shownIds]]]);
+            } else {
+                filters.push(typeFilter);
+            }
+        }
+        if (hiddenIds.length > 0) {
+            filters.push(["!", ["in", ["get", "osm_id"], ["literal", hiddenIds]]]);
+        }
+        this.map.setFilter("routes-line", filters.length > 1 ? filters : null);
+
+        // Apply per-line opacity via a `case` expression with one branch per shown override.
+        if (shownOverrides.length > 0) {
+            const expression: any[] = ["case"];
+            for (const override of shownOverrides) {
+                expression.push(["==", ["get", "osm_id"], override.osm_id]);
+                expression.push(override.opacity);
+            }
+            expression.push(0.8); // default opacity
+            this.map.setPaintProperty("routes-line", "line-opacity", expression);
         } else {
-            // No filter specified — show all
-            this.map.setFilter("routes-line", null);
+            this.map.setPaintProperty("routes-line", "line-opacity", 0.8);
         }
     }
 

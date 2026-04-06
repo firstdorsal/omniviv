@@ -482,6 +482,48 @@ export interface RouteListResponse {
   routes: Route[];
 }
 
+/** Request body for POST /api/routes/search */
+export interface RouteSearchRequest {
+  /**
+   * City filter — substring match against name, operator, and network
+   * (e.g., "augsburg" matches AVV/Augsburger Verkehrsgesellschaft routes).
+   */
+  city?: string | null;
+  /**
+   * When true, deduplicate variants of the same line by (ref, route_type, operator).
+   * One representative route per group is returned. Default: true.
+   */
+  deduplicate?: boolean | null;
+  /**
+   * Maximum number of results to return (default 100, max 500)
+   * @format int64
+   */
+  limit?: number | null;
+  /** Search routes whose name contains this text (e.g., "München") */
+  name_contains?: string | null;
+  /**
+   * Filter to routes near this latitude (searches within ~30km)
+   * @format double
+   */
+  near_lat?: number | null;
+  /**
+   * Filter to routes near this longitude (searches within ~30km)
+   * @format double
+   */
+  near_lon?: number | null;
+  /** Filter by operator (substring match) */
+  operator?: string | null;
+  /**
+   * Free-text query that matches against route ref OR name (case-insensitive substring).
+   * When set, all routes where ref starts with the query OR name contains it are returned.
+   */
+  query?: string | null;
+  /** Filter by route ref (e.g., "RE 9", "506"). Spaces are ignored for matching. */
+  ref?: string | null;
+  /** Filter by route type (e.g., "tram", "bus") */
+  route_type?: string | null;
+}
+
 export interface RouteStop {
   /** @format int64 */
   platform_id?: number | null;
@@ -518,7 +560,7 @@ export interface Station {
   /** @format double */
   lon: number;
   /**
-   * Minimum zoom level at which this station should be shown (6=rail, 10=tram, 13=bus)
+   * Minimum zoom level at which this station should be shown
    * @format int32
    */
   min_zoom: number;
@@ -532,10 +574,6 @@ export interface Station {
   stop_positions: StationStopPosition[];
   /** Transport modes serving this station (e.g. ["tram", "bus"]) */
   transport_modes?: string[];
-}
-
-export interface StationListResponse {
-  stations: Station[];
 }
 
 /** Platform info nested in station response */
@@ -1264,6 +1302,22 @@ Used for stops without ref:IFOPT in OSM (e.g. München U-Bahn).
       query?: {
         /** Filter by route type (e.g., "tram", "bus") */
         route_type?: string | null;
+        /** Filter by route ref (e.g., "RE 9", "506"). Spaces are ignored for matching. */
+        ref?: string | null;
+        /** Search routes whose name contains this text (e.g., "München") */
+        name_contains?: string | null;
+        /** Filter by operator (substring match, e.g., "Augsburger" matches "Augsburger Verkehrsgesellschaft") */
+        operator?: string | null;
+        /**
+         * Filter to routes near this latitude (used with `near_lon`, searches within ~30km)
+         * @format double
+         */
+        near_lat?: number | null;
+        /**
+         * Filter to routes near this longitude (used with `near_lat`, searches within ~30km)
+         * @format double
+         */
+        near_lon?: number | null;
       },
       params: RequestParams = {},
     ) =>
@@ -1287,6 +1341,24 @@ Used for stops without ref:IFOPT in OSM (e.g. München U-Bahn).
       this.request<RouteColorsResponse, any>({
         path: `/api/routes/colors`,
         method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags routes
+     * @name SearchRoutes
+     * @summary Search routes with filters (POST body)
+     * @request POST:/api/routes/search
+     */
+    searchRoutes: (data: RouteSearchRequest, params: RequestParams = {}) =>
+      this.request<RouteListResponse, ErrorResponse>({
+        path: `/api/routes/search`,
+        method: "POST",
+        body: data,
+        type: ContentType.Json,
         format: "json",
         ...params,
       }),
@@ -1340,29 +1412,6 @@ Used for stops without ref:IFOPT in OSM (e.g. München U-Bahn).
       this.request<RouteGeometry, ErrorResponse>({
         path: `/api/routes/${routeId}/geometry`,
         method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags stations
-     * @name ListStations
-     * @summary List all stations that have platforms linked to them, optionally filtered by bounding box
-     * @request GET:/api/stations
-     */
-    listStations: (
-      query?: {
-        /** Bounding box: west,south,east,north (comma-separated) */
-        bbox?: string | null;
-      },
-      params: RequestParams = {},
-    ) =>
-      this.request<StationListResponse, ErrorResponse>({
-        path: `/api/stations`,
-        method: "GET",
-        query: query,
         format: "json",
         ...params,
       }),

@@ -133,6 +133,9 @@ pub async fn list_routes(
 /// Request body for POST /api/routes/search
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RouteSearchRequest {
+    /// Free-text query that matches against route ref OR name (case-insensitive substring).
+    /// When set, all routes where ref starts with the query OR name contains it are returned.
+    pub query: Option<String>,
     /// Filter by route type (e.g., "tram", "bus")
     pub route_type: Option<String>,
     /// Filter by route ref (e.g., "RE 9", "506"). Spaces are ignored for matching.
@@ -142,10 +145,18 @@ pub struct RouteSearchRequest {
     pub name_contains: Option<String>,
     /// Filter by operator (substring match)
     pub operator: Option<String>,
+    /// City filter — substring match against name, operator, and network
+    /// (e.g., "augsburg" matches AVV/Augsburger Verkehrsgesellschaft routes).
+    pub city: Option<String>,
     /// Filter to routes near this latitude (searches within ~30km)
     pub near_lat: Option<f64>,
     /// Filter to routes near this longitude (searches within ~30km)
     pub near_lon: Option<f64>,
+    /// Maximum number of results to return (default 100, max 500)
+    pub limit: Option<i64>,
+    /// When true, deduplicate variants of the same line by (ref, route_type, operator).
+    /// One representative route per group is returned. Default: false (variants are real routes).
+    pub deduplicate: Option<bool>,
 }
 
 /// Search routes with filters (POST body)
@@ -164,12 +175,18 @@ pub async fn search_routes(
     Json(body): Json<RouteSearchRequest>,
 ) -> Result<Json<RouteListResponse>, (StatusCode, Json<ErrorResponse>)> {
     const MAX_SEARCH_LEN: usize = 200;
+    let query_text = body.query.as_deref().map(|s| &s[..s.len().min(MAX_SEARCH_LEN)]);
+    let query_ref_normalized = query_text.map(|q| q.replace(' ', "").to_uppercase());
     let ref_normalized = body.route_ref.as_deref().map(|r| r.replace(' ', "").to_uppercase());
     let name_contains = body.name_contains.as_deref().map(|s| &s[..s.len().min(MAX_SEARCH_LEN)]);
     let operator = body.operator.as_deref().map(|s| &s[..s.len().min(MAX_SEARCH_LEN)]);
-    let routes: Vec<Route> = sqlx::query_as(
-        r#"
-        SELECT DISTINCT r.osm_id, r.osm_type, r.name, r.ref, r.route_type, r.operator, r.network, r.color
+    let city = body.city.as_deref().map(|s| &s[..s.len().min(MAX_SEARCH_LEN)]);
+    let limit = body.limit.unwrap_or(100).clamp(1, 500);
+    let deduplicate = body.deduplicate.unwrap_or(false);
+
+    // Common WHERE clause shared between dedup and non-dedup paths
+    let base_query = r#"
+        SELECT r.osm_id, r.osm_type, r.name, r.ref, r.route_type, r.operator, r.network, r.color
         FROM routes r
         WHERE ($1::text IS NULL OR r.route_type = $1)
           AND ($2::text IS NULL OR UPPER(REPLACE(r.ref, ' ', '')) = $2)
@@ -190,18 +207,48 @@ pub async fn search_routes(
                     AND s.lon BETWEEN $6 - 0.4 AND $6 + 0.4
               )
           ))
-        ORDER BY r.ref, r.name
-        "#,
-    )
-    .bind(body.route_type.as_deref())
-    .bind(ref_normalized.as_deref())
-    .bind(name_contains)
-    .bind(operator)
-    .bind(body.near_lat)
-    .bind(body.near_lon)
-    .fetch_all(&pool)
-    .await
-    .map_err(internal_error)?;
+          AND ($7::text IS NULL OR (
+              UPPER(REPLACE(r.ref, ' ', '')) LIKE $7 || '%'
+              OR r.name ILIKE '%' || $8 || '%'
+          ))
+          AND ($10::text IS NULL OR (
+              r.name ILIKE '%' || $10 || '%'
+              OR r.operator ILIKE '%' || $10 || '%'
+              OR r.network ILIKE '%' || $10 || '%'
+          ))
+    "#;
+
+    // Deduplicated query: pick one representative per (ref, route_type, operator) group.
+    // Non-deduplicated: return all matching variants.
+    let sql = if deduplicate {
+        format!(
+            r#"
+            WITH matches AS ({base_query})
+            SELECT DISTINCT ON (route_type, COALESCE(ref, ''), COALESCE(operator, ''))
+                osm_id, osm_type, name, ref, route_type, operator, network, color
+            FROM matches
+            ORDER BY route_type, COALESCE(ref, ''), COALESCE(operator, ''), name
+            LIMIT $9
+            "#
+        )
+    } else {
+        format!("{base_query} ORDER BY r.ref, r.name LIMIT $9")
+    };
+
+    let routes: Vec<Route> = sqlx::query_as(&sql)
+        .bind(body.route_type.as_deref())
+        .bind(ref_normalized.as_deref())
+        .bind(name_contains)
+        .bind(operator)
+        .bind(body.near_lat)
+        .bind(body.near_lon)
+        .bind(query_ref_normalized.as_deref())
+        .bind(query_text)
+        .bind(limit)
+        .bind(city)
+        .fetch_all(&pool)
+        .await
+        .map_err(internal_error)?;
 
     Ok(Json(RouteListResponse { routes }))
 }

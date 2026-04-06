@@ -86,6 +86,7 @@ interface MapProps {
     showDebugPlatforms: boolean;
     showRoutes: boolean;
     visibleRouteTypes: string[];
+    lineOverrides: import("../../App").LineOverride[];
     showVehicles: boolean;
     showPois: boolean;
     debugOptions: DebugOptions;
@@ -236,8 +237,12 @@ export default class TransitMap extends React.Component<MapProps, MapState> {
                     this.props.showDebugPlatforms,
                 );
             }
-            if (prevProps.showRoutes !== this.props.showRoutes || prevProps.visibleRouteTypes !== this.props.visibleRouteTypes) {
-                this.layerManager.setRoutesVisible(this.props.showRoutes, this.props.visibleRouteTypes);
+            if (
+                prevProps.showRoutes !== this.props.showRoutes
+                || prevProps.visibleRouteTypes !== this.props.visibleRouteTypes
+                || prevProps.lineOverrides !== this.props.lineOverrides
+            ) {
+                this.layerManager.setRoutesVisible(this.props.showRoutes, this.props.visibleRouteTypes, this.props.lineOverrides);
             }
             if (prevProps.showPois !== this.props.showPois) {
                 this.setPoiVisibility(this.props.showPois);
@@ -363,7 +368,7 @@ export default class TransitMap extends React.Component<MapProps, MapState> {
             this.props.showDebugStops,
             this.props.showDebugPlatforms,
         );
-        this.layerManager.setRoutesVisible(this.props.showRoutes, this.props.visibleRouteTypes);
+        this.layerManager.setRoutesVisible(this.props.showRoutes, this.props.visibleRouteTypes, this.props.lineOverrides);
         this.layerManager.updateMappingData(this.props.mappingLines ?? [], this.props.mappingGtfsStops ?? [], this.props.stations);
         this.setPoiVisibility(this.props.showPois);
 
