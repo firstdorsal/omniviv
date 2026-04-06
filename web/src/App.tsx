@@ -91,6 +91,9 @@ const STORAGE_KEY = "live-tram-options";
 export type { RouteVehicles } from "./hooks/useVehicleUpdates";
 
 
+/** All transit route types from OSM (used for route type filtering in the Linien toggle). */
+const ALL_ROUTE_TYPES = ["tram", "bus", "train", "light_rail", "subway", "ferry"] as const;
+
 interface PersistedOptions {
     showStations: boolean;
     showSteige: boolean;
@@ -98,6 +101,7 @@ interface PersistedOptions {
     showDebugStops: boolean;
     showDebugPlatforms: boolean;
     showRoutes: boolean;
+    visibleRouteTypes: string[];
     showVehicles: boolean;
     showPois: boolean;
     debugOptions: DebugOptions;
@@ -112,6 +116,7 @@ const DEFAULT_OPTIONS: PersistedOptions = {
     showDebugStops: false,
     showDebugPlatforms: false,
     showRoutes: true,
+    visibleRouteTypes: [...ALL_ROUTE_TYPES],
     showVehicles: true,
     showPois: false,
     debugOptions: {
@@ -267,6 +272,7 @@ export default function App() {
         showDebugStops,
         showDebugPlatforms,
         showRoutes,
+        visibleRouteTypes,
         showVehicles,
         showPois,
         debugOptions,
@@ -992,6 +998,34 @@ export default function App() {
                                             Linien{visibleRouteIds.length > 0 ? ` (${visibleRouteIds.length})` : ""}
                                         </span>
                                     </label>
+                                    {(
+                                        [
+                                            ["tram", "Straßenbahn"],
+                                            ["bus", "Bus"],
+                                            ["train", "Bahn"],
+                                            ["light_rail", "S-Bahn"],
+                                            ["subway", "U-Bahn"],
+                                            ["ferry", "Fähre"],
+                                        ] as const
+                                    ).map(([type, label]) => (
+                                        <label key={type} className="flex cursor-pointer items-center gap-3 pl-6">
+                                            <Checkbox
+                                                checked={visibleRouteTypes.includes(type)}
+                                                onCheckedChange={(checked) => {
+                                                    const next = checked
+                                                        ? [...visibleRouteTypes, type]
+                                                        : visibleRouteTypes.filter((t) => t !== type);
+                                                    updateOption("visibleRouteTypes", next);
+                                                }}
+                                                disabled={!showRoutes}
+                                            />
+                                            <span
+                                                className={`text-sm ${showRoutes ? "" : "text-muted-foreground"}`}
+                                            >
+                                                {label}
+                                            </span>
+                                        </label>
+                                    ))}
 
                                     <label className="flex cursor-pointer items-center gap-3">
                                         <Checkbox
@@ -1240,6 +1274,7 @@ export default function App() {
                     showDebugStops={showDebugStops}
                     showDebugPlatforms={showDebugPlatforms}
                     showRoutes={showRoutes}
+                    visibleRouteTypes={visibleRouteTypes}
                     showVehicles={showVehicles}
                     showPois={showPois}
                     debugOptions={debugOptions}
@@ -1271,6 +1306,7 @@ export default function App() {
                     onTrackedVehicleLost={handleTrackedVehicleLost}
                     routeColors={routeColors}
                     routeTypes={routeTypes}
+                    routeIdTypes={routeIdTypes}
                     debugMode={options.debugMode}
                 />
             </div>

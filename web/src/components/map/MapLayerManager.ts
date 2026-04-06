@@ -441,11 +441,20 @@ export class MapLayerManager {
     }
 
     /**
-     * Toggle route layer visibility (routes served via vector tiles)
+     * Toggle route layer visibility and filter by transport type.
+     * When visibleTypes is provided, only features with matching route_type are shown.
      */
-    setRoutesVisible(show: boolean): void {
-        if (this.map.getLayer("routes-line")) {
-            this.map.setLayoutProperty("routes-line", "visibility", show ? "visible" : "none");
+    setRoutesVisible(show: boolean, visibleTypes?: string[]): void {
+        if (!this.map.getLayer("routes-line")) return;
+        this.map.setLayoutProperty("routes-line", "visibility", show ? "visible" : "none");
+        if (visibleTypes && visibleTypes.length > 0) {
+            this.map.setFilter("routes-line", ["in", ["get", "route_type"], ["literal", visibleTypes]]);
+        } else if (visibleTypes && visibleTypes.length === 0) {
+            // No types selected — hide everything via impossible filter
+            this.map.setFilter("routes-line", ["==", ["get", "route_type"], "__none__"]);
+        } else {
+            // No filter specified — show all
+            this.map.setFilter("routes-line", null);
         }
     }
 

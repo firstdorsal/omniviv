@@ -688,6 +688,95 @@ test.describe("Route tiles render correctly", () => {
     });
 });
 
+// ─── Route type filtering (Linien sub-toggles) ──────────────────────────────
+
+test.describe("Route type filtering", () => {
+    test("Ebenen panel shows route type sub-toggles under Linien", async ({ page }) => {
+        await page.goto("/#48.3655,10.8945,14.00,0,0");
+        await waitForMap(page);
+        await openLayersPanel(page);
+
+        for (const label of ["Straßenbahn", "Bus", "Bahn", "S-Bahn", "U-Bahn", "Fähre"]) {
+            const checkbox = page.getByRole("checkbox", { name: label, exact: true });
+            await expect(checkbox, `${label} sub-toggle must exist`).toBeVisible();
+        }
+    });
+
+    test("route type sub-toggles are disabled when Linien is off", async ({ page }) => {
+        await page.goto("/#48.3655,10.8945,14.00,0,0");
+        await waitForMap(page);
+        await openLayersPanel(page);
+
+        // Turn off Linien
+        if (await isCheckboxChecked(page, "Linien")) {
+            await toggleCheckbox(page, "Linien");
+        }
+
+        const busCheckbox = page.locator('label:has-text("Bus") button[role="checkbox"]');
+        await expect(busCheckbox).toBeDisabled();
+    });
+
+    test("unchecking a route type filters it from the map", async ({ page }) => {
+        await page.goto("/#48.3655,10.8945,14.00,0,0");
+        await waitForMap(page);
+        await openLayersPanel(page);
+
+        // Ensure Linien is on
+        if (!await isCheckboxChecked(page, "Linien")) {
+            await toggleCheckbox(page, "Linien");
+        }
+
+        // Count features with all types on
+        await page.waitForTimeout(2000);
+        const allCount = await page.evaluate(() => {
+            const map = (window as any).map;
+            if (!map) return 0;
+            return map.queryRenderedFeatures({ layers: ["routes-line"] }).length;
+        });
+
+        // Uncheck "Straßenbahn" (tram) — Augsburg has many tram routes
+        await toggleCheckbox(page, "Straßenbahn");
+        await page.waitForTimeout(1000);
+
+        const filteredCount = await page.evaluate(() => {
+            const map = (window as any).map;
+            if (!map) return 0;
+            return map.queryRenderedFeatures({ layers: ["routes-line"] }).length;
+        });
+
+        expect(allCount, "Should have route features with all types on").toBeGreaterThan(0);
+        expect(filteredCount, "Should have fewer features with tram filtered out").toBeLessThan(allCount);
+
+        // Verify no tram features remain
+        const tramFeatures = await page.evaluate(() => {
+            const map = (window as any).map;
+            if (!map) return [];
+            return map.queryRenderedFeatures({ layers: ["routes-line"] })
+                .filter((f: any) => f.properties?.route_type === "tram");
+        });
+        expect(tramFeatures.length, "No tram features should remain after unchecking Straßenbahn").toBe(0);
+
+        // Re-enable tram
+        await toggleCheckbox(page, "Straßenbahn");
+    });
+
+    test("route features have route_type property for filtering", async ({ page }) => {
+        await page.goto("/#48.3655,10.8945,14.00,0,0");
+        await waitForMap(page);
+
+        const types = await page.evaluate(() => {
+            const map = (window as any).map;
+            if (!map) return [];
+            const features = map.queryRenderedFeatures({ layers: ["routes-line"] });
+            return [...new Set(features.map((f: any) => f.properties?.route_type).filter(Boolean))].sort();
+        });
+
+        expect(types.length, "Route features should have route_type values").toBeGreaterThan(0);
+        // Augsburg should have at least tram and bus routes
+        expect(types, "Should include tram routes").toContain("tram");
+    });
+});
+
 // ─── Full integration: all user-facing layers together ──────────────────────
 
 test.describe("Full station infrastructure integration", () => {
