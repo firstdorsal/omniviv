@@ -17,8 +17,9 @@ import { PlacePopup } from "../PlacePopup";
 import { PlatformPopup } from "../PlatformPopup";
 import { StationPopup } from "../StationPopup";
 import { Button } from "../ui/button";
-import { VehicleRenderer } from "../vehicles/VehicleRenderer";
+import { VehicleRenderer, ANIMATION_INTERVAL } from "../vehicles/VehicleRenderer";
 import type { DebugOptions } from "../vehicles/VehicleRenderer";
+import { VehicleModelLoader } from "../vehicles/VehicleModelLoader";
 import { VehicleTracker } from "../vehicles/VehicleTracker";
 import type { SmoothedVehiclePosition } from "../vehicles/vehicleUtils";
 import { MapLayerManager } from "./MapLayerManager";
@@ -56,7 +57,7 @@ async function loadMapStyle(): Promise<maplibregl.StyleSpecification> {
 
     return style;
 }
-const ANIMATION_INTERVAL = 50;
+// ANIMATION_INTERVAL is imported from VehicleRenderer
 
 type PickMode = "start" | "end" | null;
 
@@ -76,6 +77,7 @@ interface MapProps {
     stations: Station[];
     vehicleRouteGeometries: Map<number, number[][][]>;
     routeIdColors: Map<number, string>;
+    routeIdTypes?: Map<number, string>;
     vehicles: RouteVehicles[];
     showStations: boolean;
     showSteige: boolean;
@@ -158,6 +160,9 @@ export default class TransitMap extends React.Component<MapProps, MapState> {
     // Data caches
     // Route colors and types come from props (this.props.routeColors, this.props.routeTypes)
     private routeGeometries = new Map<number, number[][][]>();
+    private routeTypes = new globalThis.Map<number, string>();
+    private modelLoader = new VehicleModelLoader("augsburg");
+    private modelLoaderInitAborted = false;
     private hashSyncTimer: ReturnType<typeof setTimeout> | null = null;
 
     // Guards against stale async initialization (e.g. React StrictMode double-mount).
@@ -205,7 +210,8 @@ export default class TransitMap extends React.Component<MapProps, MapState> {
         if (prevProps.vehicleRouteGeometries !== this.props.vehicleRouteGeometries ||
             prevProps.routeColors !== this.props.routeColors ||
             prevProps.routeTypes !== this.props.routeTypes ||
-            prevProps.routeIdColors !== this.props.routeIdColors) {
+            prevProps.routeIdColors !== this.props.routeIdColors ||
+            prevProps.routeIdTypes !== this.props.routeIdTypes) {
             this.updateRouteData();
         }
 
@@ -320,6 +326,7 @@ export default class TransitMap extends React.Component<MapProps, MapState> {
     }
 
     private cleanup() {
+        this.modelLoaderInitAborted = true;
         this.vehicleRenderer?.dispose();
         this.vehicleTracker?.dispose();
 
@@ -338,7 +345,10 @@ export default class TransitMap extends React.Component<MapProps, MapState> {
 
     private updateRouteData() {
         this.routeGeometries = new Map(this.props.vehicleRouteGeometries);
-        this.vehicleRenderer?.updateRouteData(this.props.routeColors, this.props.routeTypes, this.props.routeIdColors, this.routeGeometries);
+        if (this.props.routeIdTypes) {
+            this.routeTypes = this.props.routeIdTypes;
+        }
+        this.vehicleRenderer?.updateRouteData(this.props.routeColors, this.props.routeTypes, this.props.routeIdColors, this.routeGeometries, this.routeTypes);
     }
 
     private updateAllMapData() {
@@ -567,8 +577,13 @@ export default class TransitMap extends React.Component<MapProps, MapState> {
                 }
             });
 
-            this.vehicleRenderer = new VehicleRenderer(this.layerManager, this.props.routeColors, this.props.routeTypes, this.props.routeIdColors, this.routeGeometries);
+            this.vehicleRenderer = new VehicleRenderer(this.layerManager, this.props.routeColors, this.props.routeTypes, this.props.routeIdColors, this.routeGeometries, this.routeTypes, this.modelLoader);
             this.vehicleRenderer.setZoom(this.map.getZoom());
+            this.modelLoader.init().catch((error) => {
+                if (!this.modelLoaderInitAborted) {
+                    console.warn("[Map] Vehicle model loader init failed, using fallback models:", error);
+                }
+            });
             this.vehicleRenderer.setOnTrackedVehicleLost(() => {
                 const tripId = this.props.trackedTripId;
                 if (tripId) {

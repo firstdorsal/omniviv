@@ -1,0 +1,28 @@
+{
+  "kind": "simple",
+  "id": "man-lions-city-18",
+  "name": "MAN Lion's City 18",
+  "manufacturer": "MAN",
+  "vehicleType": "bus",
+  "width": 2.55,
+  "totalLength": 18.06,
+  "articulationGap": 0.3,
+  "lods": {
+    "box": {
+      "segments": [
+        { "length": 10.3, "type": "cab", "height": 3.3, "hasBogies": true },
+        { "length": 7.46, "type": "passenger", "height": 3.3, "hasBogies": true }
+      ]
+    }
+  },
+
+  "metadata": {
+    "wikidataId": "Q11764787",
+    "inServiceSince": 2005,
+    "designation": "Lion's City G",
+    "tractionType": "biogas",
+    "lowFloor": true,
+    "operators": ["Stadtwerke Augsburg"],
+    "countries": ["DE"]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "kind": "simple",
+  "id": "man-lions-city-12",
+  "name": "MAN Lion's City 12",
+  "manufacturer": "MAN",
+  "vehicleType": "bus",
+  "width": 2.55,
+  "totalLength": 12.185,
+  "articulationGap": 0,
+  "lods": {
+    "box": {
+      "segments": [
+        { "length": 12.185, "type": "cab", "height": 3.3, "hasBogies": true }
+      ]
+    }
+  },
+
+  "metadata": {
+    "wikidataId": "Q1881162",
+    "inServiceSince": 2005,
+    "designation": "Lion's City 12",
+    "tractionType": "biogas",
+    "lowFloor": true,
+    "operators": ["Stadtwerke Augsburg"],
+    "countries": ["DE"]
+  }
+}

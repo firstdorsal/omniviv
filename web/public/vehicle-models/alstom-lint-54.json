@@ -1,0 +1,35 @@
+{
+  "kind": "simple",
+  "id": "alstom-lint-54",
+  "name": "Alstom Coradia LINT 54 (BR 622)",
+  "manufacturer": "Alstom",
+  "vehicleType": "rail",
+  "width": 2.75,
+  "totalLength": 54.27,
+  "articulationGap": 0.8,
+  "lods": {
+    "box": {
+      "segments": [
+        { "length": 26.735, "type": "end_car", "height": 4.31, "hasBogies": true, "powered": true },
+        { "length": 26.735, "type": "end_car", "height": 4.31, "hasBogies": true, "powered": true }
+      ]
+    }
+  },
+
+  "metadata": {
+    "wikidataId": "Q64236271",
+    "maxSpeedKmh": 140,
+    "inServiceSince": 2011,
+    "unitsBuilt": 279,
+    "designation": "BR 622",
+    "tractionType": "diesel",
+    "powerKw": 1170,
+    "gaugeMm": 1435,
+    "massTonnes": 96,
+    "seatingCapacity": 170,
+    "lowFloor": true,
+    "floorHeightMm": 800,
+    "operators": ["DB Regio", "vlexx", "erixx"],
+    "countries": ["DE"]
+  }
+}

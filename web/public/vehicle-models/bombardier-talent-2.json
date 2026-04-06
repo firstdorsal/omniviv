@@ -1,0 +1,83 @@
+{
+  "kind": "consist",
+  "id": "bombardier-talent-2",
+  "name": "Bombardier Talent 2 (BR 442)",
+  "manufacturer": "Bombardier Transportation",
+  "vehicleType": "rail",
+  "width": 2.925,
+
+  "cars": {
+    "end-car": {
+      "length": 20.05,
+      "height": 4.26,
+      "type": "end_car",
+      "powered": true
+    },
+    "middle-car": {
+      "length": 16.1,
+      "height": 4.26,
+      "type": "second_class",
+      "powered": false
+    },
+    "middle-car-powered": {
+      "length": 16.1,
+      "height": 4.26,
+      "type": "second_class",
+      "powered": true
+    }
+  },
+
+  "consists": {
+    "2-car": {
+      "cars": ["end-car", "end-car"],
+      "couplingGap": 0.3,
+      "metadata": {
+        "seatingCapacity": 115,
+        "powerKw": 2020
+      }
+    },
+    "3-car": {
+      "cars": ["end-car", "middle-car", "end-car"],
+      "couplingGap": 0.3,
+      "metadata": {
+        "massTonnes": 114,
+        "seatingCapacity": 172,
+        "powerKw": 2020
+      }
+    },
+    "4-car": {
+      "cars": ["end-car", "middle-car", "middle-car-powered", "end-car"],
+      "couplingGap": 0.3,
+      "metadata": {
+        "seatingCapacity": 237,
+        "powerKw": 3030
+      }
+    },
+    "5-car": {
+      "cars": ["end-car", "middle-car", "middle-car-powered", "middle-car", "end-car"],
+      "couplingGap": 0.3,
+      "metadata": {
+        "massTonnes": 173,
+        "seatingCapacity": 300,
+        "powerKw": 3030
+      }
+    }
+  },
+
+  "defaultConsist": "5-car",
+
+  "metadata": {
+    "wikidataId": "Q729191",
+    "maxSpeedKmh": 160,
+    "inServiceSince": 2008,
+    "unitsBuilt": 464,
+    "designation": "BR 442",
+    "tractionType": "electric",
+    "powerSupply": "15kV 16.7Hz AC",
+    "gaugeMm": 1435,
+    "lowFloor": true,
+    "floorHeightMm": 695,
+    "operators": ["DB Regio", "National Express", "Abellio"],
+    "countries": ["DE"]
+  }
+}

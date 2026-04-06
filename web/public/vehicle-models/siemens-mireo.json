@@ -1,0 +1,65 @@
+{
+  "kind": "consist",
+  "id": "siemens-mireo",
+  "name": "Siemens Mireo (BR 463)",
+  "manufacturer": "Siemens Mobility",
+  "vehicleType": "rail",
+  "width": 2.808,
+
+  "cars": {
+    "end-car": {
+      "length": 25.03,
+      "height": 4.208,
+      "type": "end_car",
+      "powered": true
+    },
+    "middle-car": {
+      "length": 19.8,
+      "height": 4.208,
+      "type": "second_class",
+      "powered": false
+    }
+  },
+
+  "consists": {
+    "2-car": {
+      "cars": ["end-car", "end-car"],
+      "couplingGap": 0.3,
+      "metadata": {
+        "massTonnes": 93,
+        "seatingCapacity": 120
+      }
+    },
+    "3-car": {
+      "cars": ["end-car", "middle-car", "end-car"],
+      "couplingGap": 0.3,
+      "metadata": {
+        "massTonnes": 110,
+        "seatingCapacity": 190
+      }
+    },
+    "4-car": {
+      "cars": ["end-car", "middle-car", "middle-car", "end-car"],
+      "couplingGap": 0.3,
+      "metadata": {
+        "seatingCapacity": 240
+      }
+    }
+  },
+
+  "defaultConsist": "3-car",
+
+  "metadata": {
+    "wikidataId": "Q26836339",
+    "maxSpeedKmh": 160,
+    "inServiceSince": 2020,
+    "designation": "BR 463",
+    "tractionType": "electric",
+    "powerSupply": "15kV 16.7Hz AC",
+    "gaugeMm": 1435,
+    "lowFloor": true,
+    "floorHeightMm": 705,
+    "operators": ["DB Regio", "Arverio Bayern"],
+    "countries": ["DE"]
+  }
+}

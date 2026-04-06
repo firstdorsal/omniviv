@@ -1,0 +1,64 @@
+{
+  "kind": "consist",
+  "id": "db-br-425",
+  "name": "DB BR 425",
+  "manufacturer": "Siemens / Adtranz / DWA",
+  "vehicleType": "rail",
+  "width": 2.84,
+
+  "cars": {
+    "end-car": {
+      "length": 17.84,
+      "height": 3.75,
+      "type": "end_car",
+      "powered": true
+    },
+    "middle-car": {
+      "length": 15.505,
+      "height": 3.75,
+      "type": "second_class",
+      "powered": false
+    }
+  },
+
+  "consists": {
+    "4-car": {
+      "cars": ["end-car", "middle-car", "middle-car", "end-car"],
+      "couplingGap": 0.3,
+      "metadata": {
+        "wikidataId": "Q540147",
+        "massTonnes": 114,
+        "seatingCapacity": 206,
+        "powerKw": 2350
+      }
+    },
+    "2-car": {
+      "cars": ["end-car", "end-car"],
+      "couplingGap": 0.3,
+      "metadata": {
+        "wikidataId": "Q1195019",
+        "massTonnes": 68,
+        "seatingCapacity": 100,
+        "powerKw": 1175,
+        "designation": "BR 426"
+      }
+    }
+  },
+
+  "defaultConsist": "4-car",
+
+  "metadata": {
+    "wikidataId": "Q540147",
+    "maxSpeedKmh": 160,
+    "inServiceSince": 1999,
+    "unitsBuilt": 249,
+    "designation": "BR 425",
+    "tractionType": "electric",
+    "powerSupply": "15kV 16.7Hz AC",
+    "gaugeMm": 1435,
+    "lowFloor": true,
+    "floorHeightMm": 780,
+    "operators": ["DB Regio"],
+    "countries": ["DE"]
+  }
+}

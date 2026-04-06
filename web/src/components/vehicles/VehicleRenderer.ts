@@ -5,7 +5,8 @@
 import type { RouteVehicles } from "../../App";
 import type { MapLayerManager } from "../map/MapLayerManager";
 import { createVehicleIcon } from "./VehicleIconFactory";
-import { calculateSegmentDistances, getAugsburgVehicleModel } from "./vehicleModels";
+import type { SegmentDistances, VehicleModelLoader } from "./VehicleModelLoader";
+import { ANIMATION_INTERVAL, FALLBACK_VEHICLE_MODEL, METERS_PER_DEGREE_AT_EQUATOR, MIN_SEGMENT_RENDER_LENGTH, calculateSegmentDistances, type VehicleModel } from "./vehicleModels";
 import {
     calculateVehiclePosition,
     createSmoothedPosition,
@@ -28,7 +29,7 @@ import {
 } from "./features";
 import { computePositionCaps } from "./features/collisionAvoidance";
 
-const ANIMATION_INTERVAL = 50;
+export { ANIMATION_INTERVAL };
 
 /** How long to retain a smoothed position after a vehicle disappears from data (ms).
  *  Prevents teleporting when vehicles flicker in/out due to GTFS-RT update timing. */
@@ -52,6 +53,9 @@ export class VehicleRenderer {
     private layerManager: MapLayerManager;
     private routeColors: globalThis.Map<string, string>;
     private routeTypes: globalThis.Map<string, string>;
+    private routeTypesById: globalThis.Map<number, string>;
+    private modelLoader: VehicleModelLoader;
+    private fallbackSegmentDistances = calculateSegmentDistances(FALLBACK_VEHICLE_MODEL);
     /** Map of routeId (OSM) → color from visible routes response — most specific lookup */
     private routeIdColors: globalThis.Map<number, string>;
     private routeGeometries: globalThis.Map<number, number[][][]>;
@@ -108,13 +112,17 @@ export class VehicleRenderer {
         routeColors: globalThis.Map<string, string>,
         routeTypes: globalThis.Map<string, string>,
         routeIdColors: globalThis.Map<number, string>,
-        routeGeometries: globalThis.Map<number, number[][][]>
+        routeGeometries: globalThis.Map<number, number[][][]>,
+        routeTypesById: globalThis.Map<number, string>,
+        modelLoader: VehicleModelLoader,
     ) {
         this.layerManager = layerManager;
         this.routeColors = routeColors;
         this.routeTypes = routeTypes;
         this.routeIdColors = routeIdColors;
         this.routeGeometries = routeGeometries;
+        this.routeTypesById = routeTypesById;
+        this.modelLoader = modelLoader;
         this.buildLinearizedRoutes();
 
         installMonitorGlobal(this.lifecycleMonitor);
@@ -133,6 +141,26 @@ export class VehicleRenderer {
         }
     }
 
+    private resolveModel(routeId: number): VehicleModel {
+        if (this.modelLoader.ready) {
+            const routeType = this.routeTypesById.get(routeId);
+            if (routeType) {
+                return this.modelLoader.getDefaultModel(routeType);
+            }
+        }
+        return FALLBACK_VEHICLE_MODEL;
+    }
+
+    private resolveSegmentDistances(model: VehicleModel): SegmentDistances {
+        if (this.modelLoader.ready) {
+            return this.modelLoader.getSegmentDistances(model);
+        }
+        if (model.id === FALLBACK_VEHICLE_MODEL.id) {
+            return this.fallbackSegmentDistances;
+        }
+        return calculateSegmentDistances(model);
+    }
+
     /**
      * Update route data references
      */
@@ -140,12 +168,14 @@ export class VehicleRenderer {
         routeColors: globalThis.Map<string, string>,
         routeTypes: globalThis.Map<string, string>,
         routeIdColors: globalThis.Map<number, string>,
-        routeGeometries: globalThis.Map<number, number[][][]>
+        routeGeometries: globalThis.Map<number, number[][][]>,
+        routeTypesById: globalThis.Map<number, string>,
     ): void {
         this.routeColors = routeColors;
         this.routeTypes = routeTypes;
         this.routeIdColors = routeIdColors;
         this.routeGeometries = routeGeometries;
+        this.routeTypesById = routeTypesById;
         this.buildLinearizedRoutes();
     }
 
@@ -532,12 +562,12 @@ export class VehicleRenderer {
         const modelFeatures: GeoJSON.Feature[] = [];
         const debugFeatures: GeoJSON.Feature[] = [];
 
-        const vehicleModel = getAugsburgVehicleModel();
-        const segmentDistances = calculateSegmentDistances(vehicleModel);
-
         for (const { position: targetPosition, routeId, routeColor } of allPositions) {
             const smoothedPosition = this.smoothedPositions.get(targetPosition.tripId);
             if (!smoothedPosition) continue;
+
+            const vehicleModel = this.resolveModel(routeId);
+            const segmentDistances = this.resolveSegmentDistances(vehicleModel);
 
             // Get processed render position (or fall back to smoothed)
             const renderPos: RenderPosition = renderPositions.get(targetPosition.tripId) ?? {
@@ -547,11 +577,11 @@ export class VehicleRenderer {
             };
 
             // Create vehicle marker icon
-            const lineNum = smoothedPosition.lineNumber ?? "?";
-            const iconId = `vehicle-${routeColor.replace("#", "")}-${lineNum}`;
+            const lineNumber = smoothedPosition.lineNumber ?? "?";
+            const iconId = `vehicle-${routeColor.replace("#", "")}-${lineNumber}`;
 
             if (!this.vehicleIcons.has(iconId)) {
-                this.layerManager.addImage(iconId, createVehicleIcon(routeColor, lineNum));
+                this.layerManager.addImage(iconId, createVehicleIcon(routeColor, lineNumber));
                 this.vehicleIcons.add(iconId);
             }
 
@@ -667,8 +697,8 @@ export class VehicleRenderer {
         smoothedPosition: SmoothedVehiclePosition,
         linearizedRoute: LinearizedRoute | undefined,
         routeColor: string,
-        vehicleModel: ReturnType<typeof getAugsburgVehicleModel>,
-        segmentDistances: ReturnType<typeof calculateSegmentDistances>,
+        vehicleModel: VehicleModel,
+        segmentDistances: SegmentDistances,
         showDebug = false,
         renderPos?: RenderPosition,
     ): { modelFeatures: GeoJSON.Feature[]; debugFeatures: GeoJSON.Feature[] } {
@@ -713,12 +743,13 @@ export class VehicleRenderer {
             const frontPos = positions[i * 2];
             const rearPos = positions[i * 2 + 1];
 
+            const segWidth = segInfo.segment.width ?? vehicleModel.width;
             const polygon = this.createSegmentPolygon(
                 frontPos.lon,
                 frontPos.lat,
                 rearPos.lon,
                 rearPos.lat,
-                vehicleModel.width
+                segWidth
             );
 
             if (polygon.length > 0) {
@@ -746,7 +777,7 @@ export class VehicleRenderer {
     }
 
     /**
-     * Create a polygon for a tram segment
+     * Create a polygon for a vehicle segment
      */
     private createSegmentPolygon(
         frontLon: number,
@@ -755,12 +786,12 @@ export class VehicleRenderer {
         rearLat: number,
         width: number
     ): number[][] {
-        const metersPerDegreeLat = 111320;
-        const metersPerDegreeLon = 111320 * Math.cos((frontLat * Math.PI) / 180);
+        const metersPerDegreeLat = METERS_PER_DEGREE_AT_EQUATOR;
+        const metersPerDegreeLon = METERS_PER_DEGREE_AT_EQUATOR * Math.cos((frontLat * Math.PI) / 180);
         const dx = (frontLon - rearLon) * metersPerDegreeLon;
         const dy = (frontLat - rearLat) * metersPerDegreeLat;
         const length = Math.sqrt(dx * dx + dy * dy);
-        if (length < 0.1) return [];
+        if (length < MIN_SEGMENT_RENDER_LENGTH) return [];
 
         const dirX = dx / length;
         const dirY = dy / length;

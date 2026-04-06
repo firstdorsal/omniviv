@@ -4,10 +4,13 @@ import { VehicleRenderer } from "./VehicleRenderer";
 // Mock all heavy dependencies - we only test time interpolation logic
 vi.mock("../map/MapLayerManager", () => ({}));
 vi.mock("./VehicleIconFactory", () => ({ createVehicleIcon: () => ({}) }));
-vi.mock("./vehicleModels", () => ({
-    getAugsburgVehicleModel: () => ({ width: 2.4, segments: [] }),
-    calculateSegmentDistances: () => [],
-}));
+vi.mock("./vehicleModels", async (importOriginal) => {
+    const actual = await importOriginal() as Record<string, unknown>;
+    return {
+        ...actual,
+        calculateSegmentDistances: () => [],
+    };
+});
 vi.mock("./vehicleUtils", () => ({
     calculateVehiclePosition: () => null,
     createSmoothedPosition: vi.fn(),
@@ -62,6 +65,7 @@ describe("VehicleRenderer time interpolation", () => {
             new Map(),
             new Map(),
             new Map(),
+            { ready: false, getDefaultModel: () => ({ id: 'fallback', segments: [], width: 2.4, articulationGap: 0, totalLength: 12, name: '', manufacturer: '', vehicleType: 'unknown' }), getSegmentDistances: () => [] } as any,
         );
         mockPerformanceNow = vi.spyOn(performance, "now");
     });

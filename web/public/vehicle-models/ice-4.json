@@ -1,0 +1,139 @@
+{
+  "kind": "consist",
+  "id": "ice-4",
+  "name": "ICE 4 (BR 412)",
+  "manufacturer": "Siemens",
+  "vehicleType": "rail",
+  "width": 2.852,
+
+  "cars": {
+    "end-car-second": {
+      "length": 29.106,
+      "height": 3.87,
+      "type": "end_car",
+      "powered": false
+    },
+    "end-car-first": {
+      "length": 29.106,
+      "height": 3.87,
+      "type": "end_car",
+      "powered": false
+    },
+    "traction": {
+      "length": 28.75,
+      "height": 4.115,
+      "type": "second_class",
+      "powered": true
+    },
+    "traction-bistro": {
+      "length": 28.75,
+      "height": 4.115,
+      "type": "bistro",
+      "powered": true
+    },
+    "middle-second": {
+      "length": 28.75,
+      "height": 4.115,
+      "type": "second_class",
+      "powered": false
+    },
+    "middle-first": {
+      "length": 28.75,
+      "height": 4.115,
+      "type": "first_class",
+      "powered": false
+    },
+    "service": {
+      "length": 28.75,
+      "height": 4.115,
+      "type": "service",
+      "powered": false
+    }
+  },
+
+  "consists": {
+    "7-car": {
+      "cars": [
+        "end-car-second",
+        "traction",
+        "middle-second",
+        "traction",
+        "traction-bistro",
+        "service",
+        "end-car-first"
+      ],
+      "couplingGap": 0.5,
+      "metadata": {
+        "wikidataId": "Q121602406",
+        "maxSpeedKmh": 250,
+        "inServiceSince": 2020,
+        "unitsBuilt": 37,
+        "massTonnes": 389,
+        "seatingCapacity": 444
+      }
+    },
+    "12-car": {
+      "cars": [
+        "end-car-second",
+        "traction",
+        "traction",
+        "middle-second",
+        "traction",
+        "traction",
+        "middle-second",
+        "traction-bistro",
+        "service",
+        "middle-first",
+        "middle-first",
+        "end-car-first"
+      ],
+      "couplingGap": 0.5,
+      "metadata": {
+        "wikidataId": "Q121602394",
+        "maxSpeedKmh": 265,
+        "inServiceSince": 2017,
+        "unitsBuilt": 50,
+        "massTonnes": 670,
+        "seatingCapacity": 830
+      }
+    },
+    "13-car": {
+      "cars": [
+        "end-car-second",
+        "traction",
+        "traction",
+        "traction",
+        "middle-second",
+        "traction",
+        "traction",
+        "middle-second",
+        "traction-bistro",
+        "service",
+        "middle-first",
+        "middle-first",
+        "end-car-first"
+      ],
+      "couplingGap": 0.5,
+      "metadata": {
+        "wikidataId": "Q121602339",
+        "maxSpeedKmh": 265,
+        "inServiceSince": 2021,
+        "unitsBuilt": 50,
+        "massTonnes": 731,
+        "seatingCapacity": 918
+      }
+    }
+  },
+
+  "defaultConsist": "12-car",
+
+  "metadata": {
+    "wikidataId": "Q324870",
+    "designation": "BR 412",
+    "tractionType": "electric",
+    "powerSupply": "15kV 16.7Hz AC",
+    "gaugeMm": 1435,
+    "operators": ["Deutsche Bahn"],
+    "countries": ["DE", "AT", "CH"]
+  }
+}

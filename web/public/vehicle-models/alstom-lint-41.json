@@ -1,0 +1,35 @@
+{
+  "kind": "simple",
+  "id": "alstom-lint-41",
+  "name": "Alstom Coradia LINT 41 (BR 648)",
+  "manufacturer": "Alstom",
+  "vehicleType": "rail",
+  "width": 2.75,
+  "totalLength": 41.81,
+  "articulationGap": 0.3,
+  "lods": {
+    "box": {
+      "segments": [
+        { "length": 20.755, "type": "end_car", "height": 4.34, "hasBogies": true, "powered": true },
+        { "length": 20.755, "type": "end_car", "height": 4.34, "hasBogies": true, "powered": true }
+      ]
+    }
+  },
+
+  "metadata": {
+    "wikidataId": "Q64236110",
+    "maxSpeedKmh": 120,
+    "inServiceSince": 1999,
+    "unitsBuilt": 503,
+    "designation": "BR 648",
+    "tractionType": "diesel",
+    "powerKw": 630,
+    "gaugeMm": 1435,
+    "massTonnes": 68,
+    "seatingCapacity": 120,
+    "lowFloor": true,
+    "floorHeightMm": 598,
+    "operators": ["DB Regio", "erixx", "HLB"],
+    "countries": ["DE", "NL"]
+  }
+}
