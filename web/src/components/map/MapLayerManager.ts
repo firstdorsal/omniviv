@@ -56,14 +56,14 @@ export class MapLayerManager {
         this.map.addSource("transit-routes", {
             type: "vector",
             tiles: [`${this.martinUrl}/transit_routes/{z}/{x}/{y}`],
-            maxzoom: 15,  // MBTiles generated up to z15; MapLibre overzooms at z16+
+            maxzoom: 14,  // MBTiles generated up to z14; MapLibre overzooms at z15+
         });
 
         // Stations + steige + platforms + debug layers — pre-generated composite MBTiles
         this.map.addSource("transit-stations", {
             type: "vector",
             tiles: [`${this.martinUrl}/transit_stations/{z}/{x}/{y}`],
-            maxzoom: 15,
+            maxzoom: 14,
         });
         this.map.addLayer({
             id: "routes-line",

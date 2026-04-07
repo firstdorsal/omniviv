@@ -9,18 +9,33 @@ world:
   max_zoom: 7
   regen_interval: "7d"
 
+# Transit tile layers — generated from PostGIS via martin-cp.
+#
+# Each layer can specify either:
+#   - bbox: [west, south, east, north]   # explicit bounding box
+#   - areas: ["bayern", "berlin", ...]   # named German Bundesländer + "germany"
+#
+# Recognized area names: 16 German states (e.g. bayern, baden-wurttemberg,
+# nordrhein-westfalen, sachsen, ...) plus "germany" for the whole country.
+# When multiple areas are listed, the union bounding box is used.
 transit:
   layers:
+    # The SQL tile functions accept a clip_bbox query parameter and tilegen
+    # passes the resolved generation bbox via martin-cp's --url-query flag.
+    # This means low-zoom tiles are clipped to the generation area instead
+    # of containing every station/route in the tile's (much larger) own
+    # bbox, so it's safe to generate the full zoom range even for small
+    # areas like a single city.
     - name: transit_stations
       function: transit_stations
       regen_interval: "1d"
-      bbox: [10.85, 48.33, 10.93, 48.39]
+      areas: ["augsburg"]
       min_zoom: 0
-      max_zoom: 15
-      
+      max_zoom: 14
+
     - name: transit_routes
       function: transit_routes
       regen_interval: "1d"
-      bbox: [10.85, 48.33, 10.93, 48.39]
+      areas: ["augsburg"]
       min_zoom: 0
-      max_zoom: 15
+      max_zoom: 14

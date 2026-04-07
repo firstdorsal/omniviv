@@ -1,6 +1,8 @@
+mod areas;
 mod basemap;
 mod config;
 mod error;
+mod mbtiles;
 mod state;
 mod transit;
 mod world;
@@ -150,13 +152,55 @@ async fn run_generation_cycle(
     if !state::database_has_transit_data(pool).await? {
         tracing::warn!("Database has no transit data (stations table empty). Skipping transit tile generation.");
     } else {
-        // Generate each transit layer individually
+        // Determine which layers actually need regeneration (cloning so we can move into tasks)
+        let mut to_generate: Vec<config::TransitLayerConfig> = Vec::new();
         for layer in &config.transit.layers {
-            if shutdown.load(Ordering::SeqCst) { break; }
             if !layer.enabled { continue; }
-
             if state::needs_regeneration(pool, &layer.name, layer.regen_interval).await? {
-                match transit::generate_transit_layer(layer, database_url, transit_dir).await {
+                to_generate.push(layer.clone());
+            }
+        }
+
+        let concurrency = config.transit.concurrency;
+        if config.transit.parallel_layers && to_generate.len() > 1 {
+            // Generate all layers in parallel — each uses `concurrency` connections.
+            tracing::info!(
+                layers = to_generate.len(),
+                concurrency_per_layer = concurrency,
+                "Generating transit layers in parallel"
+            );
+            let mut handles = Vec::new();
+            for layer in to_generate {
+                let database_url = database_url.to_string();
+                let transit_dir = transit_dir.to_path_buf();
+                let pool = pool.clone();
+                handles.push(tokio::spawn(async move {
+                    let layer_name = layer.name.clone();
+                    let result = transit::generate_transit_layer(&layer, &database_url, &transit_dir, concurrency, &pool).await;
+                    (layer_name, result)
+                }));
+            }
+            for handle in handles {
+                if shutdown.load(Ordering::SeqCst) { break; }
+                match handle.await {
+                    Ok((layer_name, Ok(result))) => {
+                        state::record_generation_success(pool, &layer_name, result.duration_ms, 0, result.file_size_bytes).await?;
+                        tracing::info!(layer = %layer_name, path = %result.path.display(), "Transit layer ready");
+                    }
+                    Ok((layer_name, Err(e))) => {
+                        tracing::error!(layer = %layer_name, "Transit layer generation failed: {e}");
+                        state::record_generation_failure(pool, &layer_name, &e.to_string()).await?;
+                    }
+                    Err(e) => {
+                        tracing::error!("Transit layer task panicked: {e}");
+                    }
+                }
+            }
+        } else {
+            // Sequential mode — one layer at a time
+            for layer in to_generate {
+                if shutdown.load(Ordering::SeqCst) { break; }
+                match transit::generate_transit_layer(&layer, database_url, transit_dir, concurrency, pool).await {
                     Ok(result) => {
                         state::record_generation_success(pool, &layer.name, result.duration_ms, 0, result.file_size_bytes).await?;
                         tracing::info!(layer = %layer.name, path = %result.path.display(), "Transit layer ready");

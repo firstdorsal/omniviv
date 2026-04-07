@@ -50,24 +50,27 @@ test.describe("Martin serves pre-generated MBTiles (auto_publish: false)", () =>
         expect(buf.byteLength, "transit_routes should have data at Königsplatz").toBeGreaterThan(100);
     });
 
-    test("tile_steige individual MBTiles returns data at z15 Königsplatz", async () => {
-        const res = await fetch(`${MARTIN_URL}/tile_steige/15/17375/11340`);
-        expect(res.ok).toBeTruthy();
-        const buf = await res.arrayBuffer();
-        expect(buf.byteLength, "tile_steige should have data at Königsplatz").toBeGreaterThan(100);
-    });
-
-    test("Martin catalog does NOT expose SQL function sources (auto_publish: false)", async () => {
+    test("Martin catalog only exposes the current composite MBTiles sources", async () => {
         const res = await fetch(`${MARTIN_URL}/catalog`);
         expect(res.ok).toBeTruthy();
         const catalog = await res.json();
         const sources = Object.keys(catalog.tiles ?? {});
-        // All sources should be MBTiles-based, not SQL functions.
-        // SQL function sources would have names like "transit_stations" but with
-        // no corresponding MBTiles file. We verify by checking that well-known
-        // MBTiles sources are present.
+
+        // The current architecture uses two composite mbtiles: transit_stations
+        // (stations + stops + platforms + connections + steige + outlines) and
+        // transit_routes. Older per-layer files (tile_steige, tile_debug_*,
+        // tile_platform_outlines, transit-stations with hyphen, overview, detail)
+        // must not be served — they were from a previous architecture and
+        // would pollute the map with stale data outside the current bbox.
         expect(sources, "Catalog should include transit_stations MBTiles source").toContain("transit_stations");
         expect(sources, "Catalog should include transit_routes MBTiles source").toContain("transit_routes");
+
+        const stale = sources.filter((s) =>
+            s.startsWith("tile_") ||
+            s === "transit-stations" || s === "transit-routes" ||
+            s === "overview" || s === "detail"
+        );
+        expect(stale, `Catalog must not expose stale sources: ${stale.join(", ")}`).toEqual([]);
     });
 });
 
@@ -484,8 +487,8 @@ test.describe("Station markers render correctly", () => {
 
 // ─── Source configuration: maxzoom overzoom ──────────────────────────────────
 
-test.describe("Source maxzoom enables overzooming at z16+", () => {
-    test("transit-stations source has maxzoom 15 for overzoom at z16+", async ({ page }) => {
+test.describe("Source maxzoom enables overzooming at z15+", () => {
+    test("transit-stations source has maxzoom 14 for overzoom at z15+", async ({ page }) => {
         await page.goto("/#48.3655,10.8945,17.00,30,0");
         await waitForMap(page);
 
@@ -498,10 +501,10 @@ test.describe("Source maxzoom enables overzooming at z16+", () => {
             return source.maxzoom ?? source._options?.maxzoom ?? null;
         });
 
-        expect(maxzoom, "transit-stations source must have maxzoom 15 for overzoom").toBe(15);
+        expect(maxzoom, "transit-stations source must have maxzoom 14 for overzoom").toBe(14);
     });
 
-    test("transit-routes source has maxzoom 15 for overzoom at z16+", async ({ page }) => {
+    test("transit-routes source has maxzoom 14 for overzoom at z15+", async ({ page }) => {
         await page.goto("/#48.3655,10.8945,17.00,30,0");
         await waitForMap(page);
 
@@ -513,11 +516,11 @@ test.describe("Source maxzoom enables overzooming at z16+", () => {
             return source.maxzoom ?? source._options?.maxzoom ?? null;
         });
 
-        expect(maxzoom, "transit-routes source must have maxzoom 15 for overzoom").toBe(15);
+        expect(maxzoom, "transit-routes source must have maxzoom 14 for overzoom").toBe(14);
     });
 
-    test("steige markers render at z17 via overzooming z15 tiles", async ({ page }) => {
-        // z17 > maxzoom 15, so MapLibre must overzoom z15 tiles
+    test("steige markers render at z17 via overzooming z14 tiles", async ({ page }) => {
+        // z17 > maxzoom 14, so MapLibre must overzoom z14 tiles
         await page.goto("/#48.3655,10.8945,17.00,30,0");
         await waitForMap(page);
 

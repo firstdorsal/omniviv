@@ -39,7 +39,7 @@ pub async fn generate_basemap(
         download_pbf(&region.pbf_url, &pbf_path).await?;
     }
 
-    let [west, south, east, north] = region.bbox;
+    let [west, south, east, north] = region.resolved_bbox()?;
     let bounds = format!("{west},{south},{east},{north}");
 
     tracing::info!(

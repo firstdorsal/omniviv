@@ -9,6 +9,7 @@ pub mod routes;
 pub mod schedule_cache;
 pub mod state;
 pub mod stations;
+pub mod tilegen;
 pub mod vehicles;
 pub mod ws;
 
@@ -49,5 +50,6 @@ pub fn router(
         .nest("/health", health::router(pool.clone()))
         .nest("/gtfs-stops", gtfs_stops::router(pool.clone()))
         .nest("/mapping", mapping::router(pool.clone(), admin_api_key))
+        .nest("/tilegen", tilegen::router(pool.clone()))
         .route("/ws/vehicles", get(ws::ws_vehicles).with_state(app_state))
 }

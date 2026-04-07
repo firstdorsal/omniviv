@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 
 use serde::Deserialize;
 
+use crate::areas::{resolve_areas, BoundingBox};
 use crate::error::TilegenError;
 
 /// Read an environment variable, supporting the `_FILE` suffix convention.
@@ -55,8 +56,15 @@ pub struct RegionConfig {
     /// URL to download the OSM PBF extract (must be https://)
     pub pbf_url: String,
 
-    /// Bounding box [west, south, east, north] in WGS84
-    pub bbox: [f64; 4],
+    /// Explicit bounding box [west, south, east, north] in WGS84.
+    /// Mutually exclusive with `areas`.
+    #[serde(default)]
+    pub bbox: Option<[f64; 4]>,
+
+    /// List of named areas (e.g. ["bayern"], ["germany"], ["bayern", "berlin"]).
+    /// Resolved to a union bounding box. Mutually exclusive with `bbox`.
+    #[serde(default)]
+    pub areas: Option<Vec<String>>,
 
     /// Minimum zoom level for tile generation
     pub min_zoom: u8,
@@ -71,6 +79,24 @@ pub struct RegionConfig {
     /// Whether this region is enabled for generation
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl RegionConfig {
+    /// Resolve the configured `bbox` or `areas` to a single bounding box.
+    pub fn resolved_bbox(&self) -> Result<BoundingBox, TilegenError> {
+        match (&self.bbox, &self.areas) {
+            (Some(bbox), None) => Ok(*bbox),
+            (None, Some(areas)) => resolve_areas(areas),
+            (Some(_), Some(_)) => Err(TilegenError::ConfigValidation(format!(
+                "Region '{}' has both 'bbox' and 'areas' — specify only one",
+                self.name
+            ))),
+            (None, None) => Err(TilegenError::ConfigValidation(format!(
+                "Region '{}' must specify either 'bbox' or 'areas'",
+                self.name
+            ))),
+        }
+    }
 }
 
 /// World overview configuration (Natural Earth data, no PBF download).
@@ -89,10 +115,27 @@ pub struct WorldConfig {
 pub struct TransitConfig {
     /// Individual transit layers to generate
     pub layers: Vec<TransitLayerConfig>,
+
+    /// Number of concurrent PostgreSQL connections to use per layer.
+    /// Higher values speed up generation at the cost of more database load.
+    /// Default 16.
+    #[serde(default = "default_concurrency")]
+    pub concurrency: u32,
+
+    /// Generate multiple layers in parallel (true) or sequentially (false).
+    /// Each layer uses `concurrency` connections, so the total connections
+    /// used is `concurrency * (number of enabled layers)` when parallel.
+    /// Default true.
+    #[serde(default = "default_true")]
+    pub parallel_layers: bool,
+}
+
+fn default_concurrency() -> u32 {
+    16
 }
 
 /// A single transit layer generated from one PostGIS tile function via martin-cp.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TransitLayerConfig {
     /// Layer name — used as the MBTiles filename and Martin source name.
     /// Must match the frontend's tile URL (e.g. "tile_stations" → /tile_stations/{z}/{x}/{y}).
@@ -105,8 +148,14 @@ pub struct TransitLayerConfig {
     #[serde(with = "humantime_serde")]
     pub regen_interval: std::time::Duration,
 
-    /// Bounding box for tile generation [west, south, east, north]
-    pub bbox: [f64; 4],
+    /// Explicit bounding box [west, south, east, north]. Mutually exclusive with `areas`.
+    #[serde(default)]
+    pub bbox: Option<[f64; 4]>,
+
+    /// List of named areas (e.g. ["bayern"], ["germany"], ["bayern", "berlin"]).
+    /// Resolved to a union bounding box. Mutually exclusive with `bbox`.
+    #[serde(default)]
+    pub areas: Option<Vec<String>>,
 
     /// Minimum zoom level
     pub min_zoom: u8,
@@ -117,6 +166,24 @@ pub struct TransitLayerConfig {
     /// Whether this layer is enabled for generation
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl TransitLayerConfig {
+    /// Resolve the configured `bbox` or `areas` to a single bounding box.
+    pub fn resolved_bbox(&self) -> Result<BoundingBox, TilegenError> {
+        match (&self.bbox, &self.areas) {
+            (Some(bbox), None) => Ok(*bbox),
+            (None, Some(areas)) => resolve_areas(areas),
+            (Some(_), Some(_)) => Err(TilegenError::ConfigValidation(format!(
+                "Transit layer '{}' has both 'bbox' and 'areas' — specify only one",
+                self.name
+            ))),
+            (None, None) => Err(TilegenError::ConfigValidation(format!(
+                "Transit layer '{}' must specify either 'bbox' or 'areas'",
+                self.name
+            ))),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -159,7 +226,9 @@ impl Config {
                     region.name, region.pbf_url
                 )));
             }
-            if region.bbox[0] >= region.bbox[2] || region.bbox[1] >= region.bbox[3] {
+            // Resolve bbox/areas — also catches missing/conflicting/unknown values
+            let bbox = region.resolved_bbox()?;
+            if bbox[0] >= bbox[2] || bbox[1] >= bbox[3] {
                 return Err(TilegenError::ConfigValidation(format!(
                     "Region '{}' bbox is invalid: west must < east, south must < north",
                     region.name
@@ -180,7 +249,9 @@ impl Config {
                     "Transit layer name '{}' contains invalid characters", layer.name
                 )));
             }
-            if layer.bbox[0] >= layer.bbox[2] || layer.bbox[1] >= layer.bbox[3] {
+            // Resolve bbox/areas — also catches missing/conflicting/unknown values
+            let bbox = layer.resolved_bbox()?;
+            if bbox[0] >= bbox[2] || bbox[1] >= bbox[3] {
                 return Err(TilegenError::ConfigValidation(format!(
                     "Transit layer '{}' bbox is invalid", layer.name
                 )));
@@ -200,5 +271,83 @@ impl Config {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_yaml(yaml: &str) -> Result<Config, TilegenError> {
+        let config: Config = serde_yaml_neo::from_str(yaml)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    const VALID_HEAD: &str = r#"
+output_dir: /tiles
+work_dir: /data
+check_interval: "5m"
+regions: []
+world:
+  enabled: false
+  max_zoom: 7
+  regen_interval: "7d"
+"#;
+
+    #[test]
+    fn transit_layer_with_areas_resolves_to_bbox() {
+        let yaml = format!("{VALID_HEAD}\ntransit:\n  layers:\n    - name: transit_stations\n      function: transit_stations\n      regen_interval: \"1d\"\n      areas: [\"bayern\"]\n      min_zoom: 0\n      max_zoom: 15\n");
+        let config = parse_yaml(&yaml).expect("config should validate");
+        let layer = &config.transit.layers[0];
+        let bbox = layer.resolved_bbox().unwrap();
+        assert_eq!(bbox, [8.97, 47.27, 13.84, 50.57]);
+    }
+
+    #[test]
+    fn transit_layer_with_germany_resolves_to_country_bbox() {
+        let yaml = format!("{VALID_HEAD}\ntransit:\n  layers:\n    - name: transit_stations\n      function: transit_stations\n      regen_interval: \"1d\"\n      areas: [\"germany\"]\n      min_zoom: 0\n      max_zoom: 15\n");
+        let config = parse_yaml(&yaml).expect("config should validate");
+        let bbox = config.transit.layers[0].resolved_bbox().unwrap();
+        assert_eq!(bbox, [5.87, 47.27, 15.04, 55.06]);
+    }
+
+    #[test]
+    fn transit_layer_with_multiple_areas_resolves_to_union() {
+        let yaml = format!("{VALID_HEAD}\ntransit:\n  layers:\n    - name: transit_stations\n      function: transit_stations\n      regen_interval: \"1d\"\n      areas: [\"bayern\", \"berlin\"]\n      min_zoom: 0\n      max_zoom: 15\n");
+        let config = parse_yaml(&yaml).expect("config should validate");
+        let bbox = config.transit.layers[0].resolved_bbox().unwrap();
+        // Bayern + Berlin → bbox covers both
+        assert!(bbox[0] <= 8.97 && bbox[2] >= 13.84);
+        assert!(bbox[1] <= 47.27 && bbox[3] >= 52.68);
+    }
+
+    #[test]
+    fn transit_layer_with_explicit_bbox_works() {
+        let yaml = format!("{VALID_HEAD}\ntransit:\n  layers:\n    - name: transit_stations\n      function: transit_stations\n      regen_interval: \"1d\"\n      bbox: [10.85, 48.33, 10.93, 48.39]\n      min_zoom: 0\n      max_zoom: 15\n");
+        let config = parse_yaml(&yaml).expect("config should validate");
+        let bbox = config.transit.layers[0].resolved_bbox().unwrap();
+        assert_eq!(bbox, [10.85, 48.33, 10.93, 48.39]);
+    }
+
+    #[test]
+    fn transit_layer_without_bbox_or_areas_fails() {
+        let yaml = format!("{VALID_HEAD}\ntransit:\n  layers:\n    - name: transit_stations\n      function: transit_stations\n      regen_interval: \"1d\"\n      min_zoom: 0\n      max_zoom: 15\n");
+        let result = parse_yaml(&yaml);
+        assert!(result.is_err(), "config without bbox or areas should fail validation");
+    }
+
+    #[test]
+    fn transit_layer_with_both_bbox_and_areas_fails() {
+        let yaml = format!("{VALID_HEAD}\ntransit:\n  layers:\n    - name: transit_stations\n      function: transit_stations\n      regen_interval: \"1d\"\n      bbox: [10.85, 48.33, 10.93, 48.39]\n      areas: [\"bayern\"]\n      min_zoom: 0\n      max_zoom: 15\n");
+        let result = parse_yaml(&yaml);
+        assert!(result.is_err(), "config with both bbox and areas should fail validation");
+    }
+
+    #[test]
+    fn transit_layer_with_unknown_area_fails() {
+        let yaml = format!("{VALID_HEAD}\ntransit:\n  layers:\n    - name: transit_stations\n      function: transit_stations\n      regen_interval: \"1d\"\n      areas: [\"narnia\"]\n      min_zoom: 0\n      max_zoom: 15\n");
+        let result = parse_yaml(&yaml);
+        assert!(result.is_err(), "config with unknown area should fail validation");
     }
 }

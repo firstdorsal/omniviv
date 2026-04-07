@@ -14,8 +14,11 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml_neo = "0.11"
 
-# Database (state tracking only — tile generation uses martin-cp subprocess)
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
+# Database — postgres for state tracking, sqlite for in-place MBTiles updates.
+# The sqlite feature lets us replace tile data inside the existing output file
+# without changing its inode, so Martin's cached file handles keep serving from
+# the same file (no external restart needed after a regeneration cycle).
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "chrono"] }
 
 # HTTP (PBF downloads with streaming)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }

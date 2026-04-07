@@ -83,4 +83,10 @@ ENV SERVICE_NAME=${SERVICE_NAME}
 WORKDIR /app
 
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["tilegen"]
+
+# Run with the lowest possible CPU and I/O priority so tilegen never starves
+# other workloads on the system. nice -n 19 = lowest CPU priority. ionice -c 3
+# = idle I/O class (only runs when no other process needs I/O). Both nice and
+# ionice from busybox propagate to all child processes (including martin-cp
+# and Planetiler).
+ENTRYPOINT ["nice", "-n", "19", "ionice", "-c", "3", "tilegen"]
