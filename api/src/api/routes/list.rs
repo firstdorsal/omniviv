@@ -506,6 +506,235 @@ pub async fn get_route_geometry(
     }))
 }
 
+/// Request body for POST /api/routes/segment
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RouteSegmentRequest {
+    /// OSM relation ID of the route
+    pub route_id: i64,
+    /// Latitude of the start point (e.g., a stop or platform)
+    pub from_lat: f64,
+    /// Longitude of the start point
+    pub from_lon: f64,
+    /// Latitude of the end point (e.g., another stop)
+    pub to_lat: f64,
+    /// Longitude of the end point
+    pub to_lon: f64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RouteSegmentResponse {
+    pub route_id: i64,
+    /// Coordinates of the extracted segment as [lon, lat] pairs.
+    /// Always ordered from `from` to `to`.
+    pub segment: Vec<[f64; 2]>,
+    /// Length of the segment in meters
+    pub length_meters: f64,
+    /// Distance (meters) from the requested `from` point to the closest point on the route.
+    /// Useful for detecting requests where the point isn't actually near the line.
+    pub from_offset_meters: f64,
+    /// Distance (meters) from the requested `to` point to the closest point on the route.
+    pub to_offset_meters: f64,
+}
+
+/// Extract a segment of a route's geometry between two points (e.g. platforms).
+///
+/// Uses PostGIS `ST_LineMerge` + `ST_LineLocatePoint` + `ST_LineSubstring`
+/// to compute the slice server-side in a single query — much faster than
+/// fetching the full geometry and slicing client-side.
+#[utoipa::path(
+    post,
+    path = "/api/routes/segment",
+    request_body = RouteSegmentRequest,
+    responses(
+        (status = 200, description = "Route segment between the two points", body = RouteSegmentResponse),
+        (status = 404, description = "Route not found or has no geometry", body = ErrorResponse),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "routes"
+)]
+pub async fn get_route_segment(
+    State(pool): State<PgPool>,
+    Json(body): Json<RouteSegmentRequest>,
+) -> Result<Json<RouteSegmentResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Validate coordinates
+    if body.from_lat < -90.0 || body.from_lat > 90.0 || body.to_lat < -90.0 || body.to_lat > 90.0 {
+        return Err(bad_request("Latitude must be between -90 and 90"));
+    }
+    if body.from_lon < -180.0 || body.from_lon > 180.0 || body.to_lon < -180.0 || body.to_lon > 180.0 {
+        return Err(bad_request("Longitude must be between -180 and 180"));
+    }
+
+    #[derive(FromRow)]
+    struct Row {
+        segment_geojson: Option<String>,
+        length_meters: Option<f64>,
+        from_offset_meters: Option<f64>,
+        to_offset_meters: Option<f64>,
+    }
+
+    // ST_LineMerge tries to coalesce a MultiLineString into a single LineString.
+    // For routes that ARE fully connected this gives us one LineString.
+    // For routes that AREN'T fully connected (e.g. long-distance trains with
+    // gaps at stations), ST_LineMerge returns a MultiLineString — but
+    // ST_LineLocatePoint and ST_LineSubstring only accept LineString.
+    //
+    // To handle both cases, we use ST_Dump to extract individual LineString
+    // components, then pick the single component that minimizes the combined
+    // distance to the from + to points and slice that one.
+    let row: Option<Row> = sqlx::query_as(
+        r#"
+        WITH merged AS (
+            SELECT ST_LineMerge(geom) AS geom
+            FROM routes
+            WHERE osm_id = $1 AND geom IS NOT NULL
+        ),
+        components AS (
+            -- ST_Dump on a LineString returns one row, on a MultiLineString returns one row per part.
+            SELECT (ST_Dump(geom)).geom AS line FROM merged
+        ),
+        ranked AS (
+            SELECT
+                line,
+                ST_Distance(
+                    line::geography,
+                    ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography
+                ) AS from_dist,
+                ST_Distance(
+                    line::geography,
+                    ST_SetSRID(ST_MakePoint($5, $4), 4326)::geography
+                ) AS to_dist
+            FROM components
+            WHERE GeometryType(line) = 'LINESTRING'
+        ),
+        best AS (
+            SELECT line, from_dist, to_dist
+            FROM ranked
+            ORDER BY (from_dist + to_dist) ASC
+            LIMIT 1
+        ),
+        positions AS (
+            SELECT
+                line,
+                ST_LineLocatePoint(line, ST_SetSRID(ST_MakePoint($3, $2), 4326)) AS from_pos,
+                ST_LineLocatePoint(line, ST_SetSRID(ST_MakePoint($5, $4), 4326)) AS to_pos,
+                from_dist AS from_offset_meters,
+                to_dist AS to_offset_meters
+            FROM best
+        ),
+        sliced AS (
+            SELECT
+                ST_LineSubstring(
+                    line,
+                    LEAST(from_pos, to_pos),
+                    GREATEST(from_pos, to_pos)
+                ) AS segment,
+                from_pos,
+                to_pos,
+                from_offset_meters,
+                to_offset_meters
+            FROM positions
+        )
+        SELECT
+            ST_AsGeoJSON(segment)::text AS segment_geojson,
+            ST_Length(segment::geography) AS length_meters,
+            from_offset_meters,
+            to_offset_meters
+        FROM sliced
+        "#,
+    )
+    .bind(body.route_id)
+    .bind(body.from_lat)
+    .bind(body.from_lon)
+    .bind(body.to_lat)
+    .bind(body.to_lon)
+    .fetch_optional(&pool)
+    .await
+    .map_err(internal_error)?;
+
+    let row = row.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Route not found or has no geometry".to_string(),
+            }),
+        )
+    })?;
+
+    let geojson_str = row.segment_geojson.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Could not compute segment for this route".to_string(),
+            }),
+        )
+    })?;
+
+    // Parse GeoJSON — segment is either a LineString or MultiLineString
+    let segment = parse_segment_coords(&geojson_str).map_err(internal_error)?;
+
+    // Compute the dot product to determine if from→to is in the natural
+    // direction of the line. ST_LineSubstring slices min→max along the line,
+    // so if from_pos > to_pos we need to reverse to honor the requested direction.
+    let from_pos = compute_position(&segment, body.from_lat, body.from_lon);
+    let to_pos = compute_position(&segment, body.to_lat, body.to_lon);
+    let segment = if from_pos > to_pos {
+        segment.into_iter().rev().collect()
+    } else {
+        segment
+    };
+
+    Ok(Json(RouteSegmentResponse {
+        route_id: body.route_id,
+        segment,
+        length_meters: row.length_meters.unwrap_or(0.0),
+        from_offset_meters: row.from_offset_meters.unwrap_or(0.0),
+        to_offset_meters: row.to_offset_meters.unwrap_or(0.0),
+    }))
+}
+
+/// Parse a GeoJSON LineString or MultiLineString into a flat list of [lon, lat] points.
+fn parse_segment_coords(geojson_str: &str) -> Result<Vec<[f64; 2]>, sqlx::Error> {
+    let value: serde_json::Value = serde_json::from_str(geojson_str)
+        .map_err(|e| sqlx::Error::Protocol(format!("Invalid GeoJSON from PostGIS: {e}")))?;
+    let geom_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let coords = value.get("coordinates").ok_or_else(|| {
+        sqlx::Error::Protocol("GeoJSON missing coordinates".to_string())
+    })?;
+    if geom_type == "LineString" {
+        serde_json::from_value::<Vec<[f64; 2]>>(coords.clone())
+            .map_err(|e| sqlx::Error::Protocol(format!("Invalid LineString coordinates: {e}")))
+    } else if geom_type == "MultiLineString" {
+        let multi: Vec<Vec<[f64; 2]>> = serde_json::from_value(coords.clone())
+            .map_err(|e| sqlx::Error::Protocol(format!("Invalid MultiLineString: {e}")))?;
+        Ok(multi.into_iter().flatten().collect())
+    } else {
+        Err(sqlx::Error::Protocol(format!(
+            "Unexpected GeoJSON geometry type: {geom_type}"
+        )))
+    }
+}
+
+/// Find the index of the closest point in the segment to (lat, lon),
+/// then return its position as a fraction (0..1) along the segment.
+fn compute_position(segment: &[[f64; 2]], lat: f64, lon: f64) -> f64 {
+    if segment.len() < 2 {
+        return 0.0;
+    }
+    let mut best_idx = 0;
+    let mut best_dist_sq = f64::INFINITY;
+    for (i, point) in segment.iter().enumerate() {
+        let dx = point[0] - lon;
+        let dy = point[1] - lat;
+        let d = dx * dx + dy * dy;
+        if d < best_dist_sq {
+            best_dist_sq = d;
+            best_idx = i;
+        }
+    }
+    best_idx as f64 / (segment.len() - 1) as f64
+}
+
 /// Normalize route geometry segments so they form a continuous path.
 ///
 /// OSM ways can be stored in either direction. This function flips segments
