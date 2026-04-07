@@ -9,143 +9,6 @@
     "version": "0.2.0"
   },
   "paths": {
-    "/api/areas": {
-      "get": {
-        "tags": [
-          "areas"
-        ],
-        "summary": "List all configured areas",
-        "operationId": "list_areas",
-        "responses": {
-          "200": {
-            "description": "List of all areas",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AreaListResponse"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/areas/{id}": {
-      "get": {
-        "tags": [
-          "areas"
-        ],
-        "summary": "Get a specific area by ID",
-        "operationId": "get_area",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Area ID",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Area details",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Area"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Area not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/areas/{id}/stats": {
-      "get": {
-        "tags": [
-          "areas"
-        ],
-        "summary": "Get statistics for an area",
-        "operationId": "get_area_stats",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Area ID",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Area statistics",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AreaStats"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Area not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/departures/by-coordinates": {
       "post": {
         "tags": [
@@ -758,6 +621,68 @@
         }
       }
     },
+    "/api/routes/segment": {
+      "post": {
+        "tags": [
+          "routes"
+        ],
+        "summary": "Extract a segment of a route's geometry between two points (e.g. platforms).",
+        "description": "Uses PostGIS `ST_LineMerge` + `ST_LineLocatePoint` + `ST_LineSubstring`\nto compute the slice server-side in a single query — much faster than\nfetching the full geometry and slicing client-side.",
+        "operationId": "get_route_segment",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RouteSegmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Route segment between the two points",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteSegmentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found or has no geometry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/routes/visible": {
       "post": {
         "tags": [
@@ -967,6 +892,137 @@
         }
       }
     },
+    "/api/tilegen/area-polygon": {
+      "get": {
+        "tags": [
+          "tilegen"
+        ],
+        "summary": "Return the actual administrative polygon for a named area (German\nBundesland or Germany), assembled from the OSM admin relation in\nthe slim osm2pgsql tables. Used by the diagnostics panel to draw\nthe real state border on the map instead of a bounding rectangle.",
+        "operationId": "get_area_polygon",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "description": "Area name (e.g. \"bayern\", \"germany\", \"nrw\")",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Area polygon as GeoJSON Feature",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AreaPolygonResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tilegen/history": {
+      "get": {
+        "tags": [
+          "tilegen"
+        ],
+        "summary": "Get past tile generation runs (most recent first).",
+        "operationId": "get_history",
+        "parameters": [
+          {
+            "name": "layer",
+            "in": "query",
+            "description": "Filter to a single layer (optional). When omitted, returns rows for all layers.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of entries to return. Default 20, max 200.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Past generation runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TilegenHistoryResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tilegen/status": {
+      "get": {
+        "tags": [
+          "tilegen"
+        ],
+        "summary": "Get live tile generation status for the diagnostics panel.",
+        "operationId": "get_status",
+        "responses": {
+          "200": {
+            "description": "Tile generation status for all layers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TilegenStatusResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/vehicles/by-route": {
       "post": {
         "tags": [
@@ -1021,101 +1077,11 @@
   },
   "components": {
     "schemas": {
-      "Area": {
+      "AreaPolygonResponse": {
         "type": "object",
-        "required": [
-          "id",
-          "name",
-          "south",
-          "west",
-          "north",
-          "east",
-          "created_at"
-        ],
         "properties": {
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "east": {
-            "type": "number",
-            "format": "double"
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "last_synced_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "name": {
-            "type": "string"
-          },
-          "north": {
-            "type": "number",
-            "format": "double"
-          },
-          "south": {
-            "type": "number",
-            "format": "double"
-          },
-          "west": {
-            "type": "number",
-            "format": "double"
-          }
-        }
-      },
-      "AreaListResponse": {
-        "type": "object",
-        "required": [
-          "areas"
-        ],
-        "properties": {
-          "areas": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Area"
-            }
-          }
-        }
-      },
-      "AreaStats": {
-        "type": "object",
-        "required": [
-          "area_id",
-          "area_name",
-          "station_count",
-          "platform_count",
-          "stop_position_count",
-          "route_count"
-        ],
-        "properties": {
-          "area_id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "area_name": {
-            "type": "string"
-          },
-          "platform_count": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "route_count": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "station_count": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "stop_position_count": {
-            "type": "integer",
-            "format": "int64"
+          "feature": {
+            "description": "GeoJSON Feature object with the polygon, or null if unknown"
           }
         }
       },
@@ -2115,7 +2081,7 @@
               "boolean",
               "null"
             ],
-            "description": "When true, deduplicate variants of the same line by (ref, route_type, operator).\nOne representative route per group is returned. Default: true."
+            "description": "When true, deduplicate variants of the same line by (ref, route_type, operator).\nOne representative route per group is returned. Default: false (variants are real routes)."
           },
           "limit": {
             "type": [
@@ -2175,6 +2141,86 @@
               "null"
             ],
             "description": "Filter by route type (e.g., \"tram\", \"bus\")"
+          }
+        }
+      },
+      "RouteSegmentRequest": {
+        "type": "object",
+        "description": "Request body for POST /api/routes/segment",
+        "required": [
+          "route_id",
+          "from_lat",
+          "from_lon",
+          "to_lat",
+          "to_lon"
+        ],
+        "properties": {
+          "from_lat": {
+            "type": "number",
+            "format": "double",
+            "description": "Latitude of the start point (e.g., a stop or platform)"
+          },
+          "from_lon": {
+            "type": "number",
+            "format": "double",
+            "description": "Longitude of the start point"
+          },
+          "route_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "OSM relation ID of the route"
+          },
+          "to_lat": {
+            "type": "number",
+            "format": "double",
+            "description": "Latitude of the end point (e.g., another stop)"
+          },
+          "to_lon": {
+            "type": "number",
+            "format": "double",
+            "description": "Longitude of the end point"
+          }
+        }
+      },
+      "RouteSegmentResponse": {
+        "type": "object",
+        "required": [
+          "route_id",
+          "segment",
+          "length_meters",
+          "from_offset_meters",
+          "to_offset_meters"
+        ],
+        "properties": {
+          "from_offset_meters": {
+            "type": "number",
+            "format": "double",
+            "description": "Distance (meters) from the requested `from` point to the closest point on the route.\nUseful for detecting requests where the point isn't actually near the line."
+          },
+          "length_meters": {
+            "type": "number",
+            "format": "double",
+            "description": "Length of the segment in meters"
+          },
+          "route_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "segment": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              }
+            },
+            "description": "Coordinates of the extracted segment as [lon, lat] pairs.\nAlways ordered from `from` to `to`."
+          },
+          "to_offset_meters": {
+            "type": "number",
+            "format": "double",
+            "description": "Distance (meters) from the requested `to` point to the closest point on the route."
           }
         }
       },
@@ -2526,6 +2572,209 @@
           }
         }
       },
+      "TilegenHistoryEntry": {
+        "type": "object",
+        "description": "One past generation run.",
+        "required": [
+          "id",
+          "layer_name",
+          "started_at",
+          "completed_at",
+          "duration_ms",
+          "tiles_done",
+          "tiles_total",
+          "file_size_bytes",
+          "status"
+        ],
+        "properties": {
+          "area_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "file_size_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "layer_name": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tiles_done": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tiles_total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "TilegenHistoryResponse": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TilegenHistoryEntry"
+            }
+          }
+        }
+      },
+      "TilegenLayerStatus": {
+        "type": "object",
+        "description": "Live status of one transit tile layer being generated by tilegen.",
+        "required": [
+          "layer_name",
+          "phase",
+          "status",
+          "tiles_done",
+          "tiles_total",
+          "generation_duration_ms",
+          "file_size_bytes"
+        ],
+        "properties": {
+          "area_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable area description (e.g. \"bayern\", \"10.85,48.33,...\")"
+          },
+          "bbox": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "description": "Bounding box: [west, south, east, north] in WGS84"
+          },
+          "current_zoom": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Highest zoom level seen in the in-progress mbtiles, or null"
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Last error message if the previous run failed"
+          },
+          "file_size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size of the last completed mbtiles file in bytes"
+          },
+          "generation_duration_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Duration of the last successful generation in milliseconds"
+          },
+          "last_generated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the layer last completed successfully (NULL if never completed)"
+          },
+          "layer_name": {
+            "type": "string",
+            "description": "Layer name (matches the MBTiles filename and Martin source name)"
+          },
+          "max_zoom": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Configured max zoom for this layer"
+          },
+          "min_zoom": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Configured min zoom for this layer"
+          },
+          "phase": {
+            "type": "string",
+            "description": "Latest known phase: idle | running | committing | completed | failed"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the current generation cycle started (NULL if never started)"
+          },
+          "status": {
+            "type": "string",
+            "description": "Last legacy status — kept for compatibility, derived from phase"
+          },
+          "tiles_done": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tiles already written to the in-progress mbtiles"
+          },
+          "tiles_total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Estimated total tiles for the configured bbox + zoom range"
+          }
+        }
+      },
+      "TilegenStatusResponse": {
+        "type": "object",
+        "required": [
+          "layers"
+        ],
+        "properties": {
+          "layers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TilegenLayerStatus"
+            }
+          }
+        }
+      },
       "TransportType": {
         "type": "string",
         "description": "Transport type for both configuration and runtime detection",
@@ -2814,10 +3063,6 @@
     }
   },
   "tags": [
-    {
-      "name": "areas",
-      "description": "Area management endpoints"
-    },
     {
       "name": "routes",
       "description": "Route endpoints"
