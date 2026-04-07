@@ -155,7 +155,7 @@ export function DepartureMonitor({ osmId, title, stationName, refIfopt, routeCol
     );
 
     return (
-        <div className={`flex flex-col${popupMode ? " max-h-[70vh] w-[24rem] max-w-[calc(100vw-2rem)]" : ""}`}>
+        <div className={`flex flex-col${popupMode ? " max-h-[35vh] w-[24rem] max-w-[calc(100vw-2rem)]" : ""}`}>
             <div className="px-4 py-3">
                 <DepartureMonitorHeader
                     title={title}
