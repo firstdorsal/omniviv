@@ -59,10 +59,10 @@ const MOCK_TRAIN = {
     vehicleType: "rail",
     width: 3.02,
     cars: {
-        "power-car": { length: 20.56, height: 3.84, type: "power_car", powered: true, width: 3.07 },
-        "first-class": { length: 26.4, height: 3.84, type: "first_class", powered: false },
-        "second-class": { length: 26.4, height: 3.84, type: "second_class", powered: false },
-        "dining": { length: 26.4, height: 4.295, type: "dining", powered: false },
+        "power-car": { length: 20.56, height: 3.84, type: "power_car", powered: true, width: 3.07, bogiePositions: [3.4, 17.16] },
+        "first-class": { length: 26.4, height: 3.84, type: "first_class", powered: false, bogiePositions: [3.7, 22.7] },
+        "second-class": { length: 26.4, height: 3.84, type: "second_class", powered: false, bogiePositions: [3.7, 22.7] },
+        "dining": { length: 26.4, height: 4.295, type: "dining", powered: false, bogiePositions: [3.7, 22.7] },
     },
     metadata: { wikidataId: "Q999999", maxSpeedKmh: 280, tractionType: "electric", operators: ["TestRail AG"] },
     consists: {
@@ -363,6 +363,19 @@ describe("VehicleModelLoader — consist resolution", () => {
         const model = loader.getModel("bogie-test")!;
         expect(model.segments[1].hasBogies).toBe(false);
     });
+
+    it("passes bogiePositions from CarDefinition through to segments", async () => {
+        const loader = createLoader();
+        mockFetch();
+        await loader.init();
+        const model = loader.getModel("test-train")!;
+        // power-car has bogiePositions [3.4, 17.16]
+        expect(model.segments[0].bogiePositions).toEqual([3.4, 17.16]);
+        // second-class has bogiePositions [3.7, 22.7]
+        expect(model.segments[1].bogiePositions).toEqual([3.7, 22.7]);
+        // dining (index 3 in the consist)
+        expect(model.segments[3].bogiePositions).toEqual([3.7, 22.7]);
+    });
 });
 
 // ── Formation resolution ────────────────────────────────────────────────
@@ -556,6 +569,21 @@ describe("VehicleModelLoader — ICE JSON validation", () => {
         expect(model.metadata?.seatingCapacity).toBe(830);
         // End cars are shorter than middle cars
         expect(model.segments[0].height).toBeLessThan(model.segments[1].height);
+    });
+
+    it("ICE models have bogie positions for rigid-body rendering", async () => {
+        for (const file of ["ice-1.json", "ice-2.json", "ice-3.json", "ice-4.json"]) {
+            const model = await loadRealModel(file);
+            for (const seg of model.segments) {
+                expect(seg.bogiePositions, `${file}: segment "${seg.type}" missing bogiePositions`).toBeDefined();
+                expect(seg.bogiePositions!.length, `${file}: segment "${seg.type}" needs ≥2 bogie positions`).toBeGreaterThanOrEqual(2);
+                // Bogies must lie within the segment body
+                for (const pos of seg.bogiePositions!) {
+                    expect(pos).toBeGreaterThanOrEqual(0);
+                    expect(pos).toBeLessThanOrEqual(seg.length);
+                }
+            }
+        }
     });
 
     it("all JSON files have kind discriminant", async () => {

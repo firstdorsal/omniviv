@@ -34,6 +34,8 @@ interface CarDefinition {
     powered?: boolean;
     width?: number;
     hasBogies?: boolean;
+    /** Bogie centerline positions in meters from the front of the car */
+    bogiePositions?: number[];
 }
 
 /** A named train configuration referencing cars from the catalog. */
@@ -387,6 +389,7 @@ export class VehicleModelLoader {
                 hasBogies: car.hasBogies ?? true,
                 width: car.width,
                 powered: car.powered,
+                bogiePositions: car.bogiePositions,
             });
         }
 

@@ -12,31 +12,36 @@
       "height": 3.84,
       "type": "power_car",
       "powered": true,
-      "width": 3.07
+      "width": 3.07,
+      "bogiePositions": [3.4, 17.16]
     },
     "first-class": {
       "length": 26.4,
       "height": 3.84,
       "type": "first_class",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.7, 22.7]
     },
     "second-class": {
       "length": 26.4,
       "height": 3.84,
       "type": "second_class",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.7, 22.7]
     },
     "service": {
       "length": 26.4,
       "height": 3.84,
       "type": "service",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.7, 22.7]
     },
     "driving-trailer": {
       "length": 26.4,
       "height": 3.84,
       "type": "driving_trailer",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.7, 22.7]
     }
   },
 

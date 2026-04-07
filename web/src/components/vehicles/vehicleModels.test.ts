@@ -109,6 +109,33 @@ describe("calculateSegmentDistances", () => {
     });
 });
 
+describe("VehicleSegment.bogiePositions", () => {
+    it("accepts bogie positions on segments", () => {
+        const model: VehicleModel = {
+            ...FALLBACK_VEHICLE_MODEL,
+            segments: [
+                { length: 26.4, type: "second_class", height: 3.84, hasBogies: true, bogiePositions: [3.7, 22.7] },
+            ],
+        };
+        const result = calculateSegmentDistances(model);
+        expect(result[0].segment.bogiePositions).toEqual([3.7, 22.7]);
+    });
+
+    it("preserves bogie positions through calculateSegmentDistances", () => {
+        const model: VehicleModel = {
+            ...FALLBACK_VEHICLE_MODEL,
+            articulationGap: 0.5,
+            segments: [
+                { length: 25.835, type: "end_car", height: 3.89, hasBogies: true, bogiePositions: [3.7, 22.135] },
+                { length: 24.775, type: "second_class", height: 3.89, hasBogies: true, bogiePositions: [3.0, 21.775] },
+            ],
+        };
+        const result = calculateSegmentDistances(model);
+        expect(result[0].segment.bogiePositions).toEqual([3.7, 22.135]);
+        expect(result[1].segment.bogiePositions).toEqual([3.0, 21.775]);
+    });
+});
+
 describe("getAllTrackDistances", () => {
     it("returns sorted unique distances with gapAfter support", () => {
         const model: VehicleModel = {

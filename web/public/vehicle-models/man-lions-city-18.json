@@ -10,8 +10,8 @@
   "lods": {
     "lowPoly": {
       "segments": [
-        { "length": 10.3, "type": "cab", "height": 3.3, "hasBogies": true },
-        { "length": 7.46, "type": "passenger", "height": 3.3, "hasBogies": true }
+        { "length": 10.3, "type": "cab", "height": 3.3, "hasBogies": true, "bogiePositions": [2.7, 7.5] },
+        { "length": 7.46, "type": "passenger", "height": 3.3, "hasBogies": true, "bogiePositions": [0.0, 5.5] }
       ]
     }
   },

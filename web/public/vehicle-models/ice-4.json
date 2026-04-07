@@ -11,43 +11,50 @@
       "length": 29.106,
       "height": 3.87,
       "type": "end_car",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [4.0, 25.106]
     },
     "end-car-first": {
       "length": 29.106,
       "height": 3.87,
       "type": "end_car",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [4.0, 25.106]
     },
     "traction": {
       "length": 28.75,
       "height": 4.115,
       "type": "second_class",
-      "powered": true
+      "powered": true,
+      "bogiePositions": [3.5, 25.25]
     },
     "traction-bistro": {
       "length": 28.75,
       "height": 4.115,
       "type": "bistro",
-      "powered": true
+      "powered": true,
+      "bogiePositions": [3.5, 25.25]
     },
     "middle-second": {
       "length": 28.75,
       "height": 4.115,
       "type": "second_class",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.5, 25.25]
     },
     "middle-first": {
       "length": 28.75,
       "height": 4.115,
       "type": "first_class",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.5, 25.25]
     },
     "service": {
       "length": 28.75,
       "height": 4.115,
       "type": "service",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.5, 25.25]
     }
   },
 

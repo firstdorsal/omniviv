@@ -11,43 +11,50 @@
       "length": 25.835,
       "height": 3.89,
       "type": "end_car",
-      "powered": true
+      "powered": true,
+      "bogiePositions": [3.7, 22.135]
     },
     "end-car-second": {
       "length": 25.835,
       "height": 3.89,
       "type": "end_car",
-      "powered": true
+      "powered": true,
+      "bogiePositions": [3.7, 22.135]
     },
     "transformer-first": {
       "length": 24.775,
       "height": 3.89,
       "type": "first_class",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.0, 21.775]
     },
     "inverter-second": {
       "length": 24.775,
       "height": 3.89,
       "type": "second_class",
-      "powered": true
+      "powered": true,
+      "bogiePositions": [3.0, 21.775]
     },
     "bistro": {
       "length": 24.775,
       "height": 3.89,
       "type": "bistro",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.0, 21.775]
     },
     "middle-second": {
       "length": 24.775,
       "height": 3.89,
       "type": "second_class",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.0, 21.775]
     },
     "transformer-second": {
       "length": 24.775,
       "height": 3.89,
       "type": "second_class",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.0, 21.775]
     }
   },
 

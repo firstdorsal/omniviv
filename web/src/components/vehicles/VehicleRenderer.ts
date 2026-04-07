@@ -728,10 +728,24 @@ export class VehicleRenderer {
             linearPosition = routePosition.linearPosition;
         }
 
-        // Get all distances behind the vehicle for 3D model segments
+        // Build the list of distances we need positions for.  Each segment
+        // contributes either its bogie centerline distances (rigid-body mode)
+        // or its front/rear endpoints (flexible-body fallback).  segmentSlices
+        // tracks which slice of `positions` belongs to each segment.
         const allDistances: number[] = [];
+        const segmentSlices: { start: number; count: number; useBogies: boolean }[] = [];
         for (const segInfo of segmentDistances) {
-            allDistances.push(segInfo.frontDistance, segInfo.rearDistance);
+            const bogies = segInfo.segment.bogiePositions;
+            const useBogies = !!(bogies && bogies.length >= 2);
+            const start = allDistances.length;
+            if (useBogies) {
+                for (const bogiePos of bogies!) {
+                    allDistances.push(segInfo.frontDistance + bogiePos);
+                }
+            } else {
+                allDistances.push(segInfo.frontDistance, segInfo.rearDistance);
+            }
+            segmentSlices.push({ start, count: allDistances.length - start, useBogies });
         }
 
         // Get positions along the route behind the vehicle
@@ -740,15 +754,56 @@ export class VehicleRenderer {
         // Generate 3D model polygons
         for (let i = 0; i < segmentDistances.length; i++) {
             const segInfo = segmentDistances[i];
-            const frontPos = positions[i * 2];
-            const rearPos = positions[i * 2 + 1];
-
+            const slice = segmentSlices[i];
             const segWidth = segInfo.segment.width ?? vehicleModel.width;
+
+            let bodyFront: { lon: number; lat: number };
+            let bodyRear: { lon: number; lat: number };
+
+            if (slice.useBogies) {
+                // Rigid-body mode: extend the body past the outermost bogies
+                // along the chord between them.
+                const bogiePositions = segInfo.segment.bogiePositions!;
+                const firstBogie = positions[slice.start];
+                const lastBogie = positions[slice.start + slice.count - 1];
+                const frontOverhang = bogiePositions[0];
+                const rearOverhang = segInfo.segment.length - bogiePositions[bogiePositions.length - 1];
+
+                // Compute axis from first bogie to last bogie in metres
+                const metersPerDegLon = METERS_PER_DEGREE_AT_EQUATOR * Math.cos((firstBogie.lat * Math.PI) / 180);
+                const dxMeters = (lastBogie.lon - firstBogie.lon) * metersPerDegLon;
+                const dyMeters = (lastBogie.lat - firstBogie.lat) * METERS_PER_DEGREE_AT_EQUATOR;
+                const axisLength = Math.sqrt(dxMeters * dxMeters + dyMeters * dyMeters);
+
+                if (axisLength > MIN_SEGMENT_RENDER_LENGTH) {
+                    const axisDxLon = dxMeters / axisLength / metersPerDegLon;
+                    const axisDyLat = dyMeters / axisLength / METERS_PER_DEGREE_AT_EQUATOR;
+                    // Body front = first bogie minus frontOverhang along the axis
+                    bodyFront = {
+                        lon: firstBogie.lon - axisDxLon * frontOverhang,
+                        lat: firstBogie.lat - axisDyLat * frontOverhang,
+                    };
+                    // Body rear = last bogie plus rearOverhang along the axis
+                    bodyRear = {
+                        lon: lastBogie.lon + axisDxLon * rearOverhang,
+                        lat: lastBogie.lat + axisDyLat * rearOverhang,
+                    };
+                } else {
+                    // Bogies coincide (degenerate); fall back to bogie positions
+                    bodyFront = firstBogie;
+                    bodyRear = lastBogie;
+                }
+            } else {
+                // Flexible-body fallback: use the segment's front and rear corners
+                bodyFront = positions[slice.start];
+                bodyRear = positions[slice.start + 1];
+            }
+
             const polygon = this.createSegmentPolygon(
-                frontPos.lon,
-                frontPos.lat,
-                rearPos.lon,
-                rearPos.lat,
+                bodyFront.lon,
+                bodyFront.lat,
+                bodyRear.lon,
+                bodyRear.lat,
                 segWidth
             );
 

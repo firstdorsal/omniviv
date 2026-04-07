@@ -10,8 +10,8 @@
   "lods": {
     "lowPoly": {
       "segments": [
-        { "length": 26.735, "type": "end_car", "height": 4.31, "hasBogies": true, "powered": true },
-        { "length": 26.735, "type": "end_car", "height": 4.31, "hasBogies": true, "powered": true }
+        { "length": 26.735, "type": "end_car", "height": 4.31, "hasBogies": true, "powered": true, "bogiePositions": [3.5, 23.235] },
+        { "length": 26.735, "type": "end_car", "height": 4.31, "hasBogies": true, "powered": true, "bogiePositions": [3.5, 23.235] }
       ]
     }
   },

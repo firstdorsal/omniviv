@@ -11,31 +11,36 @@
       "length": 20.56,
       "height": 3.84,
       "type": "power_car",
-      "powered": true
+      "powered": true,
+      "bogiePositions": [3.4, 17.16]
     },
     "first-class": {
       "length": 26.4,
       "height": 3.84,
       "type": "first_class",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.7, 22.7]
     },
     "second-class": {
       "length": 26.4,
       "height": 3.84,
       "type": "second_class",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.7, 22.7]
     },
     "service": {
       "length": 26.4,
       "height": 3.84,
       "type": "service",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.7, 22.7]
     },
     "dining": {
       "length": 26.4,
       "height": 4.295,
       "type": "dining",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [3.7, 22.7]
     }
   },
 

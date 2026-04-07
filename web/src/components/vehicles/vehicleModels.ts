@@ -103,6 +103,29 @@ export interface VehicleSegment {
      * formation units vs. the tighter gap between cars within one unit.
      */
     gapAfter?: number;
+    /**
+     * Bogie centerline positions in meters from the FRONT of this segment.
+     *
+     * When provided (≥2 values), the renderer treats the segment as a rigid
+     * body anchored to the bogies: the bogies follow the route, the body
+     * takes a chord through curves, and the body's overhang sticks out past
+     * the bogies on the outside of curves. This matches real-world rail
+     * behaviour where only the bogies pivot, never the car body.
+     *
+     * When undefined or with fewer than 2 entries, the renderer falls back
+     * to the legacy "flexible body" mode where the segment's front and rear
+     * corners follow the route directly. This is acceptable for short
+     * articulated tram modules but visually wrong for long rigid train cars.
+     *
+     * For Jacobs bogies (shared between adjacent cars), the rear bogie of
+     * one segment and the front bogie of the next should be at the segment
+     * boundary (`length` and `0` respectively); the renderer naturally
+     * resolves them to the same point on the route.
+     *
+     * Typical: `[3.5, 25.25]` for an ICE 4 middle car (28.75m, ~3.5m
+     * overhang at each end).
+     */
+    bogiePositions?: number[];
 }
 
 // ── Level 1: VehicleModel (Blueprint / Baureihe) ────────────────────────

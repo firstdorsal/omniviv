@@ -11,19 +11,22 @@
       "length": 20.05,
       "height": 4.26,
       "type": "end_car",
-      "powered": true
+      "powered": true,
+      "bogiePositions": [2.8, 20.05]
     },
     "middle-car": {
       "length": 16.1,
       "height": 4.26,
       "type": "second_class",
-      "powered": false
+      "powered": false,
+      "bogiePositions": [0.0, 16.1]
     },
     "middle-car-powered": {
       "length": 16.1,
       "height": 4.26,
       "type": "second_class",
-      "powered": true
+      "powered": true,
+      "bogiePositions": [0.0, 16.1]
     }
   },
 
