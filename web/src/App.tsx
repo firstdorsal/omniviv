@@ -1,4 +1,4 @@
-import { Bug, Clock, Github, Layers, Navigation, Settings, TrainFront, Wifi, WifiOff } from "lucide-react";
+import { Activity, Bug, Clock, Github, Layers, Navigation, Settings, TrainFront, Wifi, WifiOff } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TbWorldX } from "react-icons/tb";
 import type { Station } from "./api";
@@ -11,6 +11,7 @@ import { NavigationPanel, type Location, type PickMode, type RouteItinerary } fr
 import { TimeControlPanel } from "./components/TimeControlPanel";
 import { VehicleMonitorPanel } from "./components/VehicleMonitorPanel";
 import { LineFilterPanel } from "./components/LineFilterPanel";
+import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { VehicleTrackingPanel } from "./components/VehicleTrackingPanel";
 import TransitMap from "./components/map/Map";
 import { Button } from "./components/ui/button";
@@ -32,9 +33,9 @@ import { useTimeSimulation } from "./hooks/useTimeSimulation";
 import { useVehicleUpdates, type RouteVehicles } from "./hooks/useVehicleUpdates";
 import { useVisibleRoutes } from "./hooks/useVisibleRoutes";
 
-type SidebarPanel = "navigation" | "layers" | "features" | "debug" | "issues" | "time" | `departures:${string}` | `vehicle:${string}` | null;
+type SidebarPanel = "navigation" | "layers" | "features" | "debug" | "diagnose" | "issues" | "time" | `departures:${string}` | `vehicle:${string}` | null;
 
-const VALID_PANELS = new Set(["navigation", "layers", "features", "debug", "issues", "time"]);
+const VALID_PANELS = new Set(["navigation", "layers", "features", "debug", "diagnose", "issues", "time"]);
 
 function getInitialPanel(): SidebarPanel {
     const params = new URLSearchParams(window.location.search);
@@ -264,6 +265,11 @@ export default function App() {
         lon: number;
         color?: string;
     } | null>(null);
+
+    // Diagnostics panel: GeoJSON Feature(s) for the area being inspected.
+    // The DiagnosticsPanel sets this when the user clicks a layer card; the
+    // map renders a translucent fill + outline of the actual region.
+    const [diagnoseAreaFeatures, setDiagnoseAreaFeatures] = useState<GeoJSON.Feature[]>([]);
 
     // Mapping visualization data (from IssuesPanel mapping tab)
     const [mappingMapData, setMappingMapData] = useState<MappingMapData>({
@@ -931,6 +937,16 @@ export default function App() {
                         <Bug className="h-5 w-5" />
                     </Button>
                     )}
+                    <Button
+                        variant={activePanel === "diagnose" ? "default" : "ghost"}
+                        size="icon"
+                        onClick={() => togglePanel("diagnose")}
+                        className="m-2"
+                        title="Diagnose"
+                        aria-label="Diagnose"
+                    >
+                        <Activity className="h-5 w-5" />
+                    </Button>
                     <a
                         href="https://github.com/firstdorsal/omniviv"
                         target="_blank"
@@ -1243,6 +1259,12 @@ export default function App() {
                             </div>
                         )}
 
+                        {activePanel === "diagnose" && (
+                            <DiagnosticsPanel
+                                onSelectionChange={setDiagnoseAreaFeatures}
+                            />
+                        )}
+
                         {activePanel === "issues" && (
                             <OsmIssuesPanel
                                 onMapDataChange={setMappingMapData}
@@ -1335,6 +1357,7 @@ export default function App() {
                     navigationWaypoints={navVia}
                     highlightedBuilding={highlightedBuilding}
                     onHighlightBuilding={setHighlightedBuilding}
+                    diagnoseAreaFeatures={diagnoseAreaFeatures}
                     mappingLines={activePanel === "issues" ? mappingMapData.lines : []}
                     mappingGtfsStops={activePanel === "issues" ? mappingMapData.gtfsStops : []}
                     pinnedStopIds={pinnedStopIds}
