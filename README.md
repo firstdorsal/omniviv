@@ -110,3 +110,23 @@ See [docs/releasing.md](docs/releasing.md) for the full release workflow.
 ## License
 
 [Add license information here]
+
+# Other work
+
+Live Display:
+
+https://germany.motis-project.org/
+https://xn--live-pnv-r4a.de/
+https://travic.app/
+
+# Data
+
+## Germany
+
+### Bahn-Vorhersage: Geparste deutschlandweite Verspätungsdaten
+
+https://mobilithek.info/offers/938616012299546624
+
+### DELFI-Realtime GTFS-RT Trip Updates
+
+https://mobilithek.info/offers/858688352316981248

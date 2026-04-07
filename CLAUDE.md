@@ -1,3 +1,7 @@
+## General
+
+-   The vite dev server is always running at http://localhost:5174/
+
 -   The frontend and backend server are on watch an will restart once a file has been changed
 -   The rebuild of the backend server can take a while
 -   The frontend client needs to be rebuilt by running the generate-api.sh script
@@ -12,9 +16,13 @@
 
 -   Release flow documentation is in docs/releasing.md
 
--   AI tests in `web/ai-tests/` define codebase invariants as markdown files. Before finishing work on the frontend, each `.md` file (excluding README.md) MUST be verified by spawning a dedicated Agent for it. Each agent receives the test file content as its prompt and verifies the rule against the current codebase. Use parallel agents when there are multiple test files. Report any violations with file paths and line numbers. These tests are mandatory and must pass alongside the Playwright E2E tests.
+## AI tests
 
--   The vite dev server is always running at http://localhost:5174/
+AI tests in `web/ai-tests/` define codebase invariants as markdown files. Before finishing work on the frontend, each `.md` file (excluding README.md) MUST be verified by spawning a dedicated Agent for it. Each agent receives the test file content as its prompt and verifies the rule against the current codebase. Use parallel agents when there are multiple test files. Report any violations with file paths and line numbers. These tests are mandatory and must pass alongside the Playwright E2E tests
+
+
+
+## Other
 
 Official Königsplatz assignments (from AVV):
 
