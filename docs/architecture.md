@@ -54,7 +54,6 @@ Key features:
 ```
 api/src/
 ├── api/                 # REST endpoints
-│   ├── areas/          # Service area management
 │   ├── departures/     # Real-time departure data
 │   ├── gtfs_stops/     # GTFS stop queries
 │   ├── issues/         # OSM data quality issues
@@ -70,7 +69,6 @@ api/src/
 │   ├── utils.rs        # API utility functions
 │   └── error.rs        # API error types
 ├── providers/          # External data sources
-│   ├── osm.rs          # OpenStreetMap data fetching
 │   └── timetables/     # Timetable API integrations
 │       └── gtfs/
 │           ├── mod.rs              # GtfsProvider (schedule + RT)
@@ -193,7 +191,6 @@ PostgreSQL stores:
 - `0002_gtfs_agencies.sql` — adds the `gtfs_agencies` table and the `agency_id` column on `gtfs_routes`
 
 **OSM data tables (`0001_init.sql`):**
-- **areas**: Configured service areas with bounding boxes
 - **stations**: Transit stations with coordinates; has a `geom` (Point) column for PostGIS queries
 - **platforms**: Platform nodes within stations; has a `geom` (Point) column
 - **platform_ways**: Physical platform outlines stored as centroids (separate from `platforms` to avoid OSM node/way ID collisions); has a `geom` (Point) column
@@ -239,15 +236,6 @@ static schedule is stored in PostgreSQL and cached in-memory per stop with a 5-m
 ### API (`config.yaml`)
 ```yaml
 cors_permissive: true  # For development
-areas:
-    - name: "Augsburg"
-      bounding_box:
-          south: 48.20
-          west: 10.75
-          north: 48.48
-          east: 11.05
-      transport_types:
-          - tram
 
 gtfs_sync:
     static_feed_url: "https://download.gtfs.de/germany/free/latest.zip"

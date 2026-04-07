@@ -24,29 +24,6 @@ When running with dev-tools, the spec is also served at `/api-docs/openapi.json`
 
 ## Endpoints
 
-### Areas
-
-#### List Areas
-```
-GET /api/areas
-```
-
-Returns all configured service areas.
-
-#### Get Area
-```
-GET /api/areas/{id}
-```
-
-#### Get Area Stats
-```
-GET /api/areas/{id}/stats
-```
-
-Returns statistics for an area (station count, route count, etc.).
-
----
-
 ### Stations
 
 #### List Stations

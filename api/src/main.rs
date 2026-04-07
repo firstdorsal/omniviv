@@ -40,7 +40,7 @@ async fn main() {
     // Load config
     let config = Config::load("config.yaml").expect("Failed to load config");
     config.gtfs_sync.validate();
-    tracing::info!(areas = config.areas.len(), "Loaded configuration");
+    tracing::info!("Loaded configuration");
 
     // Build CORS layer based on config
     let cors_layer = if config.cors_permissive {

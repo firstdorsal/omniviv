@@ -19,7 +19,6 @@ pub fn read_env_or_file(name: &str) -> Result<String, ConfigError> {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    pub areas: Vec<Area>,
     /// Allowed CORS origins. Required unless cors_permissive is true.
     #[serde(default)]
     pub cors_origins: Vec<String>,
@@ -140,50 +139,6 @@ impl GtfsSyncConfig {
     }
     fn default_timezone() -> String {
         "Europe/Berlin".to_string()
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Area {
-    pub name: String,
-    pub bounding_box: BoundingBox,
-    pub transport_types: Vec<TransportType>,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-pub struct BoundingBox {
-    pub south: f64,
-    pub west: f64,
-    pub north: f64,
-    pub east: f64,
-}
-
-impl BoundingBox {
-    /// Returns bbox as Overpass API format string: "south,west,north,east"
-    pub fn to_overpass_string(&self) -> String {
-        format!("{},{},{},{}", self.south, self.west, self.north, self.east)
-    }
-
-    /// Validate that the bounding box coordinates are consistent and within range.
-    pub fn validate(&self) -> Result<(), String> {
-        if self.south > self.north {
-            return Err("south > north".to_string());
-        }
-        if self.west > self.east {
-            return Err("west > east".to_string());
-        }
-        if self.south < -90.0 || self.north > 90.0 {
-            return Err("latitude out of range".to_string());
-        }
-        if self.west < -180.0 || self.east > 180.0 {
-            return Err("longitude out of range".to_string());
-        }
-        Ok(())
-    }
-
-    /// Check whether a coordinate falls within this bounding box.
-    pub fn contains(&self, lat: f64, lon: f64) -> bool {
-        lat >= self.south && lat <= self.north && lon >= self.west && lon <= self.east
     }
 }
 
@@ -310,15 +265,7 @@ mod tests {
     #[test]
     fn config_without_gtfs_sync_uses_defaults() {
         let yaml = r#"
-            areas:
-              - name: Test
-                bounding_box:
-                  south: 48.0
-                  west: 10.0
-                  north: 49.0
-                  east: 11.0
-                transport_types:
-                  - tram
+            cors_permissive: true
         "#;
         let config: Config = serde_yaml_neo::from_str(yaml).unwrap();
         assert_eq!(config.gtfs_sync.realtime_interval_secs, 15);
@@ -329,15 +276,7 @@ mod tests {
     #[test]
     fn config_with_gtfs_sync_overrides() {
         let yaml = r#"
-            areas:
-              - name: Test
-                bounding_box:
-                  south: 48.0
-                  west: 10.0
-                  north: 49.0
-                  east: 11.0
-                transport_types:
-                  - tram
+            cors_permissive: true
             gtfs_sync:
               realtime_interval_secs: 30
               static_refresh_hours: 12
@@ -359,7 +298,6 @@ mod tests {
             return;
         }
         let config = Config::load("config.yaml").unwrap();
-        assert!(!config.areas.is_empty());
         assert!(config.gtfs_sync.realtime_interval_secs > 0);
         assert!(config.gtfs_sync.static_refresh_hours > 0);
     }

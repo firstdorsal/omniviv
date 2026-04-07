@@ -13,7 +13,7 @@ pub mod utils;
 pub use csv::parse_gtfs_time;
 
 // db module: all three were `pub async fn`
-pub use db::{build_schedule_from_db, build_schedule_from_db_by_gtfs_stop, load_schedule_to_db};
+pub use db::{build_full_schedule_from_db, build_schedule_from_db, build_schedule_from_db_by_gtfs_stop, load_schedule_to_db};
 
 // download module: download_feed was `pub async fn`, DownloadResult was `pub struct`
 pub use download::{download_feed, DownloadResult};

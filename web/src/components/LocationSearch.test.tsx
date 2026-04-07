@@ -19,7 +19,7 @@ import {
     formatArea,
     categoryToLabel,
 } from "./LocationSearch";
-import type { Area, Station } from "../api";
+import type { Station } from "../api";
 
 // -- Mocks --------------------------------------------------------------------
 
@@ -48,41 +48,42 @@ const STATION_A: Station = {
     name: "Augsburg Hbf",
     lat: 48.365,
     lon: 10.886,
+    min_zoom: 0,
     osm_id: 1,
     osm_type: "node",
+    platform_ways: [],
     platforms: [{ name: "1", lat: 48.365, lon: 10.886, osm_id: 10, gtfs_stop_ids: [] }],
     stop_positions: [],
-    area_id: 1,
 };
 
 const STATION_B: Station = {
     name: "Königsplatz",
     lat: 48.367,
     lon: 10.893,
+    min_zoom: 0,
     osm_id: 2,
     osm_type: "node",
+    platform_ways: [],
     platforms: [
         { name: "A1", lat: 48.367, lon: 10.893, osm_id: 20, gtfs_stop_ids: [] },
         { name: "A2", lat: 48.367, lon: 10.893, osm_id: 21, gtfs_stop_ids: [] },
     ],
     stop_positions: [],
-    area_id: 1,
 };
 
 const STATION_C: Station = {
     name: "Augsburg West P+R",
     lat: 48.368,
     lon: 10.860,
+    min_zoom: 0,
     osm_id: 3,
     osm_type: "node",
+    platform_ways: [],
     platforms: [],
     stop_positions: [],
-    area_id: 1,
 };
 
 const STATIONS = [STATION_A, STATION_B, STATION_C];
-
-const AREAS = [{ id: 1, name: "Augsburg", north: 48.5, south: 48.3, east: 11.0, west: 10.8, created_at: "2024-01-01T00:00:00Z" }];
 
 const BOOKMARK_A: LocationBookmark = {
     name: "Home",
@@ -119,7 +120,6 @@ function renderSearch(props: Partial<React.ComponentProps<typeof LocationSearch>
     const result = render(
         <LocationSearch
             stations={STATIONS}
-            areas={AREAS}
             value={null}
             onChange={onChange}
             {...props}

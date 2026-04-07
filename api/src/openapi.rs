@@ -13,7 +13,6 @@ use utoipauto::utoipauto;
 #[openapi(
     info(title = "Omniviv API", version = env!("CARGO_PKG_VERSION")),
     tags(
-        (name = "areas", description = "Area management endpoints"),
         (name = "routes", description = "Route endpoints"),
         (name = "stations", description = "Station and platform endpoints"),
         (name = "departures", description = "Real-time departure information"),
@@ -47,9 +46,6 @@ mod tests {
         let paths = json["paths"].as_object().expect("spec must have paths");
 
         let expected_paths = [
-            "/api/areas",
-            "/api/areas/{id}",
-            "/api/areas/{id}/stats",
             "/api/routes",
             "/api/routes/{route_id}",
             "/api/routes/{route_id}/geometry",
@@ -95,7 +91,6 @@ mod tests {
             .expect("spec must have schemas");
 
         let expected_schemas = [
-            "Area",
             "Route",
             "Station",
             "Departure",

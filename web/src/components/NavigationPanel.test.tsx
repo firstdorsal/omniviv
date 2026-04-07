@@ -89,7 +89,6 @@ function mockSuccessfulRouteResponse() {
 function defaultProps(overrides: Partial<Parameters<typeof NavigationPanel>[0]> = {}) {
     return {
         stations: [],
-        areas: [],
         routeColors: new Map<string, string>(),
         routeTypes: new Map<string, string>(),
         startLocation: null as ResolvedLocation | null,

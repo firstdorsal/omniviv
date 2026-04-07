@@ -172,18 +172,6 @@ cargo run
 ```yaml
 # CORS - use permissive for development
 cors_permissive: true
-
-# Service areas
-areas:
-    - name: "Augsburg"
-      bounding_box:
-          south: 48.20
-          west: 10.75
-          north: 48.48
-          east: 11.05
-      transport_types:
-          - tram
-          # - bus  # Can overwhelm Overpass API
 ```
 
 ### Frontend Config (`web/public/config.json`)
@@ -267,4 +255,4 @@ cd web && pnpm dev --port 3001
 ```
 
 ### OSM data not loading
-The Overpass API has rate limits. If too many areas/transport types are configured, requests may fail. Start with a small area and few transport types.
+OSM data is imported from a nightly Germany PBF via `osm2pgsql` by the tilegen/import pipeline. If stations, platforms or routes are missing, verify that the PBF import completed and that the merge step ran at API startup (look for "Merged stations" / "Merged route metadata" log lines).

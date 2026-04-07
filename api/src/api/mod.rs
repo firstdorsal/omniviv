@@ -1,4 +1,3 @@
-pub mod areas;
 pub mod departures;
 pub mod error;
 pub mod utils;
@@ -42,7 +41,6 @@ pub fn router(
     };
 
     Router::new()
-        .nest("/areas", areas::router(pool.clone()))
         .nest("/routes", routes::router(pool.clone()))
         .nest("/stations", stations::router(pool.clone()))
         .nest("/departures", departures::router(app_state.clone()))

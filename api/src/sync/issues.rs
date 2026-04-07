@@ -1,7 +1,6 @@
 //! OSM data quality issue detection and management.
 
 use crate::config::TransportType;
-use crate::providers::osm::OsmElement;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -342,57 +341,6 @@ impl OsmIssue {
 
 /// In-memory store for OSM data quality issues
 pub type OsmIssueStore = Arc<RwLock<Vec<OsmIssue>>>;
-
-/// Determine transport type from OSM element tags
-pub fn determine_transport_type(element: &OsmElement) -> TransportType {
-    // Check railway tag
-    if let Some(railway) = element.tag("railway") {
-        match railway.as_str() {
-            "tram_stop" | "tram" => return TransportType::Tram,
-            "subway" | "subway_entrance" => return TransportType::Subway,
-            "station" | "halt" | "stop" => return TransportType::Train,
-            _ => {}
-        }
-    }
-
-    // Check highway tag for bus stops
-    if let Some(highway) = element.tag("highway") {
-        if highway == "bus_stop" {
-            return TransportType::Bus;
-        }
-    }
-
-    // Check amenity tag for ferry terminals
-    if let Some(amenity) = element.tag("amenity") {
-        if amenity == "ferry_terminal" {
-            return TransportType::Ferry;
-        }
-    }
-
-    // Check public_transport tag
-    if let Some(pt) = element.tag("public_transport") {
-        if pt == "stop_position" || pt == "platform" {
-            // Try to determine from tram/bus/train/subway/ferry tags
-            if element.tag("tram").is_some() || element.tag("light_rail").is_some() {
-                return TransportType::Tram;
-            }
-            if element.tag("bus").is_some() {
-                return TransportType::Bus;
-            }
-            if element.tag("subway").is_some() {
-                return TransportType::Subway;
-            }
-            if element.tag("train").is_some() {
-                return TransportType::Train;
-            }
-            if element.tag("ferry").is_some() {
-                return TransportType::Ferry;
-            }
-        }
-    }
-
-    TransportType::Unknown
-}
 
 /// Determine transport type from route type string
 pub fn transport_type_from_route(route_type: &str) -> TransportType {
