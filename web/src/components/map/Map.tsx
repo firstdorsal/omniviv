@@ -9,7 +9,7 @@ import type { RouteVehicles } from "../../App";
 import type { MappingLine, MappingGtfsStop } from "../MappingManager";
 import type { RouteItinerary } from "../NavigationPanel";
 import { createWaypointMarkerElement } from "../WaypointMarker";
-import { haversineDistance, findClosestPointIndex, stripStationSuffix } from "../../lib/geoUtils";
+import { haversineDistance, stripStationSuffix } from "../../lib/geoUtils";
 import { decodePolyline } from "./polyline";
 import { getConfig } from "../../config";
 import { GtfsStopPopup } from "../GtfsStopPopup";
@@ -101,6 +101,12 @@ interface MapProps {
     navigationEnd?: NavigationLocation | null;
     navigationWaypoints?: (NavigationLocation | null)[];
     navigationRoute?: RouteItinerary | null;
+    /**
+     * GeoJSON Feature(s) representing the area being inspected in the
+     * diagnostics panel. When set, the map renders a translucent fill +
+     * outline so users can see exactly which region is being processed.
+     */
+    diagnoseAreaFeatures?: GeoJSON.Feature[];
     highlightedBuilding?: HighlightedBuilding | null;
     onHighlightBuilding?: (building: HighlightedBuilding | null) => void;
     mappingLines?: MappingLine[];
@@ -308,6 +314,11 @@ export default class TransitMap extends React.Component<MapProps, MapState> {
         // Update navigation route geometry
         if (prevProps.navigationRoute !== this.props.navigationRoute) {
             this.updateNavigationRouteLayer();
+        }
+
+        // Update diagnostics-panel area overlay
+        if (prevProps.diagnoseAreaFeatures !== this.props.diagnoseAreaFeatures) {
+            this.updateDiagnoseAreaLayer();
         }
 
         // Update mapping visualization lines and GTFS stops
@@ -687,11 +698,40 @@ export default class TransitMap extends React.Component<MapProps, MapState> {
                 },
             });
 
+            // Diagnostics overlay — when the user selects a layer in the
+            // diagnostics panel, the area's polygon (or bbox rectangle) is
+            // rendered as a translucent fill + outline so they can see
+            // exactly which region is being processed.
+            this.map.addSource("diagnose-area", {
+                type: "geojson",
+                data: { type: "FeatureCollection", features: [] },
+            });
+            this.map.addLayer({
+                id: "diagnose-area-fill",
+                type: "fill",
+                source: "diagnose-area",
+                paint: {
+                    "fill-color": "#3b82f6",
+                    "fill-opacity": 0.12,
+                },
+            });
+            this.map.addLayer({
+                id: "diagnose-area-outline",
+                type: "line",
+                source: "diagnose-area",
+                paint: {
+                    "line-color": "#1d4ed8",
+                    "line-width": 2.5,
+                    "line-dasharray": [2, 2],
+                },
+            });
+
             this.setupMapEventHandlers();
             this.setState({ mapLoaded: true });
             this.updateScale();
             this.updateNavigationPointsLayer();
             this.updateNavigationRouteLayer();
+            this.updateDiagnoseAreaLayer();
 
             // Notify parent of viewport changes (for loading visible routes)
             // Use 'move' with throttling so stations load during panning, not just after
@@ -1329,6 +1369,45 @@ export default class TransitMap extends React.Component<MapProps, MapState> {
     /** Pending navigation route update — cancelled when a new itinerary is selected */
     private navRouteAbort: AbortController | null = null;
 
+    private updateDiagnoseAreaLayer() {
+        if (!this.map) return;
+        const source = this.map.getSource("diagnose-area") as maplibregl.GeoJSONSource | undefined;
+        if (!source) return;
+        const features = this.props.diagnoseAreaFeatures ?? [];
+        source.setData({ type: "FeatureCollection", features });
+
+        // Fit the map to the selected area on first selection
+        if (features.length > 0) {
+            const bounds = new maplibregl.LngLatBounds([0, 0], [0, 0]);
+            let initialized = false;
+            const visit = (coord: number[]) => {
+                const lngLat: [number, number] = [coord[0], coord[1]];
+                if (!initialized) {
+                    bounds.setNorthEast(lngLat);
+                    bounds.setSouthWest(lngLat);
+                    initialized = true;
+                } else {
+                    bounds.extend(lngLat);
+                }
+            };
+            const visitGeom = (geom: GeoJSON.Geometry) => {
+                if (geom.type === "Polygon") {
+                    geom.coordinates.forEach((ring) => ring.forEach(visit));
+                } else if (geom.type === "MultiPolygon") {
+                    geom.coordinates.forEach((poly) => poly.forEach((ring) => ring.forEach(visit)));
+                } else if (geom.type === "GeometryCollection") {
+                    geom.geometries.forEach(visitGeom);
+                }
+            };
+            for (const f of features) {
+                visitGeom(f.geometry);
+            }
+            if (initialized) {
+                this.map.fitBounds(bounds, { padding: 60, duration: 500 });
+            }
+        }
+    }
+
     private updateNavigationRouteLayer() {
         if (!this.map) return;
 
@@ -1482,9 +1561,13 @@ export default class TransitMap extends React.Component<MapProps, MapState> {
         return features;
     }
 
-    /** Cache: osm_id → chained coordinate array (LRU, max 100 entries) */
-    private routeGeometryCache = new Map<number, [number, number][]>();
-    private static readonly GEOMETRY_CACHE_MAX = 100;
+    /**
+     * Cache for server-computed segments, keyed by `osm_id|fromLat|fromLon|toLat|toLon`.
+     * The server-side endpoint is fast, but caching avoids re-fetches when the same
+     * leg is shown twice (e.g. on alt-itinerary switching).
+     */
+    private routeSegmentCache = new Map<string, { coords: [number, number][]; score: number }>();
+    private static readonly SEGMENT_CACHE_MAX = 200;
 
     /**
      * Fetch OSM route geometry from our API and extract the segment
@@ -1501,10 +1584,27 @@ export default class TransitMap extends React.Component<MapProps, MapState> {
         if (fromLat == null || fromLon == null || toLat == null || toLon == null) return null;
         if (!leg.routeShortName) return null;
 
-        // Map MOTIS mode to our route_type
+        // Map MOTIS mode to our route_type. The OSM `route` tag uses 6 values:
+        // tram, bus, train, light_rail, subway, ferry. MOTIS exposes more granular
+        // modes (HIGHSPEED_RAIL, COACH, METRO, etc.) — collapse them to the
+        // closest OSM equivalent so we can find the matching OSM relation.
         const modeToType: Record<string, string> = {
-            TRAM: "tram", BUS: "bus", RAIL: "train", REGIONAL_RAIL: "train",
-            SUBWAY: "subway", FERRY: "ferry",
+            TRAM: "tram",
+            BUS: "bus",
+            COACH: "bus",
+            RAIL: "train",
+            REGIONAL_RAIL: "train",
+            REGIONAL_FAST_RAIL: "train",
+            LONG_DISTANCE: "train",
+            HIGHSPEED_RAIL: "train",
+            NIGHT_RAIL: "train",
+            SUBURBAN_RAIL: "light_rail",
+            METRO: "subway",
+            SUBWAY: "subway",
+            MONORAIL: "subway",
+            FERRY: "ferry",
+            CABLE_CAR: "tram",
+            FUNICULAR: "tram",
         };
         const routeType = modeToType[leg.mode] ?? leg.mode.toLowerCase();
         const baseUrl = getApiClient().baseUrl;
@@ -1567,72 +1667,102 @@ export default class TransitMap extends React.Component<MapProps, MapState> {
             }
         }
 
+        // Step 3: Last-resort fallback — find ANY route of the same type whose
+        // geometry passes through both the from and to points. This handles
+        // cases where MOTIS uses a route ref we don't have in our DB (e.g.
+        // ICE 62 when we only have ICE 60), but the physical track is shared
+        // by other routes that ARE in our DB.
+        const typeOnlyCandidates = await searchRoutes({
+            route_type: routeType,
+            near_lat: midLat,
+            near_lon: midLon,
+            limit: 50,
+        });
+        if (typeOnlyCandidates.length > 0) {
+            const lastResort = await this.findBestGeometryMatch(
+                typeOnlyCandidates,
+                fromLat, fromLon, toLat, toLon,
+                signal,
+            );
+            // Use a more relaxed threshold for the type-only fallback —
+            // we accept any route that passes within 500m of both points.
+            if (lastResort && lastResort.score <= 1000) return lastResort.coords;
+        }
+
         return null;
     }
 
-    /** Try a list of route candidates and return the geometry segment that best covers from→to */
+    /**
+     * Try each route candidate by calling the server-side segment endpoint
+     * and return the segment with the lowest combined offset score.
+     *
+     * The server uses PostGIS ST_LineSubstring which is much faster and
+     * more accurate than fetching the full geometry and slicing client-side.
+     */
     private async findBestGeometryMatch(
         candidates: { osm_id: number }[],
         fromLat: number, fromLon: number, toLat: number, toLon: number,
         signal: AbortSignal,
     ): Promise<{ coords: [number, number][]; score: number } | null> {
-        // Fetch all uncached geometries in parallel
-        const uncached = candidates.filter(r => !this.routeGeometryCache.has(r.osm_id));
-        if (uncached.length > 0) {
-            const fetches = uncached.map(async (route) => {
-                try {
-                    const res = await fetch(
-                        `${getApiClient().baseUrl}/api/routes/${route.osm_id}/geometry`,
-                        { signal },
-                    );
-                    if (!res.ok) return;
-                    const data = await res.json();
-                    const segments: number[][][] = data.segments ?? [];
-                    const coords = segments.flatMap(
-                        seg => seg.map(([lon, lat]) => [lon, lat] as [number, number]),
-                    );
-                    if (this.routeGeometryCache.size >= TransitMap.GEOMETRY_CACHE_MAX) {
-                        const oldest = this.routeGeometryCache.keys().next().value;
-                        if (oldest !== undefined) this.routeGeometryCache.delete(oldest);
-                    }
-                    this.routeGeometryCache.set(route.osm_id, coords);
-                } catch { /* network error — skip */ }
-            });
-            await Promise.all(fetches);
-        }
+        // Fetch segments for all candidates in parallel
+        const segments = await Promise.all(
+            candidates.map((route) =>
+                this.fetchRouteSegment(route.osm_id, fromLat, fromLon, toLat, toLon, signal),
+            ),
+        );
         if (signal.aborted) return null;
 
-        let bestCoords: [number, number][] | null = null;
-        let bestScore = Infinity;
-
-        for (const route of candidates) {
-            const allCoords = this.routeGeometryCache.get(route.osm_id);
-            if (!allCoords || allCoords.length < 2) continue;
-
-            const startIdx = findClosestPointIndex(allCoords, fromLon, fromLat);
-            const endIdx = findClosestPointIndex(allCoords, toLon, toLat);
-            if (startIdx === endIdx) continue;
-
-            const startDist = haversineDistance(allCoords[startIdx][1], allCoords[startIdx][0], fromLat, fromLon);
-            const endDist = haversineDistance(allCoords[endIdx][1], allCoords[endIdx][0], toLat, toLon);
-            const score = startDist + endDist;
-            // Prefer routes where the geometry goes in the right direction
-            // (startIdx < endIdx = forward direction, no reversal needed).
-            // Reversed routes use the wrong track on parallel-track corridors.
-            const isForward = startIdx < endIdx;
-            const directionPenalty = isForward ? 0 : 50;
-            const adjustedScore = score + directionPenalty;
-
-            if (adjustedScore < bestScore) {
-                bestScore = adjustedScore;
-                bestCoords = isForward
-                    ? allCoords.slice(startIdx, endIdx + 1)
-                    : allCoords.slice(endIdx, startIdx + 1).reverse();
+        let best: { coords: [number, number][]; score: number } | null = null;
+        for (const segment of segments) {
+            if (!segment || segment.coords.length < 2) continue;
+            if (best === null || segment.score < best.score) {
+                best = segment;
             }
         }
+        return best;
+    }
 
-        if (!bestCoords) return null;
-        return { coords: bestCoords, score: bestScore };
+    /** Fetch a route segment from the server, with LRU caching. */
+    private async fetchRouteSegment(
+        osmId: number,
+        fromLat: number, fromLon: number,
+        toLat: number, toLon: number,
+        signal: AbortSignal,
+    ): Promise<{ coords: [number, number][]; score: number } | null> {
+        const cacheKey = `${osmId}|${fromLat.toFixed(6)},${fromLon.toFixed(6)}|${toLat.toFixed(6)},${toLon.toFixed(6)}`;
+        const cached = this.routeSegmentCache.get(cacheKey);
+        if (cached) return cached;
+
+        try {
+            const res = await fetch(`${getApiClient().baseUrl}/api/routes/segment`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    route_id: osmId,
+                    from_lat: fromLat,
+                    from_lon: fromLon,
+                    to_lat: toLat,
+                    to_lon: toLon,
+                }),
+                signal,
+            });
+            if (!res.ok) return null;
+            const data = await res.json();
+            const segment = data.segment as [number, number][] | undefined;
+            if (!segment || segment.length < 2) return null;
+            // Score = sum of offsets — lower is better
+            const score = (data.from_offset_meters ?? Infinity) + (data.to_offset_meters ?? Infinity);
+            const result = { coords: segment, score };
+
+            if (this.routeSegmentCache.size >= TransitMap.SEGMENT_CACHE_MAX) {
+                const oldest = this.routeSegmentCache.keys().next().value;
+                if (oldest !== undefined) this.routeSegmentCache.delete(oldest);
+            }
+            this.routeSegmentCache.set(cacheKey, result);
+            return result;
+        } catch {
+            return null;
+        }
     }
 
 
